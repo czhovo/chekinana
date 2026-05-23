@@ -1,0 +1,11 @@
+flask
+flask-cors
+pillow
+waitress
+numpy
+opencv-python-headless
+torch
+transformers
+scipy
+quadrilateral_fitter
+modelscope

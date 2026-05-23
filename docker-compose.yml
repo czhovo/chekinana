@@ -1,0 +1,12 @@
+services:
+  # ==========================================
+  # Cloudflare Tunnel — 连接到本机 8080 端口
+  #（Flask 后端直接用 conda 运行以获得 GPU 支持）
+  # ==========================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: chekinana-tunnel
+    command: tunnel --url http://host.docker.internal:8080 --no-autoupdate
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

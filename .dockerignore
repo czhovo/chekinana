@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.conda/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+docker-compose.override.yml
+
+# Environment
+.env.local
+.env.prod
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Certbot
+certbot/conf/
+certbot/www/
+
+# Git
+.git/
+.gitignore

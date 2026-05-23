@@ -1,0 +1,10 @@
+{
+    "allowed_ips": [
+        "0.0.0.0/0",
+        "::/0"
+    ],
+    "max_image_mb": 10,
+    "max_dimensions": 8192,
+    "rate_limit_per_minute": 10,
+    "task_result_ttl_seconds": 600
+}

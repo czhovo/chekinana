@@ -26,8 +26,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#   Usually these files are written by a python script from a template
+# Byte-compiled / optimized / DLL files
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
@@ -216,3 +215,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SAM3 model (6GB+)
+sam3_model/
+
+# Conda environment
+.conda/
+
+# Docker volumes
+certbot/
+nginx/logs/
+
