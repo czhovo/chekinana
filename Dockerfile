@@ -9,9 +9,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制后端代码
 COPY backend/ .
 
-# 复制前端
-COPY frontend/ /app/frontend/
-
 EXPOSE 8080
 
 # Healthcheck

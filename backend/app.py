@@ -4,7 +4,7 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac
 from datetime import datetime
 from collections import defaultdict
 
@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import cv2
 from PIL import Image, ImageOps
-from flask import Flask, request, send_file, jsonify, render_template_string
+from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from scipy.spatial import ConvexHull
 
@@ -29,6 +29,8 @@ MAX_DIMENSIONS = CONFIG.get("max_dimensions", 4096)
 MAX_IMAGE_PIXELS = MAX_DIMENSIONS * MAX_DIMENSIONS
 RATE_LIMIT = CONFIG.get("rate_limit_per_minute", 10)
 TASK_TTL = CONFIG.get("task_result_ttl_seconds", 600)
+ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or secrets.token_urlsafe(24)
+ACCESS_TOKEN_SOURCE = "env" if os.environ.get("CHEKINANA_ACCESS_TOKEN") else "generated"
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -137,6 +139,23 @@ def check_rate_limit(ip: str) -> bool:
         if len(rate_store[ip]) >= RATE_LIMIT: return False
         rate_store[ip].append(now)
         return True
+
+def get_request_token() -> str:
+    token = request.headers.get("X-Cheki-Token", "").strip()
+    if token:
+        return token
+    token = request.args.get("token", "").strip()
+    if token:
+        return token
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        token = str(data.get("token", "")).strip()
+        if token:
+            return token
+    return request.form.get("token", "").strip()
+
+def is_token_valid(token: str) -> bool:
+    return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
 
 # ===================================================================
 # 魔数校验
@@ -456,22 +475,26 @@ def access_control():
         return jsonify({"error": "拒绝访问"}), 403
     if request.path.startswith("/api/") and not check_rate_limit(ip):
         return jsonify({"error": "请求过于频繁"}), 429
-
-# ---- 静态文件 ----
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FP = os.path.join(BASE_DIR, "frontend", "index.html")
-if not os.path.exists(FP):
-    FP = os.path.join(BASE_DIR, "..", "frontend", "index.html")
-with open(FP, "r", encoding="utf-8") as f:
-    HTML = f.read()
+    if request.method == "OPTIONS":
+        return None
+    if request.path in ("/api/health", "/api/auth/verify"):
+        return None
+    if request.path.startswith("/api/") and not is_token_valid(get_request_token()):
+        return jsonify({"error": "Token 无效或已过期"}), 401
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return jsonify({"status": "ok", "service": "chekinana-api"})
 
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+
+@app.route("/api/auth/verify", methods=["POST"])
+def verify_token():
+    if not is_token_valid(get_request_token()):
+        return jsonify({"ok": False, "error": "Token 无效或已过期"}), 401
+    return jsonify({"ok": True, "status": "ok"})
 
 # ---- 提交任务 ----
 @app.route("/api/process", methods=["POST"])
@@ -591,6 +614,7 @@ if __name__ == "__main__":
         threads = int(os.environ.get("THREADS", "6"))
         print(f"🚀 http://{host}:{port} (threads={threads})", flush=True)
         print(f"📋 白名单: {ALLOWED_IPS}", flush=True)
+        print(f"🔐 访问 Token ({ACCESS_TOKEN_SOURCE}): {ACCESS_TOKEN}", flush=True)
         serve(app, host=host, port=port, threads=threads)
     except ImportError:
         app.run(host="0.0.0.0", port=8080, debug=False)

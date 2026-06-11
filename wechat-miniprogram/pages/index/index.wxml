@@ -1,0 +1,67 @@
+<view class="page">
+  <view class="input-section">
+    <view class="section-header">
+      <text class="section-title">输入照片</text>
+      <view class="header-actions">
+        <view class="rotate-button {{(!inputPath || processing) ? 'is-disabled' : ''}}" bindtap="rotateInputImage" aria-label="逆时针旋转">
+          <image class="rotate-icon" src="/assets/rotate-left.png" mode="aspectFit"></image>
+        </view>
+        <view class="wb-control">
+          <text>白平衡</text>
+          <switch checked="{{wbEnabled}}" bindchange="onWhiteBalanceChange" disabled="{{processing}}" color="#2563eb"></switch>
+        </view>
+      </view>
+    </view>
+
+    <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="chooseImage">
+      <image wx:if="{{inputPath}}" class="preview-image" src="{{inputPath}}" mode="aspectFit"></image>
+      <view wx:else class="placeholder">
+        <view class="placeholder-icon">+</view>
+        <view>选择一张包含拍立得的照片</view>
+      </view>
+    </view>
+
+    <view class="toolbar">
+      <button class="tool-button" bindtap="chooseImage" disabled="{{processing}}">选择图片</button>
+      <button class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
+        {{processing ? '处理中' : '开始提取'}}
+      </button>
+    </view>
+
+    <view class="status-bar {{statusKind}}">
+      <view class="status-dot"></view>
+      <text>{{statusText}}</text>
+    </view>
+  </view>
+
+  <view class="result-section">
+    <view class="section-header">
+      <text class="section-title">提取结果</text>
+      <text class="result-count">{{extractedImages.length}} 张</text>
+    </view>
+
+    <view wx:if="{{extractedImages.length}}" class="result-grid">
+      <view
+        wx:for="{{extractedImages}}"
+        wx:key="id"
+        class="result-card"
+        bindtap="saveResult"
+        data-index="{{index}}"
+      >
+        <image class="result-image" src="{{item.url}}" mode="aspectFit"></image>
+        <view class="result-caption">{{item.title}}</view>
+      </view>
+    </view>
+
+    <view wx:else class="empty-results">
+      <view>提取到的拍立得图片会显示在这里</view>
+      <view class="empty-subtitle">点击结果图片即可保存到相册</view>
+    </view>
+  </view>
+
+  <canvas
+    id="rotateCanvas"
+    type="2d"
+    class="hidden-canvas"
+  ></canvas>
+</view>

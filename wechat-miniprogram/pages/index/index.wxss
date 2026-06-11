@@ -1,0 +1,254 @@
+.page {
+  min-height: 100vh;
+  padding: 28rpx;
+  box-sizing: border-box;
+}
+
+.input-section,
+.result-section {
+  margin-bottom: 28rpx;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14rpx;
+}
+
+.section-title {
+  color: #202124;
+  font-size: 32rpx;
+  font-weight: 700;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 18rpx;
+}
+
+.rotate-button {
+  width: 56rpx;
+  height: 56rpx;
+  min-width: 56rpx;
+  max-width: 56rpx;
+  flex: 0 0 56rpx;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  box-sizing: border-box;
+}
+
+.rotate-icon {
+  width: 52rpx;
+  height: 52rpx;
+}
+
+.rotate-button.is-disabled {
+  opacity: 1;
+}
+
+.wb-control {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  color: #4b5563;
+  font-size: 26rpx;
+}
+
+.image-frame {
+  width: 100%;
+  height: 520rpx;
+  border: 2rpx dashed #d6d9df;
+  border-radius: 12rpx;
+  background: #ffffff;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-frame.has-image {
+  border-style: solid;
+  border-color: #e5e7eb;
+}
+
+.preview-image,
+.result-image {
+  width: 100%;
+  height: 100%;
+}
+
+.placeholder,
+.empty-results {
+  color: #8a9099;
+  font-size: 28rpx;
+  text-align: center;
+}
+
+.placeholder-icon {
+  width: 88rpx;
+  height: 88rpx;
+  margin: 0 auto 16rpx;
+  border-radius: 50%;
+  background: #eef4ff;
+  color: #2563eb;
+  font-size: 62rpx;
+  line-height: 82rpx;
+}
+
+.toolbar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20rpx;
+  margin: 22rpx 0 18rpx;
+}
+
+.tool-button {
+  height: 92rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: #1f2937;
+  border: 2rpx solid #d9dde5;
+  font-size: 30rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tool-button.primary {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.tool-button[disabled] {
+  color: #a5abb5;
+  background: #eef0f4;
+  border-color: #eef0f4;
+}
+
+.status-bar {
+  min-height: 76rpx;
+  padding: 0 24rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  border: 2rpx solid #e5e7eb;
+  color: #4b5563;
+  font-size: 26rpx;
+  display: flex;
+  align-items: center;
+  gap: 14rpx;
+  box-sizing: border-box;
+}
+
+.status-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+.status-bar.ready .status-dot {
+  background: #2563eb;
+}
+
+.status-bar.processing {
+  color: #92400e;
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.status-bar.processing .status-dot {
+  background: #f59e0b;
+}
+
+.status-bar.done {
+  color: #166534;
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.status-bar.done .status-dot {
+  background: #22c55e;
+}
+
+.status-bar.error {
+  color: #991b1b;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.status-bar.error .status-dot {
+  background: #ef4444;
+}
+
+.result-count {
+  color: #6b7280;
+  font-size: 26rpx;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18rpx;
+}
+
+.result-card {
+  min-width: 0;
+  background: #ffffff;
+  border: 2rpx solid #e5e7eb;
+  border-radius: 12rpx;
+  overflow: hidden;
+}
+
+.result-image {
+  height: 320rpx;
+  background: #f3f4f6;
+}
+
+.result-caption {
+  height: 64rpx;
+  padding: 0 16rpx;
+  color: #374151;
+  font-size: 24rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.empty-results {
+  min-height: 280rpx;
+  border: 2rpx dashed #d6d9df;
+  border-radius: 12rpx;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+}
+
+.empty-subtitle {
+  color: #b3b8c1;
+  font-size: 24rpx;
+}
+
+.hidden-canvas {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+  z-index: 0;
+}

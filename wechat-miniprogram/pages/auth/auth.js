@@ -1,0 +1,78 @@
+const { API_BASE_URL, AUTH_STORAGE_KEY } = require("../../utils/config");
+
+Page({
+  data: {
+    token: "",
+    hideToken: true,
+    verifying: false,
+    errorText: ""
+  },
+
+  onLoad() {
+    const token = wx.getStorageSync(AUTH_STORAGE_KEY) || "";
+    if (token) {
+      this.setData({ token });
+    }
+  },
+
+  onTokenInput(event) {
+    this.setData({
+      token: (event.detail.value || "").trim(),
+      errorText: ""
+    });
+  },
+
+  toggleHideToken() {
+    this.setData({
+      hideToken: !this.data.hideToken
+    });
+  },
+
+  verifyToken() {
+    const token = (this.data.token || "").trim();
+    if (!token || this.data.verifying) return;
+
+    if (!API_BASE_URL) {
+      this.setData({ errorText: "请先配置后端地址。" });
+      return;
+    }
+
+    this.setData({
+      verifying: true,
+      errorText: ""
+    });
+
+    wx.request({
+      url: `${API_BASE_URL}/api/auth/verify`,
+      method: "POST",
+      header: {
+        "content-type": "application/json",
+        "X-Cheki-Token": token
+      },
+      data: { token },
+      success: (res) => {
+        const ok = res.statusCode >= 200
+          && res.statusCode < 300
+          && res.data
+          && (res.data.ok === true || res.data.valid === true || res.data.status === "ok");
+
+        if (!ok) {
+          this.setData({
+            verifying: false,
+            errorText: (res.data && (res.data.error || res.data.message)) || "Token 验证失败。"
+          });
+          return;
+        }
+
+        wx.setStorageSync(AUTH_STORAGE_KEY, token);
+        wx.redirectTo({ url: "/pages/index/index" });
+      },
+      fail: () => {
+        this.setData({
+          verifying: false,
+          errorText: "无法连接服务器，请检查后端是否已启动。"
+        });
+      }
+    });
+  }
+});

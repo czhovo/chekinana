@@ -1,0 +1,36 @@
+<view class="auth-page">
+  <view class="auth-panel">
+    <view class="brand">Chekinana</view>
+    <view class="title">输入访问 Token</view>
+    <view class="subtitle">为了避免滥用，请向作者索要Token</view>
+
+    <input
+      class="token-input"
+      value="{{token}}"
+      password="{{hideToken}}"
+      placeholder="请输入 token"
+      confirm-type="done"
+      disabled="{{verifying}}"
+      bindinput="onTokenInput"
+      bindconfirm="verifyToken"
+    />
+
+    <view class="row">
+      <label class="hide-toggle">
+        <checkbox checked="{{hideToken}}" bindtap="toggleHideToken" color="#2563eb" />
+        <text>隐藏输入</text>
+      </label>
+    </view>
+
+    <button
+      class="verify-button"
+      loading="{{verifying}}"
+      disabled="{{!token || verifying}}"
+      bindtap="verifyToken"
+    >
+      {{verifying ? '验证中' : '进入小程序'}}
+    </button>
+
+    <view wx:if="{{errorText}}" class="error-text">{{errorText}}</view>
+  </view>
+</view>

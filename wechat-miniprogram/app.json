@@ -1,0 +1,19 @@
+{
+  "pages": [
+    "pages/auth/auth",
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "拍立得提取",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f6f7f9"
+  },
+  "networkTimeout": {
+    "request": 180000,
+    "uploadFile": 180000,
+    "downloadFile": 180000
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

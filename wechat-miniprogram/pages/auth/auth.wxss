@@ -1,0 +1,84 @@
+.auth-page {
+  min-height: 100vh;
+  padding: 48rpx 32rpx;
+  box-sizing: border-box;
+  background: #f6f7f9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-panel {
+  width: 100%;
+}
+
+.brand {
+  color: #2563eb;
+  font-size: 28rpx;
+  font-weight: 700;
+  margin-bottom: 18rpx;
+}
+
+.title {
+  color: #202124;
+  font-size: 44rpx;
+  font-weight: 800;
+  margin-bottom: 14rpx;
+}
+
+.subtitle {
+  color: #6b7280;
+  font-size: 26rpx;
+  line-height: 1.6;
+  margin-bottom: 40rpx;
+}
+
+.token-input {
+  width: 100%;
+  height: 96rpx;
+  padding: 0 24rpx;
+  box-sizing: border-box;
+  border: 2rpx solid #d9dde5;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: #111827;
+  font-size: 30rpx;
+}
+
+.row {
+  height: 72rpx;
+  display: flex;
+  align-items: center;
+}
+
+.hide-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  color: #4b5563;
+  font-size: 26rpx;
+}
+
+.verify-button {
+  height: 96rpx;
+  border-radius: 12rpx;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 30rpx;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.verify-button[disabled] {
+  color: #a5abb5;
+  background: #eef0f4;
+}
+
+.error-text {
+  margin-top: 22rpx;
+  color: #991b1b;
+  font-size: 26rpx;
+  line-height: 1.5;
+}

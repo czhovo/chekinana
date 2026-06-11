@@ -1,0 +1,8 @@
+{
+  "podId": "f8inzam03uy2c4",
+  "podName": "chekinana",
+  "networkVolumeId": "jg5p3opv6h",
+  "httpPort": 8080,
+  "autoDiscover": true,
+  "wechatConfigPath": "../../wechat-miniprogram/utils/config.js"
+}
