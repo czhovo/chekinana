@@ -182,6 +182,7 @@ queue_lock = threading.Lock()
 queue_event = threading.Event()
 
 POLAROID_W, POLAROID_H = 800, 1272
+IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.int32)
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
 
@@ -193,6 +194,60 @@ def img_to_png_bytes(img_np: np.ndarray) -> bytes:
     else:
         ok, buf = cv2.imencode(".png", img_np)
     return buf.tobytes() if ok else b""
+
+
+def parse_bool(value, default=False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dict]:
+    """White-balance a rectified 800x1272 polaroid using its fixed border area."""
+    h, w = image.shape[:2]
+    border_mask = np.ones((h, w), dtype=np.uint8)
+    cv2.fillPoly(border_mask, [IMAGE_AREA_VERTICES], 0)
+    border_mask = border_mask.astype(bool)
+
+    is_bright = np.all(image > 170, axis=2)
+    is_neutral = np.std(image.astype(np.float32), axis=2) < 25
+    is_white = is_bright & is_neutral & border_mask
+
+    blocks = []
+    block_size = 32
+    step = 16
+    for y in range(0, h - block_size, step):
+        for x in range(0, w - block_size, step):
+            block = is_white[y:y+block_size, x:x+block_size]
+            if np.sum(block) / (block_size * block_size) > 0.8:
+                pixels = image[y:y+block_size, x:x+block_size][block]
+                blocks.append({
+                    "mean": pixels.mean(axis=0),
+                    "var": pixels.var(axis=0).mean(),
+                })
+
+    if not blocks:
+        return image, {"applied": False, "reason": "no_white_reference_blocks"}
+
+    blocks.sort(key=lambda b: b["var"])
+    best = blocks[:10]
+    ref_white = np.mean([b["mean"] for b in best], axis=0)
+    target = 240.0
+    gains = np.array([
+        target / max(ref_white[0], 1),
+        target / max(ref_white[1], 1),
+        target / max(ref_white[2], 1),
+    ])
+    balanced = np.clip(image.astype(np.float32) * gains, 0, 255).astype(np.uint8)
+    return balanced, {
+        "applied": True,
+        "blocks": len(blocks),
+        "used_blocks": len(best),
+        "ref_white": [round(float(v), 2) for v in ref_white],
+        "gains": [round(float(v), 4) for v in gains],
+    }
 
 
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
@@ -212,6 +267,8 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
 def do_process_extraction(raw_data: bytes, task_id: str):
     """主处理流程：SAM3 检测 → 四边形标注 → 逐个提取"""
     model, processor, device = get_sam3()
+    with task_lock:
+        white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
 
     # --- 步骤 0: 加载图片 ---
     with task_lock:
@@ -307,6 +364,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
                         [0,POLAROID_H]], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src, dst)
         rectified = cv2.warpPerspective(img_np, M, (POLAROID_W, POLAROID_H))
+        if white_balance_enabled:
+            rectified, wb_info = apply_fixed_border_white_balance(rectified)
+            if wb_info["applied"]:
+                print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
+            else:
+                print(f"   ⚠ 白平衡 #{pidx+1}: {wb_info['reason']}", flush=True)
         add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
                          f"拍立得 #{pidx+1}")
         print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
@@ -426,13 +489,14 @@ def submit_task():
     if not ok:
         return jsonify({"error": err}), 400
 
+    white_balance = parse_bool(request.form.get("wb"), default=True)
     tid = uuid.uuid4().hex
     now = time.time()
     with task_lock:
         task_store[tid] = {
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
-            "results": [],
+            "results": [], "white_balance": white_balance,
         }
         # 清理过期
         for k in list(task_store.keys()):
@@ -443,8 +507,8 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)})", flush=True)
-    return jsonify({"task_id": tid, "status": "queued"})
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance})", flush=True)
+    return jsonify({"task_id": tid, "status": "queued", "white_balance": white_balance})
 
 # ---- 查询状态（含中间结果列表） ----
 @app.route("/api/status/<task_id>")
