@@ -460,6 +460,15 @@ def worker_loop():
 app = Flask(__name__)
 CORS(app)
 
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": f"图片过大(>{CONFIG['max_image_mb']}MB)"}), 413
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    print(f"💥 request failed: {type(error).__name__}: {error}", flush=True)
+    return jsonify({"error": f"服务器错误: {type(error).__name__}"}), 500
+
 @app.after_request
 def security_headers(response):
     for k, v in {

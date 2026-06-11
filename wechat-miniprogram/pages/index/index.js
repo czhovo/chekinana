@@ -207,8 +207,12 @@ Page({
       },
       success: (res) => {
         const payload = this.parseResponse(res.data);
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          this.finishWithError(this.getResponseErrorMessage(res, payload, "Upload failed"));
+          return;
+        }
         if (!payload) {
-          this.finishWithError("服务器未启用，请联系作者");
+          this.finishWithError(this.getResponseErrorMessage(res, payload, "Unexpected upload response"));
           return;
         }
         this.handleProcessPayload(payload);
@@ -232,6 +236,19 @@ Page({
       return `上传失败：${errMsg}`;
     }
     return "上传失败，请检查网络或域名配置";
+  },
+
+  getResponseErrorMessage(res, payload, fallback) {
+    if (payload && (payload.error || payload.message)) {
+      return payload.error || payload.message;
+    }
+    const statusCode = res && res.statusCode ? res.statusCode : 0;
+    const raw = res && typeof res.data === "string" ? res.data.trim() : "";
+    const snippet = raw ? raw.replace(/\s+/g, " ").slice(0, 80) : "";
+    if (statusCode) {
+      return snippet ? `${fallback}(${statusCode}): ${snippet}` : `${fallback}(${statusCode})`;
+    }
+    return snippet ? `${fallback}: ${snippet}` : fallback;
   },
 
   parseResponse(raw) {
@@ -285,8 +302,12 @@ Page({
         header: this.getAuthHeader(),
         success: (res) => {
           const payload = res.data;
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            this.finishWithError(this.getResponseErrorMessage(res, payload, "Status failed"));
+            return;
+          }
           if (!payload || typeof payload !== "object") {
-            this.finishWithError("服务器未启用，请联系作者");
+            this.finishWithError(this.getResponseErrorMessage(res, payload, "Unexpected status response"));
             return;
           }
           const status = payload.status || payload.state;
