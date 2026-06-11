@@ -1,7 +1,8 @@
-const { API_BASE_URL, AUTH_STORAGE_KEY } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, getApiBaseUrl, setApiBaseUrl } = require("../../utils/config");
 
 Page({
   data: {
+    apiBaseUrl: "",
     token: "",
     hideToken: true,
     verifying: false,
@@ -10,9 +11,17 @@ Page({
 
   onLoad() {
     const token = wx.getStorageSync(AUTH_STORAGE_KEY) || "";
-    if (token) {
-      this.setData({ token });
-    }
+    this.setData({
+      apiBaseUrl: getApiBaseUrl(),
+      token
+    });
+  },
+
+  onApiBaseUrlInput(event) {
+    this.setData({
+      apiBaseUrl: (event.detail.value || "").trim(),
+      errorText: ""
+    });
   },
 
   onTokenInput(event) {
@@ -30,9 +39,10 @@ Page({
 
   verifyToken() {
     const token = (this.data.token || "").trim();
+    const apiBaseUrl = (this.data.apiBaseUrl || "").trim().replace(/\/+$/, "");
     if (!token || this.data.verifying) return;
 
-    if (!API_BASE_URL) {
+    if (!apiBaseUrl) {
       this.setData({ errorText: "请先配置后端地址。" });
       return;
     }
@@ -43,7 +53,7 @@ Page({
     });
 
     wx.request({
-      url: `${API_BASE_URL}/api/auth/verify`,
+      url: `${apiBaseUrl}/api/auth/verify`,
       method: "POST",
       header: {
         "content-type": "application/json",
@@ -64,6 +74,7 @@ Page({
           return;
         }
 
+        setApiBaseUrl(apiBaseUrl);
         wx.setStorageSync(AUTH_STORAGE_KEY, token);
         wx.redirectTo({ url: "/pages/index/index" });
       },

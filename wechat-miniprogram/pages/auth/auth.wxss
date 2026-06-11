@@ -33,6 +33,7 @@
   margin-bottom: 40rpx;
 }
 
+.url-input,
 .token-input {
   width: 100%;
   height: 96rpx;
@@ -43,6 +44,10 @@
   background: #ffffff;
   color: #111827;
   font-size: 30rpx;
+}
+
+.url-input {
+  margin-bottom: 18rpx;
 }
 
 .row {

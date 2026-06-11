@@ -1,4 +1,4 @@
-const { API_BASE_URL, AUTH_STORAGE_KEY } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, getApiBaseUrl } = require("../../utils/config");
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_COUNT = 90;
 const MAX_ROTATE_CANVAS_SIDE = 1600;
@@ -28,6 +28,10 @@ Page({
 
   getAuthToken() {
     return wx.getStorageSync(AUTH_STORAGE_KEY) || "";
+  },
+
+  getApiBaseUrl() {
+    return getApiBaseUrl();
   },
 
   getAuthHeader() {
@@ -173,7 +177,8 @@ Page({
       return;
     }
 
-    if (!API_BASE_URL) {
+    const apiBaseUrl = this.getApiBaseUrl();
+    if (!apiBaseUrl) {
       wx.showModal({
         title: "需要配置接口",
         content: "请先在 pages/index/index.js 中配置 API_BASE_URL。",
@@ -192,7 +197,7 @@ Page({
     });
 
     wx.uploadFile({
-      url: `${API_BASE_URL}/api/process`,
+      url: `${apiBaseUrl}/api/process`,
       filePath: this.data.inputPath,
       name: "image",
       header: this.getAuthHeader(),
@@ -275,7 +280,7 @@ Page({
       }
 
       wx.request({
-        url: `${API_BASE_URL}/api/status/${taskId}`,
+        url: `${this.getApiBaseUrl()}/api/status/${taskId}`,
         method: "GET",
         header: this.getAuthHeader(),
         success: (res) => {
@@ -347,9 +352,9 @@ Page({
       return this.withAuthQuery(url);
     }
     if (url.startsWith("/")) {
-      return this.withAuthQuery(`${API_BASE_URL}${url}`);
+      return this.withAuthQuery(`${this.getApiBaseUrl()}${url}`);
     }
-    return this.withAuthQuery(`${API_BASE_URL}/${url}`);
+    return this.withAuthQuery(`${this.getApiBaseUrl()}/${url}`);
   },
 
   withAuthQuery(url) {

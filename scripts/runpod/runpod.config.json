@@ -1,6 +1,6 @@
 {
   "podId": "f8inzam03uy2c4",
-  "podName": "chekinana",
+  "podName": "chekinana-migration",
   "networkVolumeId": "jg5p3opv6h",
   "httpPort": 8080,
   "autoDiscover": true,
