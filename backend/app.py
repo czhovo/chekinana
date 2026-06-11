@@ -29,8 +29,14 @@ MAX_DIMENSIONS = CONFIG.get("max_dimensions", 4096)
 MAX_IMAGE_PIXELS = MAX_DIMENSIONS * MAX_DIMENSIONS
 RATE_LIMIT = CONFIG.get("rate_limit_per_minute", 10)
 TASK_TTL = CONFIG.get("task_result_ttl_seconds", 600)
-ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or secrets.token_urlsafe(24)
-ACCESS_TOKEN_SOURCE = "env" if os.environ.get("CHEKINANA_ACCESS_TOKEN") else "generated"
+RUNPOD_POD_ID = os.environ.get("RUNPOD_POD_ID", "").strip()
+ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or RUNPOD_POD_ID or secrets.token_urlsafe(24)
+if os.environ.get("CHEKINANA_ACCESS_TOKEN"):
+    ACCESS_TOKEN_SOURCE = "env"
+elif RUNPOD_POD_ID:
+    ACCESS_TOKEN_SOURCE = "runpod_pod_id"
+else:
+    ACCESS_TOKEN_SOURCE = "generated"
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -488,7 +494,12 @@ def index():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+    return jsonify({
+        "status": "ok",
+        "time": datetime.now().isoformat(),
+        "pod_id": RUNPOD_POD_ID,
+        "token_source": ACCESS_TOKEN_SOURCE,
+    })
 
 @app.route("/api/auth/verify", methods=["POST"])
 def verify_token():

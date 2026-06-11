@@ -5,15 +5,15 @@ These scripts manage the `chekinana` backend Pod.
 Defaults:
 
 - Pod ID: stored in `scripts/runpod/runpod.config.json`
-- Pod name: `chekinana`
+- Pod name: `chekinana-migration`
 - HTTP port: `8080`
 - Network volume ID: `jg5p3opv6h`
 - App path inside the Pod: `/workspace/chekinana`
 
 The Pod ID and proxy URL can change after RunPod migration. The PowerShell
 scripts auto-discover the current Pod from the configured `podName` or
-`networkVolumeId`, update `runpod.config.json`, and rewrite
-`wechat-miniprogram/utils/config.js` with the current proxy URL.
+`networkVolumeId` and update `runpod.config.json`. The mini program now derives
+the proxy URL from the Token field, so it does not need a committed Pod URL.
 
 ## One-time Pod setup
 
@@ -23,12 +23,16 @@ On RunPod, set the Pod start command to:
 bash /workspace/chekinana/scripts/start-backend.sh
 ```
 
-The backend prints the access token in its startup logs. To keep the same token
-after restarts, set this environment variable on the Pod:
+RunPod provides `RUNPOD_POD_ID` inside the Pod. The backend uses that Pod ID as
+the access Token by default, and the mini program uses the entered Token as the
+Pod ID to connect to:
 
-```bash
-CHEKINANA_ACCESS_TOKEN=your_token
+```text
+https://<token>-8080.proxy.runpod.net
 ```
+
+Only set `CHEKINANA_ACCESS_TOKEN` if you intentionally want to override the
+Pod-ID token behavior.
 
 If the Python environment does not exist yet, run once inside the Pod:
 
@@ -44,7 +48,6 @@ Set your RunPod API key in the current PowerShell session:
 
 ```powershell
 $env:RUNPOD_API_KEY="your_runpod_api_key"
-$env:CHEKINANA_ACCESS_TOKEN="your_backend_token"
 ```
 
 Start the Pod and wait until `/api/health` returns `ok`:

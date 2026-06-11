@@ -14,9 +14,19 @@ $ErrorActionPreference = "Stop"
 
 . "$PSScriptRoot\RunPodConfig.ps1"
 
+$target = $null
 if (-not $BaseUrl) {
     $target = Resolve-RunPodTarget -ConfigPath $ConfigPath -PodId $PodId -Refresh
     $BaseUrl = $target.BaseUrl
+    if (-not $PodId) {
+        $PodId = $target.PodId
+    }
+} elseif (-not $PodId -and $BaseUrl -match "https?://([a-z0-9]+)-\d+\.proxy\.runpod\.net") {
+    $PodId = $Matches[1]
+}
+
+if (-not $AuthToken -and $PodId) {
+    $AuthToken = $PodId
 }
 
 if (-not (Test-Path -LiteralPath $ImagePath)) {
@@ -24,7 +34,7 @@ if (-not (Test-Path -LiteralPath $ImagePath)) {
 }
 
 if (-not $AuthToken) {
-    throw "Auth token is required. Pass -AuthToken or set CHEKINANA_ACCESS_TOKEN."
+    throw "Auth token is required. Pass -AuthToken, pass -PodId, use a RunPod proxy -BaseUrl, or set CHEKINANA_ACCESS_TOKEN."
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null

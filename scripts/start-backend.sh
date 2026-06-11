@@ -43,8 +43,12 @@ cd "$BACKEND_DIR"
 export HOST="$HOST"
 export PORT="$PORT"
 export THREADS="$THREADS"
+if [ -z "${CHEKINANA_ACCESS_TOKEN:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
+  export CHEKINANA_ACCESS_TOKEN="$RUNPOD_POD_ID"
+fi
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=utf-8
 
 echo "[chekinana] starting backend on ${HOST}:${PORT}"
+echo "[chekinana] pod id token: ${CHEKINANA_ACCESS_TOKEN:-generated-by-app}"
 exec "$PYTHON_BIN" -u app.py

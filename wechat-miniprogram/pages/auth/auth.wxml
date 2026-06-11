@@ -5,15 +5,6 @@
     <view class="subtitle">为了避免滥用，请向作者索要Token</view>
 
     <input
-      class="url-input"
-      value="{{apiBaseUrl}}"
-      placeholder="https://pod-id-8080.proxy.runpod.net"
-      confirm-type="next"
-      disabled="{{verifying}}"
-      bindinput="onApiBaseUrlInput"
-    />
-
-    <input
       class="token-input"
       value="{{token}}"
       password="{{hideToken}}"
@@ -34,7 +25,7 @@
     <button
       class="verify-button"
       loading="{{verifying}}"
-      disabled="{{!apiBaseUrl || !token || verifying}}"
+      disabled="{{!token || verifying}}"
       bindtap="verifyToken"
     >
       {{verifying ? '验证中' : '进入小程序'}}

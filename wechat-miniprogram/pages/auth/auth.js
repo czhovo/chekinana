@@ -1,8 +1,7 @@
-const { AUTH_STORAGE_KEY, getApiBaseUrl, setApiBaseUrl } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, getApiBaseUrl, normalizePodId } = require("../../utils/config");
 
 Page({
   data: {
-    apiBaseUrl: "",
     token: "",
     hideToken: true,
     verifying: false,
@@ -11,17 +10,9 @@ Page({
 
   onLoad() {
     const token = wx.getStorageSync(AUTH_STORAGE_KEY) || "";
-    this.setData({
-      apiBaseUrl: getApiBaseUrl(),
-      token
-    });
-  },
-
-  onApiBaseUrlInput(event) {
-    this.setData({
-      apiBaseUrl: (event.detail.value || "").trim(),
-      errorText: ""
-    });
+    if (token) {
+      this.setData({ token });
+    }
   },
 
   onTokenInput(event) {
@@ -38,8 +29,8 @@ Page({
   },
 
   verifyToken() {
-    const token = (this.data.token || "").trim();
-    const apiBaseUrl = (this.data.apiBaseUrl || "").trim().replace(/\/+$/, "");
+    const token = normalizePodId(this.data.token);
+    const apiBaseUrl = getApiBaseUrl(token);
     if (!token || this.data.verifying) return;
 
     if (!apiBaseUrl) {
@@ -74,7 +65,6 @@ Page({
           return;
         }
 
-        setApiBaseUrl(apiBaseUrl);
         wx.setStorageSync(AUTH_STORAGE_KEY, token);
         wx.redirectTo({ url: "/pages/index/index" });
       },
