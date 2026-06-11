@@ -5,7 +5,7 @@ waitress
 numpy
 opencv-python-headless
 torch
-transformers
+transformers==5.8.1
 scipy
 quadrilateral_fitter
 modelscope
