@@ -263,6 +263,11 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         except Exception:
             continue
         all_vertices.append(verts)
+
+    # Sort detected polaroids from left to right for stable labels and downloads.
+    all_vertices.sort(key=lambda verts: float(verts[:, 0].mean()))
+
+    for midx, verts in enumerate(all_vertices):
         color = COLORS[midx % len(COLORS)]
         # 半透明填充
         cv2.fillPoly(overlay, [verts.astype(np.int32)], color)
