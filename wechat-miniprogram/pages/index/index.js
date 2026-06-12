@@ -306,7 +306,7 @@ Page({
   getResponseErrorMessage(res, payload, fallback) {
     const statusCode = res && res.statusCode ? res.statusCode : 0;
     if (statusCode === 404 && fallback === "Upload failed") {
-      return "服务器已关闭";
+      return "Upload failed(404) 可能是服务器已关闭 请联系作者";
     }
     if (payload && (payload.error || payload.message)) {
       return payload.error || payload.message;
@@ -385,21 +385,7 @@ Page({
             || payload.done_marker === true
             || payload.complete === true;
 
-          if (status === "done" || status === "finished" || status === "success") {
-            if ((!extractionComplete || expectedCount <= 0 || images.length < expectedCount) && this.pollCount <= MAX_POLL_COUNT) {
-              this.setData({
-                statusText: expectedCount > 0
-                  ? `检测到 ${expectedCount} 张拍立得，正在提取 ${images.length}/${expectedCount}`
-                  : "图片处理中...",
-                statusKind: "processing"
-              });
-              this.pollTask(taskId);
-              return;
-            }
-            if (!extractionComplete) {
-              this.finishWithError("处理结束标记缺失");
-              return;
-            }
+          if (extractionComplete) {
             if (expectedCount > 0 && images.length !== expectedCount) {
               this.finishWithError(`结果数量不一致：${images.length}/${expectedCount}`);
               return;
@@ -409,6 +395,11 @@ Page({
             } else {
               this.finishWithError("处理结束，但未提取到拍立得");
             }
+            return;
+          }
+
+          if (status === "done" || status === "finished" || status === "success") {
+            this.finishWithError("处理结束标记缺失");
             return;
           }
 
