@@ -313,7 +313,7 @@ Page({
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
 
-          if (images.length > 0 || status === "done" || status === "finished" || status === "success") {
+          if (status === "done" || status === "finished" || status === "success") {
             if (images.length > 0) {
               this.finishWithImages(images);
             } else {
@@ -328,7 +328,9 @@ Page({
           }
 
           this.setData({
-            statusText: `图片处理中... ${this.pollCount * 2}s`,
+            statusText: images.length > 0
+              ? `处理中... 已提取 ${images.length} 张，继续处理`
+              : `图片处理中... ${this.pollCount * 2}s`,
             statusKind: "processing"
           });
           this.pollTask(taskId);

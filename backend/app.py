@@ -4,7 +4,7 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket
 from datetime import datetime
 from collections import defaultdict
 
@@ -69,6 +69,21 @@ def get_sam3():
         _sam3_processor = Sam3Processor.from_pretrained(model_dir_local)
         print(f"✅ SAM3 就绪 (设备: {_device})", flush=True)
         return _sam3_model, _sam3_processor, _device
+
+def preload_sam3_after_listen(port: int):
+    connect_host = "127.0.0.1"
+    while True:
+        try:
+            with socket.create_connection((connect_host, port), timeout=1):
+                break
+        except OSError:
+            time.sleep(0.5)
+
+    print("📦 端口已监听，开始预加载 SAM3 模型...", flush=True)
+    try:
+        get_sam3()
+    except Exception as e:
+        print(f"💥 SAM3 预加载失败: {type(e).__name__}: {e}", flush=True)
 
 # ===================================================================
 # 四边形拟合工具
@@ -623,8 +638,6 @@ if __name__ == "__main__":
         threading.Thread(target=worker_loop, daemon=True).start()
         _worker_started = True
 
-    # 启动时预加载 SAM3 模型（避免首次请求等待）
-    print("📦 预加载 SAM3 模型...", flush=True)
     try:
         from waitress import serve
         host = os.environ.get("HOST", "0.0.0.0")
@@ -633,6 +646,9 @@ if __name__ == "__main__":
         print(f"🚀 http://{host}:{port} (threads={threads})", flush=True)
         print(f"📋 白名单: {ALLOWED_IPS}", flush=True)
         print(f"🔐 访问 Token ({ACCESS_TOKEN_SOURCE}): {ACCESS_TOKEN}", flush=True)
+        threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
         serve(app, host=host, port=port, threads=threads)
     except ImportError:
-        app.run(host="0.0.0.0", port=8080, debug=False)
+        port = int(os.environ.get("PORT", "8080"))
+        threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
+        app.run(host="0.0.0.0", port=port, debug=False)
