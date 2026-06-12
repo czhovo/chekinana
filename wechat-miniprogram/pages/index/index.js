@@ -295,7 +295,7 @@ Page({
       return `上传域名未配置到微信合法域名：${errMsg}`;
     }
     if (errMsg.includes("timeout")) {
-      return "上传超时，请稍后重试";
+      return "处理时间过长 请稍后重试";
     }
     if (errMsg.includes("fail")) {
       return `上传失败：${errMsg}`;
@@ -307,6 +307,9 @@ Page({
     const statusCode = res && res.statusCode ? res.statusCode : 0;
     if (statusCode === 404 && fallback === "Upload failed") {
       return "Upload failed(404) 可能是服务器已关闭 请联系作者";
+    }
+    if (statusCode === 502 && fallback === "Upload failed") {
+      return "Upload failed(502) 后端服务暂时不可用 请联系作者";
     }
     if (payload && (payload.error || payload.message)) {
       return payload.error || payload.message;
@@ -360,7 +363,7 @@ Page({
     this.pollTimer = setTimeout(() => {
       this.pollCount += 1;
       if (this.pollCount > MAX_POLL_COUNT) {
-        this.finishWithError("处理超时，请稍后重试");
+        this.finishWithError("处理时间过长 请稍后重试");
         return;
       }
 
@@ -380,6 +383,7 @@ Page({
           }
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
+          this.updatePartialImages(images);
           const expectedCount = Number(payload.expected_polaroids || payload.total_polaroids || 0);
           const extractionComplete = payload.extraction_complete === true
             || payload.done_marker === true
@@ -399,7 +403,11 @@ Page({
           }
 
           if (status === "done" || status === "finished" || status === "success") {
-            this.finishWithError("处理结束标记缺失");
+            if (images.length > 0) {
+              this.finishWithImages(images);
+            } else {
+              this.finishWithError("处理结束，但未提取到拍立得");
+            }
             return;
           }
 
@@ -409,9 +417,7 @@ Page({
           }
 
           this.setData({
-            statusText: expectedCount > 0
-              ? `检测到 ${expectedCount} 张拍立得，正在提取`
-              : "图片处理中...",
+            statusText: this.getProcessingStatusText(images.length, expectedCount),
             statusKind: "processing"
           });
           this.pollTask(taskId);
@@ -426,8 +432,9 @@ Page({
 
   normalizeImages(payload, taskId) {
     const list = payload.images || payload.results || payload.outputs || payload.files || [];
+    const hasTypedResults = list.some((item) => item && typeof item === "object" && item.type);
     const typedPolaroids = list.filter((item) => item && typeof item === "object" && item.type === "polaroid");
-    const sourceList = typedPolaroids.length > 0 ? typedPolaroids : list;
+    const sourceList = hasTypedResults ? typedPolaroids : list;
 
     return sourceList
       .map((item, index) => {
@@ -442,12 +449,57 @@ Page({
         const url = this.resolveUrl(rawUrl);
         if (!url) return null;
         return {
-          id: typeof item === "object" ? item.id || item.name || `p${index + 1}` : `p${index + 1}`,
+          id: typeof item === "object" && Object.prototype.hasOwnProperty.call(item, "id")
+            ? item.id
+            : typeof item === "object" && item.name
+              ? item.name
+              : `p${index + 1}`,
           url,
           title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`
         };
       })
       .filter(Boolean);
+  },
+
+  updatePartialImages(images) {
+    if (!images.length) return;
+
+    const merged = this.mergeImages(this.data.extractedImages, images);
+    if (merged.length !== this.data.extractedImages.length) {
+      this.setData({ extractedImages: merged });
+    }
+  },
+
+  mergeImages(currentImages, nextImages) {
+    const imageMap = {};
+    const merged = [];
+
+    currentImages.concat(nextImages).forEach((image) => {
+      if (!image || !image.url) return;
+      const key = String(image.id || image.url);
+      if (imageMap[key]) {
+        Object.assign(imageMap[key], image);
+        return;
+      }
+      const copy = Object.assign({}, image);
+      imageMap[key] = copy;
+      merged.push(copy);
+    });
+
+    return merged;
+  },
+
+  getProcessingStatusText(doneCount, expectedCount) {
+    if (expectedCount > 0 && doneCount > 0) {
+      return `已提取 ${doneCount}/${expectedCount} 张，继续处理`;
+    }
+    if (doneCount > 0) {
+      return `已提取 ${doneCount} 张，继续处理`;
+    }
+    if (expectedCount > 0) {
+      return `检测到 ${expectedCount} 张拍立得，正在提取`;
+    }
+    return "图片处理中...";
   },
 
   resolveUrl(url) {
