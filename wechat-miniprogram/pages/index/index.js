@@ -323,6 +323,10 @@ Page({
               this.pollTask(taskId);
               return;
             }
+            if (expectedCount > 0 && images.length < expectedCount) {
+              this.finishWithError(`结果同步不完整：${images.length}/${expectedCount}`);
+              return;
+            }
             if (images.length > 0) {
               this.finishWithImages(images);
             } else {
@@ -353,7 +357,7 @@ Page({
   },
 
   normalizeImages(payload, taskId) {
-    const list = payload.images || payload.results || payload.outputs || payload.files || [];
+    const list = payload.polaroids || payload.images || payload.results || payload.outputs || payload.files || [];
     const typedPolaroids = list.filter((item) => item && typeof item === "object" && item.type === "polaroid");
     const sourceList = typedPolaroids.length > 0 ? typedPolaroids : list;
 

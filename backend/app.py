@@ -582,6 +582,7 @@ def task_status(task_id):
             {"id": r["id"], "type": r["type"], "label": r["label"]}
             for r in t.get("results", [])
         ]
+        polaroids_meta = [r for r in results_meta if r["type"] == "polaroid"]
         total_polaroids = t.get("total_polaroids", 0)
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
@@ -599,6 +600,8 @@ def task_status(task_id):
         "queue_position": pos,
         "results_count": len(results_meta),
         "results": results_meta,
+        "polaroids_count": len(polaroids_meta),
+        "polaroids": polaroids_meta,
         "total_polaroids": total_polaroids,
         "expected_polaroids": total_polaroids,
         "elapsed": elapsed,
