@@ -221,8 +221,10 @@ task_queue: list[str] = []
 queue_lock = threading.Lock()
 queue_event = threading.Event()
 
-POLAROID_W, POLAROID_H = 800, 1272
-IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.int32)
+BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
+POLAROID_W, POLAROID_H = 1600, 2544
+BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32)
+IMAGE_AREA_VERTICES = np.rint(BASE_IMAGE_AREA_VERTICES * [POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H]).astype(np.int32)
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
 
