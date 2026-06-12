@@ -216,6 +216,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Cloudflare Wrangler local state
+.wrangler/
+
 # SAM3 model (6GB+)
 sam3_model/
 

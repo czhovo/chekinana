@@ -3,5 +3,5 @@ main = "src/worker.js"
 compatibility_date = "2026-06-12"
 
 routes = [
-  { pattern = "api.chekinana.top", custom_domain = true }
+  { pattern = "api.chekinana.top/*", zone_name = "chekinana.top" }
 ]
