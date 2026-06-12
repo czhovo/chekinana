@@ -15,15 +15,19 @@ Page({
 
   pollTimer: null,
   pollCount: 0,
+  verifyingCachedToken: false,
 
   onUnload() {
     this.clearPollTimer();
   },
 
   onShow() {
-    if (!this.getAuthToken()) {
+    const token = this.getAuthToken();
+    if (!token) {
       wx.redirectTo({ url: "/pages/auth/auth" });
+      return;
     }
+    this.verifyCachedToken(token);
   },
 
   getAuthToken() {
@@ -37,6 +41,67 @@ Page({
   getAuthHeader() {
     const token = this.getAuthToken();
     return token ? { "X-Cheki-Token": token } : {};
+  },
+
+  verifyCachedToken(token) {
+    if (this.verifyingCachedToken) return;
+
+    const apiBaseUrl = this.getApiBaseUrl();
+    if (!apiBaseUrl) {
+      this.clearAuthAndRedirect();
+      return;
+    }
+
+    this.verifyingCachedToken = true;
+    this.setData({
+      processing: true,
+      statusText: "正在验证 Token...",
+      statusKind: "processing"
+    });
+    wx.request({
+      url: `${apiBaseUrl}/api/auth/verify`,
+      method: "POST",
+      header: {
+        "content-type": "application/json",
+        "X-Cheki-Token": token
+      },
+      data: { token },
+      success: (res) => {
+        this.verifyingCachedToken = false;
+        const ok = res.statusCode >= 200
+          && res.statusCode < 300
+          && res.data
+          && (res.data.ok === true || res.data.valid === true || res.data.status === "ok");
+
+        if (!ok) {
+          this.clearAuthAndRedirect();
+          return;
+        }
+
+        this.setData({
+          processing: false,
+          statusText: this.data.inputPath ? "图片已选择，点击开始提取" : "请选择一张包含拍立得的照片",
+          statusKind: this.data.inputPath ? "ready" : "idle"
+        });
+      },
+      fail: () => {
+        this.verifyingCachedToken = false;
+        this.clearAuthAndRedirect();
+      }
+    });
+  },
+
+  clearAuthAndRedirect() {
+    wx.removeStorageSync(AUTH_STORAGE_KEY);
+    this.clearPollTimer();
+    this.setData({
+      processing: false,
+      inputPath: "",
+      extractedImages: [],
+      statusText: "请先输入有效 Token",
+      statusKind: "error"
+    });
+    wx.redirectTo({ url: "/pages/auth/auth" });
   },
 
   chooseImage() {
@@ -239,10 +304,13 @@ Page({
   },
 
   getResponseErrorMessage(res, payload, fallback) {
+    const statusCode = res && res.statusCode ? res.statusCode : 0;
+    if (statusCode === 404 && fallback === "Upload failed") {
+      return "服务器已关闭";
+    }
     if (payload && (payload.error || payload.message)) {
       return payload.error || payload.message;
     }
-    const statusCode = res && res.statusCode ? res.statusCode : 0;
     const raw = res && typeof res.data === "string" ? res.data.trim() : "";
     const snippet = raw ? raw.replace(/\s+/g, " ").slice(0, 80) : "";
     if (statusCode) {
