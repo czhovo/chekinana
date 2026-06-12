@@ -312,8 +312,17 @@ Page({
           }
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
+          const expectedCount = Number(payload.expected_polaroids || payload.total_polaroids || 0);
 
           if (status === "done" || status === "finished" || status === "success") {
+            if (expectedCount > 0 && images.length < expectedCount && this.pollCount <= MAX_POLL_COUNT) {
+              this.setData({
+                statusText: `同步结果中... ${images.length}/${expectedCount}`,
+                statusKind: "processing"
+              });
+              this.pollTask(taskId);
+              return;
+            }
             if (images.length > 0) {
               this.finishWithImages(images);
             } else {
@@ -330,7 +339,7 @@ Page({
           this.setData({
             statusText: images.length > 0
               ? `处理中... 已提取 ${images.length} 张，继续处理`
-              : `图片处理中... ${this.pollCount * 2}s`,
+              : "图片处理中...",
             statusKind: "processing"
           });
           this.pollTask(taskId);

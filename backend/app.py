@@ -503,7 +503,7 @@ def access_control():
     ip = get_client_ip()
     if not is_ip_allowed(ip):
         return jsonify({"error": "拒绝访问"}), 403
-    if request.path.startswith("/api/") and not check_rate_limit(ip):
+    if request.path == "/api/process" and request.method == "POST" and not check_rate_limit(ip):
         return jsonify({"error": "请求过于频繁"}), 429
     if request.method == "OPTIONS":
         return None
@@ -573,29 +573,36 @@ def submit_task():
 def task_status(task_id):
     with task_lock:
         t = task_store.get(task_id)
-    if not t:
-        return jsonify({"error": "任务不存在"}), 404
+        if not t:
+            return jsonify({"error": "任务不存在"}), 404
+
+        status = t["status"]
+        phase = t.get("phase", "")
+        results_meta = [
+            {"id": r["id"], "type": r["type"], "label": r["label"]}
+            for r in t.get("results", [])
+        ]
+        total_polaroids = t.get("total_polaroids", 0)
+        elapsed = t.get("elapsed", 0)
+        error = t.get("error", "")
 
     pos = 0
-    if t["status"] == "queued":
+    if status == "queued":
         with queue_lock:
             try: pos = task_queue.index(task_id) + 1
             except ValueError: pos = 0
 
-    results_meta = []
-    for r in t.get("results", []):
-        results_meta.append({"id": r["id"], "type": r["type"], "label": r["label"]})
-
     return jsonify({
         "task_id": task_id,
-        "status": t["status"],
-        "phase": t.get("phase", ""),
+        "status": status,
+        "phase": phase,
         "queue_position": pos,
         "results_count": len(results_meta),
         "results": results_meta,
-        "total_polaroids": t.get("total_polaroids", 0),
-        "elapsed": t.get("elapsed", 0),
-        "error": t.get("error", ""),
+        "total_polaroids": total_polaroids,
+        "expected_polaroids": total_polaroids,
+        "elapsed": elapsed,
+        "error": error,
     })
 
 # ---- 获取某一步的结果图片 ----
