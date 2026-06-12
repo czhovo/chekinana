@@ -190,6 +190,38 @@
   background: #ef4444;
 }
 
+.count-input-bar {
+  min-height: 88rpx;
+  padding: 12rpx 20rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  border: 2rpx solid #d9dde5;
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  box-sizing: border-box;
+}
+
+.count-input-label {
+  flex: 0 1 auto;
+  max-width: 430rpx;
+  color: #374151;
+  font-size: 26rpx;
+  line-height: 1.35;
+}
+
+.count-input {
+  flex: 1 0 170rpx;
+  min-width: 170rpx;
+  height: 58rpx;
+  padding: 0 16rpx;
+  border-radius: 8rpx;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 26rpx;
+  box-sizing: border-box;
+}
+
 .result-count {
   color: #6b7280;
   font-size: 26rpx;

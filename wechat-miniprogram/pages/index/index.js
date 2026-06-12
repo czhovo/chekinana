@@ -1,6 +1,6 @@
 const { AUTH_STORAGE_KEY, getApiBaseUrl } = require("../../utils/config");
-const POLL_INTERVAL_MS = 2000;
-const MAX_POLL_COUNT = 90;
+const POLL_INTERVAL_MS = 1000;
+const MAX_POLL_COUNT = 180;
 const MAX_ROTATE_CANVAS_SIDE = 1600;
 
 Page({
@@ -9,6 +9,8 @@ Page({
     extractedImages: [],
     processing: false,
     wbEnabled: true,
+    expectedPolaroidCount: "",
+    showCountInput: false,
     statusText: "请选择一张包含拍立得的照片",
     statusKind: "idle"
   },
@@ -81,7 +83,8 @@ Page({
         this.setData({
           processing: false,
           statusText: this.data.inputPath ? "图片已选择，点击开始提取" : "请选择一张包含拍立得的照片",
-          statusKind: this.data.inputPath ? "ready" : "idle"
+          statusKind: this.data.inputPath ? "ready" : "idle",
+          showCountInput: !!this.data.inputPath
         });
       },
       fail: () => {
@@ -98,6 +101,8 @@ Page({
       processing: false,
       inputPath: "",
       extractedImages: [],
+      expectedPolaroidCount: "",
+      showCountInput: false,
       statusText: "请先输入有效 Token",
       statusKind: "error"
     });
@@ -123,6 +128,8 @@ Page({
         this.setData({
           inputPath: file.tempFilePath,
           extractedImages: [],
+          expectedPolaroidCount: "",
+          showCountInput: true,
           statusText: "图片已选择，点击开始提取",
           statusKind: "ready"
         });
@@ -136,6 +143,13 @@ Page({
   onWhiteBalanceChange(event) {
     this.setData({
       wbEnabled: !!event.detail.value
+    });
+  },
+
+  onExpectedCountInput(event) {
+    const value = String(event.detail.value || "").replace(/\D/g, "").slice(0, 3);
+    this.setData({
+      expectedPolaroidCount: value
     });
   },
 
@@ -203,6 +217,7 @@ Page({
                   inputPath: result.tempFilePath,
                   extractedImages: [],
                   processing: false,
+                  showCountInput: true,
                   statusText: "图片已选择，点击开始提取",
                   statusKind: "ready"
                 });
@@ -254,9 +269,19 @@ Page({
 
     this.clearPollTimer();
     this.pollCount = 0;
+    const formData = {
+      token,
+      wb: this.data.wbEnabled ? "1" : "0"
+    };
+    const expectedCount = this.getExpectedPolaroidCount();
+    if (expectedCount) {
+      formData.expected_polaroids = expectedCount;
+      formData.polaroid_count = expectedCount;
+    }
     this.setData({
       processing: true,
       extractedImages: [],
+      showCountInput: false,
       statusText: "正在上传图片...",
       statusKind: "processing"
     });
@@ -266,10 +291,7 @@ Page({
       filePath: this.data.inputPath,
       name: "image",
       header: this.getAuthHeader(),
-      formData: {
-        token,
-        wb: this.data.wbEnabled ? "1" : "0"
-      },
+      formData,
       success: (res) => {
         const payload = this.parseResponse(res.data);
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -301,6 +323,11 @@ Page({
       return `上传失败：${errMsg}`;
     }
     return "上传失败，请检查网络或域名配置";
+  },
+
+  getExpectedPolaroidCount() {
+    const value = parseInt(this.data.expectedPolaroidCount, 10);
+    return Number.isFinite(value) && value > 0 ? String(value) : "";
   },
 
   getResponseErrorMessage(res, payload, fallback) {

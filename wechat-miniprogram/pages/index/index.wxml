@@ -28,7 +28,20 @@
       </button>
     </view>
 
-    <view class="status-bar {{statusKind}}">
+    <view wx:if="{{showCountInput && !processing}}" class="count-input-bar">
+      <view class="count-input-label">输入待提取拍立得数量</view>
+      <input
+        class="count-input"
+        value="{{expectedPolaroidCount}}"
+        type="number"
+        maxlength="3"
+        placeholder="可选，可以不填写"
+        confirm-type="done"
+        bindinput="onExpectedCountInput"
+      />
+    </view>
+
+    <view wx:else class="status-bar {{statusKind}}">
       <view class="status-dot"></view>
       <text>{{statusText}}</text>
     </view>
