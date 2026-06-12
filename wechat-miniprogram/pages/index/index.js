@@ -313,18 +313,27 @@ Page({
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
           const expectedCount = Number(payload.expected_polaroids || payload.total_polaroids || 0);
+          const extractionComplete = payload.extraction_complete === true
+            || payload.done_marker === true
+            || payload.complete === true;
 
           if (status === "done" || status === "finished" || status === "success") {
-            if (expectedCount > 0 && images.length < expectedCount && this.pollCount <= MAX_POLL_COUNT) {
+            if ((!extractionComplete || expectedCount <= 0 || images.length < expectedCount) && this.pollCount <= MAX_POLL_COUNT) {
               this.setData({
-                statusText: `同步结果中... ${images.length}/${expectedCount}`,
+                statusText: expectedCount > 0
+                  ? `检测到 ${expectedCount} 张拍立得，正在提取 ${images.length}/${expectedCount}`
+                  : "图片处理中...",
                 statusKind: "processing"
               });
               this.pollTask(taskId);
               return;
             }
-            if (expectedCount > 0 && images.length < expectedCount) {
-              this.finishWithError(`结果同步不完整：${images.length}/${expectedCount}`);
+            if (!extractionComplete) {
+              this.finishWithError("处理结束标记缺失");
+              return;
+            }
+            if (expectedCount > 0 && images.length !== expectedCount) {
+              this.finishWithError(`结果数量不一致：${images.length}/${expectedCount}`);
               return;
             }
             if (images.length > 0) {
@@ -341,8 +350,8 @@ Page({
           }
 
           this.setData({
-            statusText: images.length > 0
-              ? `处理中... 已提取 ${images.length} 张，继续处理`
+            statusText: expectedCount > 0
+              ? `检测到 ${expectedCount} 张拍立得，正在提取`
               : "图片处理中...",
             statusKind: "processing"
           });
@@ -357,7 +366,7 @@ Page({
   },
 
   normalizeImages(payload, taskId) {
-    const list = payload.polaroids || payload.images || payload.results || payload.outputs || payload.files || [];
+    const list = payload.images || payload.results || payload.outputs || payload.files || [];
     const typedPolaroids = list.filter((item) => item && typeof item === "object" && item.type === "polaroid");
     const sourceList = typedPolaroids.length > 0 ? typedPolaroids : list;
 

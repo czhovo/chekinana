@@ -397,6 +397,9 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     # --- 步骤 3: 逐个提取 ---
     with task_lock:
         task_store[task_id]["phase"] = "extracting"
+        task_store[task_id]["expected_polaroids"] = len(all_vertices)
+        task_store[task_id]["total_polaroids"] = len(all_vertices)
+        task_store[task_id]["extraction_complete"] = False
     for pidx, verts in enumerate(all_vertices):
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
         src = verts.astype(np.float32)
@@ -419,6 +422,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["status"] = "done"
         task_store[task_id]["phase"] = "complete"
         task_store[task_id]["total_polaroids"] = len(all_vertices)
+        task_store[task_id]["expected_polaroids"] = len(all_vertices)
+        task_store[task_id]["extraction_complete"] = True
     print(f"✅ 全部完成: 共 {len(all_vertices)} 张拍立得", flush=True)
 
 
@@ -555,6 +560,7 @@ def submit_task():
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance,
+            "expected_polaroids": 0, "total_polaroids": 0, "extraction_complete": False,
         }
         # 清理过期
         for k in list(task_store.keys()):
@@ -582,8 +588,9 @@ def task_status(task_id):
             {"id": r["id"], "type": r["type"], "label": r["label"]}
             for r in t.get("results", [])
         ]
-        polaroids_meta = [r for r in results_meta if r["type"] == "polaroid"]
         total_polaroids = t.get("total_polaroids", 0)
+        expected_polaroids = t.get("expected_polaroids", total_polaroids)
+        extraction_complete = bool(t.get("extraction_complete", False))
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
 
@@ -600,10 +607,9 @@ def task_status(task_id):
         "queue_position": pos,
         "results_count": len(results_meta),
         "results": results_meta,
-        "polaroids_count": len(polaroids_meta),
-        "polaroids": polaroids_meta,
         "total_polaroids": total_polaroids,
-        "expected_polaroids": total_polaroids,
+        "expected_polaroids": expected_polaroids,
+        "extraction_complete": extraction_complete,
         "elapsed": elapsed,
         "error": error,
     })
