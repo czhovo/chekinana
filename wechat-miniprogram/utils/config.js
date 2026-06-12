@@ -1,5 +1,5 @@
 const AUTH_STORAGE_KEY = "cheki_auth_token";
-const RUNPOD_HTTP_PORT = 8080;
+const API_GATEWAY_BASE_URL = "https://api.chekinana.top";
 
 function normalizePodId(value) {
   const raw = (value || "").trim();
@@ -13,12 +13,12 @@ function normalizePodId(value) {
 
 function getApiBaseUrl(podId) {
   const normalizedPodId = normalizePodId(podId || wx.getStorageSync(AUTH_STORAGE_KEY));
-  return normalizedPodId ? `https://${normalizedPodId}-${RUNPOD_HTTP_PORT}.proxy.runpod.net` : "";
+  return normalizedPodId ? API_GATEWAY_BASE_URL : "";
 }
 
 module.exports = {
   AUTH_STORAGE_KEY,
-  RUNPOD_HTTP_PORT,
+  API_GATEWAY_BASE_URL,
   normalizePodId,
   getApiBaseUrl
 };

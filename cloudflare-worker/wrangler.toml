@@ -1,0 +1,7 @@
+name = "chekinana-runpod-proxy"
+main = "src/worker.js"
+compatibility_date = "2026-06-12"
+
+routes = [
+  { pattern = "api.chekinana.top", custom_domain = true }
+]
