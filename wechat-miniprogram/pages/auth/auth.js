@@ -68,10 +68,11 @@ Page({
         wx.setStorageSync(AUTH_STORAGE_KEY, token);
         wx.redirectTo({ url: "/pages/index/index" });
       },
-      fail: () => {
+      fail: (err) => {
+        const errMsg = err && err.errMsg ? err.errMsg : "";
         this.setData({
           verifying: false,
-          errorText: "无法连接服务器，请检查后端是否已启动。"
+          errorText: errMsg ? `无法连接服务器：${errMsg}` : "无法连接服务器，请检查后端是否已启动。"
         });
       }
     });
