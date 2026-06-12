@@ -625,8 +625,6 @@ if __name__ == "__main__":
 
     # 启动时预加载 SAM3 模型（避免首次请求等待）
     print("📦 预加载 SAM3 模型...", flush=True)
-    get_sam3()
-
     try:
         from waitress import serve
         host = os.environ.get("HOST", "0.0.0.0")
