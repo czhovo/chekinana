@@ -272,6 +272,14 @@ def parse_positive_int(*values) -> int:
     return 0
 
 
+def parse_rotation_degrees(value) -> int:
+    try:
+        degrees = int(str(value or "0").strip())
+    except (TypeError, ValueError):
+        return 0
+    return degrees % 360
+
+
 def quad_area(vertices: np.ndarray) -> float:
     return float(abs(cv2.contourArea(np.asarray(vertices, dtype=np.float32))))
 
@@ -341,6 +349,27 @@ def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dic
     }
 
 
+def denoise_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Reduce scan/print noise while preserving signatures and photo edges."""
+    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+        return image, {"applied": False, "reason": "unsupported_image_shape"}
+
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    denoised = cv2.fastNlMeansDenoisingColored(
+        bgr,
+        None,
+        h=4,
+        hColor=4,
+        templateWindowSize=7,
+        searchWindowSize=21,
+    )
+    rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
+
+    # Blend back a little original detail so marker strokes and facial edges do not get waxy.
+    blended = cv2.addWeighted(rgb, 0.82, image, 0.18, 0)
+    return blended, {"applied": True, "method": "fastNlMeansDenoisingColored", "h": 4, "hColor": 4}
+
+
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
     """向任务添加一个中间结果"""
     with task_lock:
@@ -360,15 +389,19 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     model, processor, device = get_sam3()
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
+        denoise_enabled = bool(task_store.get(task_id, {}).get("denoise", True))
         requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
+        rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
 
     # --- 步骤 0: 加载图片 ---
     with task_lock:
         task_store[task_id]["phase"] = "loading"
     image = Image.open(io.BytesIO(raw_data)).convert("RGB")
     image = ImageOps.exif_transpose(image)
+    if rotation_degrees:
+        image = image.rotate(rotation_degrees, expand=True)
     img_np = np.array(image)
-    print(f"🖼️  图片: {image.size[0]}x{image.size[1]}", flush=True)
+    print(f"🖼️  图片: {image.size[0]}x{image.size[1]} (rotation={rotation_degrees})", flush=True)
 
     # --- 步骤 1: SAM3 检测纸框 ---
     with task_lock:
@@ -499,6 +532,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
                 print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
             else:
                 print(f"   ⚠ 白平衡 #{pidx+1}: {wb_info['reason']}", flush=True)
+        if denoise_enabled:
+            rectified, denoise_info = denoise_extracted_polaroid(rectified)
+            if denoise_info["applied"]:
+                print(f"   ✓ 降噪 #{pidx+1}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
+            else:
+                print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
         add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
                          f"拍立得 #{pidx+1}")
         print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
@@ -643,18 +682,21 @@ def submit_task():
         return jsonify({"error": err}), 400
 
     white_balance = parse_bool(request.form.get("wb"), default=True)
+    denoise = parse_bool(request.form.get("denoise"), default=True)
     requested_polaroids = parse_positive_int(
         request.form.get("expected_polaroids"),
         request.form.get("polaroid_count"),
     )
+    rotation_degrees = parse_rotation_degrees(request.form.get("rotation_degrees"))
     tid = uuid.uuid4().hex
     now = time.time()
     with task_lock:
         task_store[tid] = {
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
-            "results": [], "white_balance": white_balance,
+            "results": [], "white_balance": white_balance, "denoise": denoise,
             "requested_polaroids": requested_polaroids,
+            "rotation_degrees": rotation_degrees,
             "expected_polaroids": requested_polaroids,
             "total_polaroids": 0,
             "detected_polaroids": 0,
@@ -671,12 +713,14 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, target={requested_polaroids or 'auto'})", flush=True)
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, denoise={denoise}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",
         "white_balance": white_balance,
+        "denoise": denoise,
         "requested_polaroids": requested_polaroids,
+        "rotation_degrees": rotation_degrees,
         "expected_polaroids": requested_polaroids,
     })
 
@@ -697,6 +741,8 @@ def task_status(task_id):
         total_polaroids = t.get("total_polaroids", 0)
         expected_polaroids = t.get("expected_polaroids", total_polaroids)
         requested_polaroids = t.get("requested_polaroids", 0)
+        rotation_degrees = t.get("rotation_degrees", 0)
+        denoise = bool(t.get("denoise", True))
         detected_polaroids = t.get("detected_polaroids", 0)
         detection_threshold = t.get("detection_threshold", 0)
         warning = t.get("warning", "")
@@ -720,6 +766,8 @@ def task_status(task_id):
         "total_polaroids": total_polaroids,
         "expected_polaroids": expected_polaroids,
         "requested_polaroids": requested_polaroids,
+        "rotation_degrees": rotation_degrees,
+        "denoise": denoise,
         "detected_polaroids": detected_polaroids,
         "detection_threshold": detection_threshold,
         "warning": warning,

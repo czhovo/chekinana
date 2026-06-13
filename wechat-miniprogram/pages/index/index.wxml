@@ -7,6 +7,10 @@
           <image class="rotate-icon" src="/assets/rotate-left.png" mode="aspectFit"></image>
         </view>
         <view class="wb-control">
+          <text>降噪</text>
+          <switch checked="{{denoiseEnabled}}" bindchange="onDenoiseChange" disabled="{{processing}}" color="#2563eb"></switch>
+        </view>
+        <view class="wb-control">
           <text>白平衡</text>
           <switch checked="{{wbEnabled}}" bindchange="onWhiteBalanceChange" disabled="{{processing}}" color="#2563eb"></switch>
         </view>
@@ -14,7 +18,7 @@
     </view>
 
     <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="chooseImage">
-      <image wx:if="{{inputPath}}" class="preview-image" src="{{inputPath}}" mode="aspectFit"></image>
+      <image wx:if="{{inputPath}}" class="preview-image" src="{{inputPath}}" mode="aspectFit" style="{{previewRotationStyle}}"></image>
       <view wx:else class="placeholder">
         <view class="placeholder-icon">+</view>
         <view>选择一张包含拍立得的照片</view>
@@ -71,10 +75,4 @@
       <view class="empty-subtitle">点击结果图片即可保存到相册</view>
     </view>
   </view>
-
-  <canvas
-    id="rotateCanvas"
-    type="2d"
-    class="hidden-canvas"
-  ></canvas>
 </view>

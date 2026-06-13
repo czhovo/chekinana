@@ -5,9 +5,12 @@ const MAX_POLL_COUNT = 180;
 Page({
   data: {
     inputPath: "",
+    rotationDegrees: 0,
+    previewRotationStyle: "",
     extractedImages: [],
     processing: false,
     wbEnabled: true,
+    denoiseEnabled: true,
     expectedPolaroidCount: "",
     showCountInput: false,
     statusText: "请选择一张包含拍立得的照片",
@@ -137,6 +140,8 @@ Page({
     this.setData({
       processing: false,
       inputPath: "",
+      rotationDegrees: 0,
+      previewRotationStyle: "",
       extractedImages: [],
       expectedPolaroidCount: "",
       showCountInput: false,
@@ -165,6 +170,8 @@ Page({
         this.downloadingImageUrls = {};
         const nextState = {
           inputPath: file.tempFilePath,
+          rotationDegrees: 0,
+          previewRotationStyle: "",
           extractedImages: [],
           processing: false,
           expectedPolaroidCount: "",
@@ -187,6 +194,12 @@ Page({
     });
   },
 
+  onDenoiseChange(event) {
+    this.setData({
+      denoiseEnabled: !!event.detail.value
+    });
+  },
+
   onExpectedCountInput(event) {
     const value = String(event.detail.value || "").replace(/\D/g, "").slice(0, 3);
     this.setData({
@@ -197,94 +210,14 @@ Page({
   rotateInputImage() {
     if (!this.data.inputPath || this.data.processing) return;
 
+    const rotationDegrees = (this.data.rotationDegrees + 90) % 360;
     this.setData({
-      processing: true
+      rotationDegrees,
+      previewRotationStyle: rotationDegrees ? `transform: rotate(${-rotationDegrees}deg);` : "",
+      extractedImages: [],
+      statusText: "图片已选择，点击开始提取",
+      statusKind: "ready"
     });
-
-    wx.getImageInfo({
-      src: this.data.inputPath,
-      success: (info) => {
-        this.drawRotatedImage(info.path, info.width, info.height);
-      },
-      fail: (err) => {
-        console.error("getImageInfo for rotate failed", err);
-        this.finishRotateWithError("读取图片失败");
-      }
-    });
-  },
-
-  drawRotatedImage(path, sourceWidth, sourceHeight) {
-    this.createSelectorQuery()
-      .select("#rotateCanvas")
-      .fields({ node: true })
-      .exec((res) => {
-        const canvas = res && res[0] && res[0].node;
-        if (!canvas) {
-          this.finishRotateWithError("画布初始化失败");
-          return;
-        }
-
-        const outputWidth = Math.max(1, Math.round(sourceHeight));
-        const outputHeight = Math.max(1, Math.round(sourceWidth));
-
-        canvas.width = outputWidth;
-        canvas.height = outputHeight;
-
-        const ctx = canvas.getContext("2d");
-        const image = canvas.createImage();
-
-        image.onload = () => {
-          ctx.clearRect(0, 0, outputWidth, outputHeight);
-          ctx.save();
-          ctx.translate(0, outputHeight);
-          ctx.rotate(-Math.PI / 2);
-          ctx.drawImage(image, 0, 0, outputHeight, outputWidth);
-          ctx.restore();
-
-          setTimeout(() => {
-            wx.canvasToTempFilePath({
-              canvas,
-              x: 0,
-              y: 0,
-              width: outputWidth,
-              height: outputHeight,
-              destWidth: outputWidth,
-              destHeight: outputHeight,
-              fileType: "png",
-              success: (result) => {
-                this.setData({
-                  inputPath: result.tempFilePath,
-                  extractedImages: [],
-                  processing: false,
-                  showCountInput: true,
-                  statusText: "图片已选择，点击开始提取",
-                  statusKind: "ready"
-                });
-              },
-              fail: (err) => {
-                console.error("rotate canvasToTempFilePath failed", err);
-                this.finishRotateWithError("旋转图片失败");
-              }
-            });
-          }, 80);
-        };
-
-        image.onerror = (err) => {
-          console.error("rotate image load failed", err);
-          this.finishRotateWithError("图片绘制失败");
-        };
-
-        image.src = path;
-      });
-  },
-
-  finishRotateWithError(message) {
-    this.setData({
-      processing: false,
-      statusText: message || "旋转失败",
-      statusKind: "error"
-    });
-    wx.showToast({ title: message || "旋转失败", icon: "none" });
   },
 
   startExtract() {
@@ -311,7 +244,9 @@ Page({
     this.downloadingImageUrls = {};
     const formData = {
       token,
-      wb: this.data.wbEnabled ? "1" : "0"
+      wb: this.data.wbEnabled ? "1" : "0",
+      denoise: this.data.denoiseEnabled ? "1" : "0",
+      rotation_degrees: String(this.data.rotationDegrees || 0)
     };
     const expectedCount = this.getExpectedPolaroidCount();
     if (expectedCount) {
@@ -451,15 +386,18 @@ Page({
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
           this.updatePartialImages(images);
-          const expectedCount = Number(payload.expected_polaroids || payload.total_polaroids || 0);
+          const expectedCount = this.getBackendExpectedCount(payload);
           const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
             || payload.done_marker === true
             || payload.complete === true;
 
           if (extractionComplete) {
-            if (images.length > 0) {
-              this.finishWithImages(images, warning);
+            const completedImages = this.mergeImages(this.data.extractedImages, images);
+            if (expectedCount > 0 && completedImages.length !== expectedCount) {
+              this.finishWithError(`结果传输不完整：已收到 ${completedImages.length}/${expectedCount} 张`);
+            } else if (completedImages.length > 0) {
+              this.finishWithImages(completedImages, warning);
             } else if (warning) {
               this.finishWithNotice(warning);
             } else {
@@ -469,13 +407,7 @@ Page({
           }
 
           if (status === "done" || status === "finished" || status === "success") {
-            if (images.length > 0) {
-              this.finishWithImages(images, warning);
-            } else if (warning) {
-              this.finishWithNotice(warning);
-            } else {
-              this.finishWithError("处理结束，但未提取到拍立得");
-            }
+            this.finishWithError("处理状态缺少结束标记");
             return;
           }
 
@@ -558,6 +490,18 @@ Page({
     return merged;
   },
 
+  getBackendExpectedCount(payload) {
+    const totalCount = Number(payload.total_polaroids || 0);
+    if (totalCount > 0) return totalCount;
+
+    const phase = payload.phase || "";
+    const hasFinalizedTarget = payload.extraction_complete === true
+      || phase === "extracting"
+      || phase === "complete";
+    const expectedCount = hasFinalizedTarget ? Number(payload.expected_polaroids || 0) : 0;
+    return expectedCount > 0 ? expectedCount : 0;
+  },
+
   prefetchResultImages(images) {
     images.forEach((image) => {
       if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
@@ -599,14 +543,11 @@ Page({
     if (warning) {
       return warning;
     }
-    if (expectedCount > 0 && doneCount > 0) {
-      return `已提取 ${doneCount}/${expectedCount} 张，继续处理`;
+    if (expectedCount > 0) {
+      return `已提取 ${doneCount}/${expectedCount} 张`;
     }
     if (doneCount > 0) {
       return `已提取 ${doneCount} 张，继续处理`;
-    }
-    if (expectedCount > 0) {
-      return `目标 ${expectedCount} 张，正在检测/提取`;
     }
     return "图片处理中...";
   },

@@ -13,6 +13,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16rpx;
   margin-bottom: 14rpx;
 }
 
@@ -25,7 +26,9 @@
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 18rpx;
+  justify-content: flex-end;
+  gap: 12rpx;
+  flex-wrap: wrap;
 }
 
 .rotate-button {
@@ -57,9 +60,9 @@
 .wb-control {
   display: flex;
   align-items: center;
-  gap: 12rpx;
+  gap: 8rpx;
   color: #4b5563;
-  font-size: 26rpx;
+  font-size: 24rpx;
 }
 
 .image-frame {
@@ -272,15 +275,4 @@
 .empty-subtitle {
   color: #b3b8c1;
   font-size: 24rpx;
-}
-
-.hidden-canvas {
-  position: fixed;
-  left: 0;
-  top: 0;
-  width: 1px;
-  height: 1px;
-  opacity: 0.01;
-  pointer-events: none;
-  z-index: 0;
 }
