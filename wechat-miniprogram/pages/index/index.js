@@ -164,14 +164,17 @@ Page({
 
         this.clearPollTimer();
         this.downloadingImageUrls = {};
-        this.setData({
+        const nextState = {
           inputPath: file.tempFilePath,
           extractedImages: [],
+          processing: false,
           expectedPolaroidCount: "",
           showCountInput: true,
           statusText: "图片已选择，点击开始提取",
           statusKind: "ready"
-        });
+        };
+        this.pendingAuthRestoreState = nextState;
+        this.setData(nextState);
       },
       fail: () => {
         wx.showToast({ title: "选择图片失败", icon: "none" });
