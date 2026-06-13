@@ -18,6 +18,8 @@ Page({
   pollTimer: null,
   pollCount: 0,
   verifyingCachedToken: false,
+  pendingAuthRestoreState: null,
+  downloadingImageUrls: {},
 
   onUnload() {
     this.clearPollTimer();
@@ -55,6 +57,7 @@ Page({
     }
 
     this.verifyingCachedToken = true;
+    this.pendingAuthRestoreState = this.getPostAuthRestoreState();
     this.setData({
       processing: true,
       statusText: "正在验证 Token...",
@@ -80,12 +83,8 @@ Page({
           return;
         }
 
-        this.setData({
-          processing: false,
-          statusText: this.data.inputPath ? "图片已选择，点击开始提取" : "请选择一张包含拍立得的照片",
-          statusKind: this.data.inputPath ? "ready" : "idle",
-          showCountInput: !!this.data.inputPath
-        });
+        this.setData(this.pendingAuthRestoreState || this.getPostAuthRestoreState());
+        this.pendingAuthRestoreState = null;
       },
       fail: () => {
         this.verifyingCachedToken = false;
@@ -94,9 +93,48 @@ Page({
     });
   },
 
+  getPostAuthRestoreState() {
+    if (this.data.processing) {
+      return {
+        processing: true,
+        statusText: this.data.statusText || "图片处理中...",
+        statusKind: this.data.statusKind || "processing",
+        showCountInput: false
+      };
+    }
+
+    if (this.data.extractedImages.length > 0) {
+      return {
+        processing: false,
+        statusText: this.data.statusKind === "done"
+          ? this.data.statusText
+          : `处理结束，提取了 ${this.data.extractedImages.length} 张拍立得`,
+        statusKind: "done",
+        showCountInput: false
+      };
+    }
+
+    if (this.data.inputPath) {
+      return {
+        processing: false,
+        statusText: "图片已选择，点击开始提取",
+        statusKind: "ready",
+        showCountInput: true
+      };
+    }
+
+    return {
+      processing: false,
+      statusText: "请选择一张包含拍立得的照片",
+      statusKind: "idle",
+      showCountInput: false
+    };
+  },
+
   clearAuthAndRedirect() {
     wx.removeStorageSync(AUTH_STORAGE_KEY);
     this.clearPollTimer();
+    this.downloadingImageUrls = {};
     this.setData({
       processing: false,
       inputPath: "",
@@ -125,6 +163,7 @@ Page({
         }
 
         this.clearPollTimer();
+        this.downloadingImageUrls = {};
         this.setData({
           inputPath: file.tempFilePath,
           extractedImages: [],
@@ -269,6 +308,7 @@ Page({
 
     this.clearPollTimer();
     this.pollCount = 0;
+    this.downloadingImageUrls = {};
     const formData = {
       token,
       wb: this.data.wbEnabled ? "1" : "0"
@@ -412,17 +452,16 @@ Page({
           const images = this.normalizeImages(payload, taskId);
           this.updatePartialImages(images);
           const expectedCount = Number(payload.expected_polaroids || payload.total_polaroids || 0);
+          const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
             || payload.done_marker === true
             || payload.complete === true;
 
           if (extractionComplete) {
-            if (expectedCount > 0 && images.length !== expectedCount) {
-              this.finishWithError(`结果数量不一致：${images.length}/${expectedCount}`);
-              return;
-            }
             if (images.length > 0) {
-              this.finishWithImages(images);
+              this.finishWithImages(images, warning);
+            } else if (warning) {
+              this.finishWithNotice(warning);
             } else {
               this.finishWithError("处理结束，但未提取到拍立得");
             }
@@ -431,7 +470,9 @@ Page({
 
           if (status === "done" || status === "finished" || status === "success") {
             if (images.length > 0) {
-              this.finishWithImages(images);
+              this.finishWithImages(images, warning);
+            } else if (warning) {
+              this.finishWithNotice(warning);
             } else {
               this.finishWithError("处理结束，但未提取到拍立得");
             }
@@ -444,7 +485,7 @@ Page({
           }
 
           this.setData({
-            statusText: this.getProcessingStatusText(images.length, expectedCount),
+            statusText: this.getProcessingStatusText(images.length, expectedCount, warning),
             statusKind: "processing"
           });
           this.pollTask(taskId);
@@ -495,6 +536,7 @@ Page({
     if (merged.length !== this.data.extractedImages.length) {
       this.setData({ extractedImages: merged });
     }
+    this.prefetchResultImages(merged);
   },
 
   mergeImages(currentImages, nextImages) {
@@ -516,7 +558,47 @@ Page({
     return merged;
   },
 
-  getProcessingStatusText(doneCount, expectedCount) {
+  prefetchResultImages(images) {
+    images.forEach((image) => {
+      if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
+      if (this.downloadingImageUrls[image.url]) return;
+
+      this.downloadingImageUrls[image.url] = true;
+      wx.downloadFile({
+        url: image.url,
+        header: this.getAuthHeader(),
+        success: (res) => {
+          if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
+            this.updateImageLocalPath(image, res.tempFilePath);
+          }
+        },
+        complete: () => {
+          delete this.downloadingImageUrls[image.url];
+        }
+      });
+    });
+  },
+
+  updateImageLocalPath(targetImage, localPath) {
+    const targetKey = String(targetImage.id || targetImage.url);
+    const extractedImages = this.data.extractedImages.map((image) => {
+      const key = String(image.id || image.url);
+      if (key !== targetKey) return image;
+      return Object.assign({}, image, { localPath });
+    });
+    this.setData({ extractedImages });
+  },
+
+  getProcessingStatusText(doneCount, expectedCount, warning) {
+    if (warning && doneCount > 0 && expectedCount > 0) {
+      return `${warning}，已提取 ${doneCount}/${expectedCount} 张`;
+    }
+    if (warning && doneCount > 0) {
+      return `${warning}，已提取 ${doneCount} 张`;
+    }
+    if (warning) {
+      return warning;
+    }
     if (expectedCount > 0 && doneCount > 0) {
       return `已提取 ${doneCount}/${expectedCount} 张，继续处理`;
     }
@@ -524,7 +606,7 @@ Page({
       return `已提取 ${doneCount} 张，继续处理`;
     }
     if (expectedCount > 0) {
-      return `检测到 ${expectedCount} 张拍立得，正在提取`;
+      return `目标 ${expectedCount} 张，正在检测/提取`;
     }
     return "图片处理中...";
   },
@@ -547,12 +629,24 @@ Page({
     return `${url}${separator}token=${encodeURIComponent(token)}`;
   },
 
-  finishWithImages(images) {
+  finishWithImages(images, message) {
+    this.clearPollTimer();
+    const merged = this.mergeImages(this.data.extractedImages, images);
+    this.setData({
+      extractedImages: merged,
+      processing: false,
+      showCountInput: false,
+      statusText: message || `处理结束，提取了 ${merged.length} 张拍立得`,
+      statusKind: "done"
+    });
+    this.prefetchResultImages(merged);
+  },
+
+  finishWithNotice(message) {
     this.clearPollTimer();
     this.setData({
-      extractedImages: images,
       processing: false,
-      statusText: `处理结束，提取了 ${images.length} 张拍立得`,
+      statusText: message || "处理结束",
       statusKind: "done"
     });
   },
@@ -574,17 +668,23 @@ Page({
 
     wx.showLoading({ title: "保存中..." });
 
-    if (image.url.startsWith("wxfile://")) {
-      this.saveToAlbum(image.url);
+    const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
+    if (localPath) {
+      this.saveToAlbum(localPath, image);
       return;
     }
 
+    this.downloadAndSaveImage(image);
+  },
+
+  downloadAndSaveImage(image) {
     wx.downloadFile({
       url: image.url,
       header: this.getAuthHeader(),
       success: (res) => {
         if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-          this.saveToAlbum(res.tempFilePath);
+          this.updateImageLocalPath(image, res.tempFilePath);
+          this.saveToAlbum(res.tempFilePath, image, false);
           return;
         }
         wx.hideLoading();
@@ -598,7 +698,7 @@ Page({
     });
   },
 
-  saveToAlbum(filePath) {
+  saveToAlbum(filePath, fallbackImage, allowFallback = true) {
     wx.saveImageToPhotosAlbum({
       filePath,
       success: () => {
@@ -616,6 +716,10 @@ Page({
               if (res.confirm) wx.openSetting();
             }
           });
+          return;
+        }
+        if (allowFallback && fallbackImage && fallbackImage.url && fallbackImage.url !== filePath) {
+          this.downloadAndSaveImage(fallbackImage);
           return;
         }
         wx.showToast({ title: "保存失败", icon: "none" });

@@ -223,6 +223,7 @@ queue_event = threading.Event()
 
 BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
 POLAROID_W, POLAROID_H = 1600, 2544
+POLAROID_SCALE = min(POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H)
 BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32)
 IMAGE_AREA_VERTICES = np.rint(BASE_IMAGE_AREA_VERTICES * [POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H]).astype(np.int32)
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
@@ -246,8 +247,44 @@ def parse_bool(value, default=False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def parse_positive_int(*values) -> int:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return 0
+
+
+def quad_area(vertices: np.ndarray) -> float:
+    return float(abs(cv2.contourArea(np.asarray(vertices, dtype=np.float32))))
+
+
+def build_detection_candidates(masks: list[np.ndarray]) -> list[dict]:
+    candidates = []
+    for mask in masks:
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
+        pts = np.vstack([c.reshape(-1, 2) for c in contours])
+        try:
+            verts = fit_quadrilateral(pts)
+        except Exception:
+            continue
+        candidates.append({
+            "vertices": verts,
+            "area": quad_area(verts),
+        })
+    return candidates
+
+
 def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dict]:
-    """White-balance a rectified 800x1272 polaroid using its fixed border area."""
+    """White-balance a rectified polaroid using its fixed border area."""
     h, w = image.shape[:2]
     border_mask = np.ones((h, w), dtype=np.uint8)
     cv2.fillPoly(border_mask, [IMAGE_AREA_VERTICES], 0)
@@ -258,8 +295,8 @@ def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dic
     is_white = is_bright & is_neutral & border_mask
 
     blocks = []
-    block_size = 32
-    step = 16
+    block_size = max(1, int(round(32 * POLAROID_SCALE)))
+    step = max(1, int(round(16 * POLAROID_SCALE)))
     for y in range(0, h - block_size, step):
         for x in range(0, w - block_size, step):
             block = is_white[y:y+block_size, x:x+block_size]
@@ -311,6 +348,7 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     model, processor, device = get_sam3()
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
+        requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
 
     # --- 步骤 0: 加载图片 ---
     with task_lock:
@@ -323,25 +361,62 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     # --- 步骤 1: SAM3 检测纸框 ---
     with task_lock:
         task_store[task_id]["phase"] = "detecting"
-    print("🔍 SAM3 检测拍立得纸框...", flush=True)
+    print(f"🔍 SAM3 检测拍立得纸框... (目标: {requested_polaroids or '自动'})", flush=True)
     t0 = time.time()
     inputs = processor(images=image, text="polaroid photo paper frame",
                        return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = model(**inputs)
-    results = processor.post_process_instance_segmentation(
-        outputs, threshold=0.4, mask_threshold=0.5,
-        target_sizes=[image.size[::-1]]
-    )[0]
-    masks = [m.cpu().numpy() for m in results["masks"]]
-    del inputs, outputs, results
-    torch.cuda.empty_cache() if device == "cuda" else None
-    print(f"   检测到 {len(masks)} 张拍立得 (耗时 {time.time()-t0:.1f}s)", flush=True)
 
-    if len(masks) == 0:
+    def detect_with_threshold(threshold: float) -> tuple[list[np.ndarray], list[dict]]:
+        results = processor.post_process_instance_segmentation(
+            outputs, threshold=threshold, mask_threshold=0.5,
+            target_sizes=[image.size[::-1]]
+        )[0]
+        masks_for_threshold = [m.cpu().numpy() for m in results["masks"]]
+        return masks_for_threshold, build_detection_candidates(masks_for_threshold)
+
+    threshold_used = 0.5
+    masks, candidates = detect_with_threshold(threshold_used)
+    should_retry = (
+        requested_polaroids > 0 and len(candidates) < requested_polaroids
+    ) or (
+        requested_polaroids == 0 and len(candidates) == 0
+    )
+    if should_retry:
+        print(f"   阈值 {threshold_used:.1f} 检测到 {len(candidates)} 张，降低到 0.3 重试", flush=True)
+        threshold_used = 0.3
+        masks, candidates = detect_with_threshold(threshold_used)
+
+    del inputs, outputs
+    torch.cuda.empty_cache() if device == "cuda" else None
+    detected_count = len(candidates)
+    detection_warning = ""
+    print(f"   检测到 {detected_count} 张拍立得 (阈值 {threshold_used:.1f}, 耗时 {time.time()-t0:.1f}s)", flush=True)
+
+    if requested_polaroids > 0 and detected_count < requested_polaroids:
+        detection_warning = f"只检测到 {detected_count}/{requested_polaroids} 张拍立得，已按检测结果继续处理"
+        print(f"   ⚠ {detection_warning}", flush=True)
+
+    if requested_polaroids > 0 and detected_count > requested_polaroids:
+        drop_count = detected_count - requested_polaroids
+        candidates.sort(key=lambda item: item["area"], reverse=True)
+        dropped = candidates[requested_polaroids:]
+        candidates = candidates[:requested_polaroids]
+        smallest_dropped = [round(item["area"], 1) for item in sorted(dropped, key=lambda item: item["area"])[:3]]
+        print(f"   检测到 {detected_count} 张，高于目标 {requested_polaroids} 张，已按四边形面积丢弃最小 {drop_count} 张: {smallest_dropped}", flush=True)
+
+    if not candidates:
         with task_lock:
-            task_store[task_id]["status"] = "failed"
-            task_store[task_id]["error"] = "未检测到拍立得纸框"
+            task_store[task_id]["status"] = "done" if requested_polaroids else "failed"
+            task_store[task_id]["phase"] = "complete"
+            task_store[task_id]["error"] = "" if requested_polaroids else "未检测到拍立得纸框"
+            task_store[task_id]["warning"] = detection_warning
+            task_store[task_id]["detection_threshold"] = threshold_used
+            task_store[task_id]["detected_polaroids"] = detected_count
+            task_store[task_id]["expected_polaroids"] = 0
+            task_store[task_id]["total_polaroids"] = 0
+            task_store[task_id]["extraction_complete"] = True
         return
 
     # --- 步骤 2: 绘制四边形标注 ---
@@ -350,18 +425,7 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     print("📐 绘制四边形标注...", flush=True)
     annotated = img_np.copy()
     overlay = annotated.copy()
-    all_vertices = []
-
-    for midx, mask in enumerate(masks):
-        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
-                                        cv2.CHAIN_APPROX_NONE)
-        if not contours: continue
-        pts = np.vstack([c.reshape(-1, 2) for c in contours])
-        try:
-            verts = fit_quadrilateral(pts)
-        except Exception:
-            continue
-        all_vertices.append(verts)
+    all_vertices = [item["vertices"] for item in candidates]
 
     # Sort detected polaroids from left to right for stable labels and downloads.
     all_vertices.sort(key=lambda verts: float(verts[:, 0].mean()))
@@ -401,6 +465,9 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["phase"] = "extracting"
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
         task_store[task_id]["total_polaroids"] = len(all_vertices)
+        task_store[task_id]["detected_polaroids"] = detected_count
+        task_store[task_id]["detection_threshold"] = threshold_used
+        task_store[task_id]["warning"] = detection_warning
         task_store[task_id]["extraction_complete"] = False
     for pidx, verts in enumerate(all_vertices):
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
@@ -425,6 +492,9 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["phase"] = "complete"
         task_store[task_id]["total_polaroids"] = len(all_vertices)
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
+        task_store[task_id]["detected_polaroids"] = detected_count
+        task_store[task_id]["detection_threshold"] = threshold_used
+        task_store[task_id]["warning"] = detection_warning
         task_store[task_id]["extraction_complete"] = True
     print(f"✅ 全部完成: 共 {len(all_vertices)} 张拍立得", flush=True)
 
@@ -555,6 +625,10 @@ def submit_task():
         return jsonify({"error": err}), 400
 
     white_balance = parse_bool(request.form.get("wb"), default=True)
+    requested_polaroids = parse_positive_int(
+        request.form.get("expected_polaroids"),
+        request.form.get("polaroid_count"),
+    )
     tid = uuid.uuid4().hex
     now = time.time()
     with task_lock:
@@ -562,7 +636,13 @@ def submit_task():
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance,
-            "expected_polaroids": 0, "total_polaroids": 0, "extraction_complete": False,
+            "requested_polaroids": requested_polaroids,
+            "expected_polaroids": requested_polaroids,
+            "total_polaroids": 0,
+            "detected_polaroids": 0,
+            "detection_threshold": 0,
+            "warning": "",
+            "extraction_complete": False,
         }
         # 清理过期
         for k in list(task_store.keys()):
@@ -573,8 +653,14 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance})", flush=True)
-    return jsonify({"task_id": tid, "status": "queued", "white_balance": white_balance})
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, target={requested_polaroids or 'auto'})", flush=True)
+    return jsonify({
+        "task_id": tid,
+        "status": "queued",
+        "white_balance": white_balance,
+        "requested_polaroids": requested_polaroids,
+        "expected_polaroids": requested_polaroids,
+    })
 
 # ---- 查询状态（含中间结果列表） ----
 @app.route("/api/status/<task_id>")
@@ -592,6 +678,10 @@ def task_status(task_id):
         ]
         total_polaroids = t.get("total_polaroids", 0)
         expected_polaroids = t.get("expected_polaroids", total_polaroids)
+        requested_polaroids = t.get("requested_polaroids", 0)
+        detected_polaroids = t.get("detected_polaroids", 0)
+        detection_threshold = t.get("detection_threshold", 0)
+        warning = t.get("warning", "")
         extraction_complete = bool(t.get("extraction_complete", False))
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
@@ -611,6 +701,10 @@ def task_status(task_id):
         "results": results_meta,
         "total_polaroids": total_polaroids,
         "expected_polaroids": expected_polaroids,
+        "requested_polaroids": requested_polaroids,
+        "detected_polaroids": detected_polaroids,
+        "detection_threshold": detection_threshold,
+        "warning": warning,
         "extraction_complete": extraction_complete,
         "elapsed": elapsed,
         "error": error,
