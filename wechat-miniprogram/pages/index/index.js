@@ -1,7 +1,6 @@
 const { AUTH_STORAGE_KEY, getApiBaseUrl } = require("../../utils/config");
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_COUNT = 180;
-const MAX_ROTATE_CANVAS_SIDE = 1600;
 
 Page({
   data: {
@@ -225,9 +224,8 @@ Page({
           return;
         }
 
-        const scale = Math.min(1, MAX_ROTATE_CANVAS_SIDE / Math.max(sourceWidth, sourceHeight));
-        const outputWidth = Math.max(1, Math.round(sourceHeight * scale));
-        const outputHeight = Math.max(1, Math.round(sourceWidth * scale));
+        const outputWidth = Math.max(1, Math.round(sourceHeight));
+        const outputHeight = Math.max(1, Math.round(sourceWidth));
 
         canvas.width = outputWidth;
         canvas.height = outputHeight;
@@ -252,8 +250,7 @@ Page({
               height: outputHeight,
               destWidth: outputWidth,
               destHeight: outputHeight,
-              fileType: "jpg",
-              quality: 0.92,
+              fileType: "png",
               success: (result) => {
                 this.setData({
                   inputPath: result.tempFilePath,

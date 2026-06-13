@@ -4,7 +4,7 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback
 from datetime import datetime
 from collections import defaultdict
 
@@ -50,23 +50,34 @@ MODEL_LOAD_LOCK = threading.Lock()
 
 def get_sam3():
     global _sam3_model, _sam3_processor, _device
-    if _sam3_model is not None:
+    if _sam3_model is not None and _sam3_processor is not None:
         return _sam3_model, _sam3_processor, _device
 
     with MODEL_LOAD_LOCK:
-        if _sam3_model is not None:
+        if _sam3_model is not None and _sam3_processor is not None:
             return _sam3_model, _sam3_processor, _device
 
         print("📦 正在加载 SAM3 模型（首次较慢）...", flush=True)
-        from transformers import Sam3Model, Sam3Processor
-        from modelscope import snapshot_download
+        try:
+            from transformers import Sam3Model, Sam3Processor
+            from modelscope import snapshot_download
 
-        model_dir = snapshot_download('facebook/sam3', cache_dir='./sam3_model')
-        model_dir_local = "./sam3_model/facebook/sam3"
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
+            model_dir = snapshot_download('facebook/sam3', cache_dir='./sam3_model')
+            model_dir_local = "./sam3_model/facebook/sam3"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        _sam3_model = Sam3Model.from_pretrained(model_dir_local).to(_device)
-        _sam3_processor = Sam3Processor.from_pretrained(model_dir_local)
+            model = Sam3Model.from_pretrained(model_dir_local).to(device)
+            processor = Sam3Processor.from_pretrained(model_dir_local)
+
+            _sam3_model = model
+            _sam3_processor = processor
+            _device = device
+        except Exception:
+            _sam3_model = None
+            _sam3_processor = None
+            _device = None
+            raise
+
         print(f"✅ SAM3 就绪 (设备: {_device})", flush=True)
         return _sam3_model, _sam3_processor, _device
 
@@ -84,6 +95,7 @@ def preload_sam3_after_listen(port: int):
         get_sam3()
     except Exception as e:
         print(f"💥 SAM3 预加载失败: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
 
 # ===================================================================
 # 四边形拟合工具
@@ -537,6 +549,7 @@ def worker_loop():
                     task_store[task_id]["finished_at"] = time.time()
         except Exception as e:
             print(f"💥 task={task_id[:8]} 崩溃: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc()
             with task_lock:
                 if task_id in task_store:
                     task_store[task_id]["status"] = "failed"
