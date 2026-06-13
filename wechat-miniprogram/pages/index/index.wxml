@@ -28,7 +28,7 @@
       </button>
     </view>
 
-    <view wx:if="{{showCountInput && !processing}}" class="count-input-bar">
+    <view wx:if="{{inputPath && !processing && !extractedImages.length}}" class="count-input-bar">
       <view class="count-input-label">输入待提取拍立得数量</view>
       <input
         class="count-input"
