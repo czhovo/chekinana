@@ -479,7 +479,7 @@ def do_process_extraction(raw_data: bytes, task_id: str):
             img_np,
             M,
             (POLAROID_W, POLAROID_H),
-            flags=cv2.INTER_CUBIC,
+            flags=cv2.INTER_LANCZOS4,
         )
         if white_balance_enabled:
             rectified, wb_info = apply_fixed_border_white_balance(rectified)
