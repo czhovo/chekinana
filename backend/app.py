@@ -475,7 +475,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         dst = np.array([[0,0],[POLAROID_W,0],[POLAROID_W,POLAROID_H],
                         [0,POLAROID_H]], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src, dst)
-        rectified = cv2.warpPerspective(img_np, M, (POLAROID_W, POLAROID_H))
+        rectified = cv2.warpPerspective(
+            img_np,
+            M,
+            (POLAROID_W, POLAROID_H),
+            flags=cv2.INTER_CUBIC,
+        )
         if white_balance_enabled:
             rectified, wb_info = apply_fixed_border_white_balance(rectified)
             if wb_info["applied"]:

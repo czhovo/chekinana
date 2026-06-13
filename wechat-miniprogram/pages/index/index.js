@@ -154,7 +154,7 @@ Page({
       count: 1,
       mediaType: ["image"],
       sourceType: ["album", "camera"],
-      sizeType: ["compressed"],
+      sizeType: ["original"],
       success: (res) => {
         const file = res.tempFiles && res.tempFiles[0];
         if (!file || !file.tempFilePath) {
