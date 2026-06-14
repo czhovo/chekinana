@@ -17,26 +17,36 @@
   margin-bottom: 14rpx;
 }
 
+.section-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  flex: 1 1 auto;
+}
+
 .section-title {
   color: #202124;
   font-size: 32rpx;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12rpx;
+  gap: 8rpx;
   flex-wrap: wrap;
+  flex: 0 1 auto;
 }
 
 .rotate-button {
-  width: 56rpx;
-  height: 56rpx;
-  min-width: 56rpx;
-  max-width: 56rpx;
-  flex: 0 0 56rpx;
+  width: 50rpx;
+  height: 50rpx;
+  min-width: 50rpx;
+  max-width: 50rpx;
+  flex: 0 0 50rpx;
   margin: 0;
   padding: 0;
   border: 0;
@@ -49,8 +59,8 @@
 }
 
 .rotate-icon {
-  width: 52rpx;
-  height: 52rpx;
+  width: 46rpx;
+  height: 46rpx;
 }
 
 .rotate-button.is-disabled {
@@ -64,6 +74,7 @@
   color: #4b5563;
   font-size: 22rpx;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .mini-switch {

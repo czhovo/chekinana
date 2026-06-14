@@ -13,7 +13,7 @@ Page({
     denoiseEnabled: true,
     expectedPolaroidCount: "",
     showCountInput: false,
-    statusText: "请选择一张包含拍立得的照片",
+    statusText: "请选择一张包含拍立得的图片",
     statusKind: "idle"
   },
 
@@ -132,7 +132,7 @@ Page({
 
     return {
       processing: false,
-      statusText: "请选择一张包含拍立得的照片",
+      statusText: "请选择一张包含拍立得的图片",
       statusKind: "idle",
       showCountInput: false
     };

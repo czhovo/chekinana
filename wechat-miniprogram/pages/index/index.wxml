@@ -1,11 +1,13 @@
 <view class="page">
   <view class="input-section">
     <view class="section-header">
-      <text class="section-title">输入照片</text>
-      <view class="header-actions">
+      <view class="section-title-row">
+        <text class="section-title">输入图片</text>
         <view class="rotate-button {{(!inputPath || processing) ? 'is-disabled' : ''}}" bindtap="rotateInputImage" aria-label="逆时针旋转">
           <image class="rotate-icon" src="/assets/rotate-left.png" mode="aspectFit"></image>
         </view>
+      </view>
+      <view class="header-actions">
         <view class="wb-control">
           <text>降噪</text>
           <switch class="mini-switch" checked="{{denoiseEnabled}}" bindchange="onDenoiseChange" disabled="{{processing}}" color="#2563eb"></switch>
@@ -21,7 +23,7 @@
       <image wx:if="{{inputPath}}" class="preview-image" src="{{inputPath}}" mode="aspectFit" style="{{previewRotationStyle}}"></image>
       <view wx:else class="placeholder">
         <view class="placeholder-icon">+</view>
-        <view>选择一张包含拍立得的照片</view>
+        <view>选择一张包含拍立得的图片</view>
       </view>
     </view>
 
