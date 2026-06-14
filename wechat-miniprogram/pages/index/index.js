@@ -1,4 +1,4 @@
-const { AUTH_STORAGE_KEY, getApiBaseUrl } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, getApiBaseUrl, isLocalPreviewToken } = require("../../utils/config");
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_COUNT = 180;
 
@@ -51,6 +51,11 @@ Page({
 
   verifyCachedToken(token) {
     if (this.verifyingCachedToken) return;
+
+    if (isLocalPreviewToken(token)) {
+      this.setData(this.getPostAuthRestoreState());
+      return;
+    }
 
     const apiBaseUrl = this.getApiBaseUrl();
     if (!apiBaseUrl) {

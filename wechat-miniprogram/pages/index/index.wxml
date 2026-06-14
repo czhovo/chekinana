@@ -8,11 +8,11 @@
         </view>
         <view class="wb-control">
           <text>降噪</text>
-          <switch checked="{{denoiseEnabled}}" bindchange="onDenoiseChange" disabled="{{processing}}" color="#2563eb"></switch>
+          <switch class="mini-switch" checked="{{denoiseEnabled}}" bindchange="onDenoiseChange" disabled="{{processing}}" color="#2563eb"></switch>
         </view>
         <view class="wb-control">
           <text>白平衡</text>
-          <switch checked="{{wbEnabled}}" bindchange="onWhiteBalanceChange" disabled="{{processing}}" color="#2563eb"></switch>
+          <switch class="mini-switch" checked="{{wbEnabled}}" bindchange="onWhiteBalanceChange" disabled="{{processing}}" color="#2563eb"></switch>
         </view>
       </view>
     </view>

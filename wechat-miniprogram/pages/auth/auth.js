@@ -1,4 +1,4 @@
-const { AUTH_STORAGE_KEY, getApiBaseUrl, normalizePodId } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, getApiBaseUrl, isLocalPreviewToken, normalizePodId } = require("../../utils/config");
 
 Page({
   data: {
@@ -32,6 +32,12 @@ Page({
     const token = normalizePodId(this.data.token);
     const apiBaseUrl = getApiBaseUrl(token);
     if (!token || this.data.verifying) return;
+
+    if (isLocalPreviewToken(token)) {
+      wx.setStorageSync(AUTH_STORAGE_KEY, token);
+      wx.redirectTo({ url: "/pages/index/index" });
+      return;
+    }
 
     if (!apiBaseUrl) {
       this.setData({ errorText: "请先配置后端地址。" });

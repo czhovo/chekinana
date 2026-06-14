@@ -358,16 +358,16 @@ def denoise_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
     denoised = cv2.fastNlMeansDenoisingColored(
         bgr,
         None,
-        h=4,
-        hColor=4,
+        h=3,
+        hColor=3,
         templateWindowSize=7,
         searchWindowSize=21,
     )
     rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
 
     # Blend back a little original detail so marker strokes and facial edges do not get waxy.
-    blended = cv2.addWeighted(rgb, 0.82, image, 0.18, 0)
-    return blended, {"applied": True, "method": "fastNlMeansDenoisingColored", "h": 4, "hColor": 4}
+    blended = cv2.addWeighted(rgb, 0.65, image, 0.35, 0)
+    return blended, {"applied": True, "method": "fastNlMeansDenoisingColored", "h": 3, "hColor": 3}
 
 
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):

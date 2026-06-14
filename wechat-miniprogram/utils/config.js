@@ -1,5 +1,6 @@
 const AUTH_STORAGE_KEY = "cheki_auth_token";
 const API_GATEWAY_BASE_URL = "https://api.chekinana.top";
+const LOCAL_PREVIEW_TOKEN = "chekinana-preview";
 
 function normalizePodId(value) {
   const raw = (value || "").trim();
@@ -13,12 +14,18 @@ function normalizePodId(value) {
 
 function getApiBaseUrl(podId) {
   const normalizedPodId = normalizePodId(podId || wx.getStorageSync(AUTH_STORAGE_KEY));
-  return normalizedPodId ? API_GATEWAY_BASE_URL : "";
+  return normalizedPodId && normalizedPodId !== LOCAL_PREVIEW_TOKEN ? API_GATEWAY_BASE_URL : "";
+}
+
+function isLocalPreviewToken(value) {
+  return normalizePodId(value) === LOCAL_PREVIEW_TOKEN;
 }
 
 module.exports = {
   AUTH_STORAGE_KEY,
   API_GATEWAY_BASE_URL,
+  LOCAL_PREVIEW_TOKEN,
   normalizePodId,
-  getApiBaseUrl
+  getApiBaseUrl,
+  isLocalPreviewToken
 };
