@@ -403,14 +403,20 @@
 }
 
 .contact-dialog-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
   gap: 18rpx;
   margin-top: 26rpx;
+  box-sizing: border-box;
 }
 
-.contact-dialog-button {
+.contact-dialog-actions .contact-dialog-button,
+.contact-dialog-actions button.contact-dialog-button {
+  flex: 1 1 0%;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   height: 82rpx;
   margin: 0;
@@ -429,17 +435,21 @@
   overflow: hidden;
 }
 
-.contact-dialog-button::after {
+.contact-dialog-actions .contact-dialog-button::after,
+.contact-dialog-actions button.contact-dialog-button::after {
+  display: none;
   border: 0;
 }
 
-.contact-dialog-button.primary {
+.contact-dialog-actions .contact-dialog-button.primary,
+.contact-dialog-actions button.contact-dialog-button.primary {
   background: #2563eb;
   color: #ffffff;
   border-color: #2563eb;
 }
 
-.contact-dialog-button[disabled] {
+.contact-dialog-actions .contact-dialog-button[disabled],
+.contact-dialog-actions button.contact-dialog-button[disabled] {
   color: #a5abb5;
   background: #eef0f4;
   border-color: #eef0f4;
