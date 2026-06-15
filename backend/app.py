@@ -4,9 +4,10 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback, smtplib
 from datetime import datetime
 from collections import defaultdict
+from email.message import EmailMessage
 
 import numpy as np
 import torch
@@ -37,6 +38,7 @@ elif RUNPOD_POD_ID:
     ACCESS_TOKEN_SOURCE = "runpod_pod_id"
 else:
     ACCESS_TOKEN_SOURCE = "generated"
+CONTACT_EMAIL_TO = os.environ.get("CONTACT_EMAIL_TO", "").strip()
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -189,6 +191,43 @@ def get_request_token() -> str:
 
 def is_token_valid(token: str) -> bool:
     return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
+
+
+def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+    try:
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    except ValueError:
+        return False, "邮件端口配置错误"
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM", smtp_username).strip()
+
+    if not CONTACT_EMAIL_TO:
+        return False, "联系邮箱未配置"
+    if not smtp_username or not smtp_password or not smtp_from:
+        return False, "邮件服务未配置"
+
+    msg = EmailMessage()
+    msg["Subject"] = "Chekinana 联系作者"
+    msg["From"] = smtp_from
+    msg["To"] = CONTACT_EMAIL_TO
+    msg.set_content(
+        "用户在 Chekinana 小程序提交了联系内容。\n\n"
+        f"IP: {client_ip}\n"
+        f"Time: {datetime.now().isoformat()}\n\n"
+        f"{message_text}"
+    )
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+            server.starttls()
+            server.login(smtp_username, smtp_password)
+            server.send_message(msg)
+        return True, ""
+    except Exception as exc:
+        print(f"💥 contact email failed: {type(exc).__name__}: {exc}", flush=True)
+        return False, "邮件发送失败"
 
 # ===================================================================
 # 魔数校验
@@ -385,7 +424,7 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
 
 
 def do_process_extraction(raw_data: bytes, task_id: str):
-    """主处理流程：SAM3 检测 → 四边形标注 → 逐个提取"""
+    """主处理流程：SAM3 检测 → 四边形拟合 → 逐个提取"""
     model, processor, device = get_sam3()
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
@@ -464,48 +503,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
             task_store[task_id]["extraction_complete"] = True
         return
 
-    # --- 步骤 2: 绘制四边形标注 ---
-    with task_lock:
-        task_store[task_id]["phase"] = "annotating"
-    print("📐 绘制四边形标注...", flush=True)
-    annotated = img_np.copy()
-    overlay = annotated.copy()
     all_vertices = [item["vertices"] for item in candidates]
 
     # Sort detected polaroids from left to right for stable labels and downloads.
     all_vertices.sort(key=lambda verts: float(verts[:, 0].mean()))
 
-    for midx, verts in enumerate(all_vertices):
-        color = COLORS[midx % len(COLORS)]
-        # 半透明填充
-        cv2.fillPoly(overlay, [verts.astype(np.int32)], color)
-        # 边框 + 顶点
-        cv2.polylines(annotated, [verts.astype(np.int32)], True, color, 3)
-        for v in verts:
-            cv2.circle(annotated, (int(v[0]), int(v[1])), 8, color, -1)
-
-    # 混合半透明覆盖层 (alpha=0.3)
-    annotated = cv2.addWeighted(overlay, 0.3, annotated, 0.7, 0)
-
-    # 在混合后的图上绘制带背景色块的编号
-    for midx, verts in enumerate(all_vertices):
-        color = COLORS[midx % len(COLORS)]
-        cx, cy = int(verts[:, 0].mean()), int(verts[:, 1].mean())
-        # 大字号带彩色背景的编号
-        font_scale = 2.0
-        (tw, th), _ = cv2.getTextSize(f"#{midx+1}", cv2.FONT_HERSHEY_SIMPLEX, font_scale, 4)
-        x1, y1 = cx - tw//2 - 12, cy - th//2 - 10
-        x2, y2 = cx + tw//2 + 12, cy + th//2 + 10
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, -1)
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (255,255,255), 3)
-        cv2.putText(annotated, f"#{midx+1}", (cx - tw//2, cy + th//2),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255,255,255), 4)
-
-    add_intermediate(task_id, "annotated", img_to_png_bytes(annotated),
-                     "四边形标注")
-    print(f"   ✓ 四边形标注图已生成 ({len(all_vertices)} 张)", flush=True)
-
-    # --- 步骤 3: 逐个提取 ---
+    # --- 步骤 2: 逐个提取 ---
     with task_lock:
         task_store[task_id]["phase"] = "extracting"
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
@@ -637,7 +640,7 @@ def access_control():
     ip = get_client_ip()
     if not is_ip_allowed(ip):
         return jsonify({"error": "拒绝访问"}), 403
-    if request.path == "/api/process" and request.method == "POST" and not check_rate_limit(ip):
+    if request.path in ("/api/process", "/api/contact") and request.method == "POST" and not check_rate_limit(ip):
         return jsonify({"error": "请求过于频繁"}), 429
     if request.method == "OPTIONS":
         return None
@@ -664,6 +667,21 @@ def verify_token():
     if not is_token_valid(get_request_token()):
         return jsonify({"ok": False, "error": "Token 无效或已过期"}), 401
     return jsonify({"ok": True, "status": "ok"})
+
+
+@app.route("/api/contact", methods=["POST"])
+def contact_author():
+    data = request.get_json(silent=True) or {}
+    message_text = str(data.get("message", "")).strip()
+    if not message_text:
+        return jsonify({"ok": False, "error": "请输入内容"}), 400
+    if len(message_text) > 1000:
+        return jsonify({"ok": False, "error": "内容过长，请控制在1000字以内"}), 400
+
+    ok, error = send_contact_email(message_text, get_client_ip())
+    if not ok:
+        return jsonify({"ok": False, "error": error}), 503
+    return jsonify({"ok": True, "status": "sent"})
 
 # ---- 提交任务 ----
 @app.route("/api/process", methods=["POST"])

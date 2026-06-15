@@ -293,3 +293,11 @@
   color: #b3b8c1;
   font-size: 24rpx;
 }
+
+.contact-link {
+  margin-top: 22rpx;
+  color: #4b5563;
+  font-size: 26rpx;
+  text-align: center;
+  text-decoration: underline;
+}

@@ -607,6 +607,62 @@ Page({
     wx.showToast({ title: message || "处理失败", icon: "none" });
   },
 
+  contactAuthor() {
+    wx.showModal({
+      title: "联系作者",
+      editable: true,
+      placeholderText: "请输入想发送给作者的内容",
+      confirmText: "发送",
+      success: (res) => {
+        if (!res.confirm) return;
+        const message = (res.content || "").trim();
+        if (!message) {
+          wx.showToast({ title: "请输入内容", icon: "none" });
+          return;
+        }
+        this.sendContactMessage(message);
+      }
+    });
+  },
+
+  sendContactMessage(message) {
+    const apiBaseUrl = this.getApiBaseUrl();
+    const token = this.getAuthToken();
+    if (!apiBaseUrl || isLocalPreviewToken(token)) {
+      wx.showToast({ title: "请先使用有效 Token", icon: "none" });
+      return;
+    }
+
+    wx.showLoading({ title: "发送中..." });
+    wx.request({
+      url: `${apiBaseUrl}/api/contact`,
+      method: "POST",
+      header: Object.assign({
+        "content-type": "application/json"
+      }, this.getAuthHeader()),
+      data: { message },
+      success: (res) => {
+        wx.hideLoading();
+        const ok = res.statusCode >= 200
+          && res.statusCode < 300
+          && res.data
+          && (res.data.ok === true || res.data.status === "sent");
+        if (ok) {
+          wx.showToast({ title: "已发送", icon: "success" });
+          return;
+        }
+        wx.showToast({
+          title: (res.data && (res.data.error || res.data.message)) || "发送失败，请稍后重试",
+          icon: "none"
+        });
+      },
+      fail: () => {
+        wx.hideLoading();
+        wx.showToast({ title: "发送失败，请稍后重试", icon: "none" });
+      }
+    });
+  },
+
   saveResult(event) {
     const index = event.currentTarget.dataset.index;
     const image = this.data.extractedImages[index];

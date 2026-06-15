@@ -76,5 +76,7 @@
       <view>提取到的拍立得图片会显示在这里</view>
       <view class="empty-subtitle">点击结果图片即可保存到相册</view>
     </view>
+
+    <view class="contact-link" bindtap="contactAuthor">联系作者</view>
   </view>
 </view>
