@@ -410,7 +410,11 @@
 }
 
 .contact-dialog-button {
+  width: 100%;
+  min-width: 0;
   height: 82rpx;
+  margin: 0;
+  padding: 0 20rpx;
   border-radius: 12rpx;
   background: #ffffff;
   color: #1f2937;
@@ -420,6 +424,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
+  line-height: 1.2;
+  overflow: hidden;
+}
+
+.contact-dialog-button::after {
+  border: 0;
 }
 
 .contact-dialog-button.primary {
