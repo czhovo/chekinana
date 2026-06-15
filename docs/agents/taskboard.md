@@ -26,6 +26,7 @@ Task branch names:
   Frontend: codex/frontend-next
   Reviewer: codex/reviewer-next
 Reviewer correction commit: f0af0dd
+Reviewer button-fix approval commit: d5925e9
 ```
 
 ## Worktree Assignments
@@ -41,11 +42,11 @@ Reviewer correction commit: f0af0dd
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
-| CONTACT-FE-001 | Frontend | review | Replace the current single-line `wx.showModal` contact prompt with an in-page/custom modal containing a multi-line message input and a separate optional one-line contact input. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-16-frontend-contact-dialog.md` | Frontend commit `cede97a` implements the dialog and request payload, but reviewer found a blocking visual/layout issue in the bottom action buttons. |
+| CONTACT-FE-001 | Frontend | done | Replace the current single-line `wx.showModal` contact prompt with an in-page/custom modal containing a multi-line message input and a separate optional one-line contact input. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-16-frontend-contact-dialog.md` | Frontend commit `cede97a` implements the dialog and request payload; the follow-up button layout blocker was resolved by `CONTACT-FE-002`. |
 | CONTACT-BE-001 | Backend | done | Extend `/api/contact` handling so optional contact info is accepted, validated, and included in the email body without changing existing response shape. | `backend/app.py`, `docs/agents/handoffs/2026-06-16-backend-contact-dialog.md` | Backend commit `0e634c3` matches the API contract: `message` required, optional trimmed `contact` max 200, compatible response shape, unchanged auth/rate-limit behavior. Reviewer found no Backend blocker. |
 | CONTACT-REV-001 | Reviewer | done | Review the contact dialog UI/API change after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-16-reviewer-contact-dialog.md`, `docs/agents/handoffs/2026-06-16-reviewer-contact-dialog-correction.md` | Reviewer final verdict in commit `f0af0dd`: changes requested. Blocking finding: native contact dialog buttons overflow the modal because default mini-program button width/margin/padding/`::after` styles are not reset inside the two-column action grid. |
-| CONTACT-FE-002 | Frontend | pending | Fix the contact dialog bottom action button layout reported by Reviewer. | `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/YYYY-MM-DD-frontend-contact-button-fix.md` | The cancel and send buttons stay within the dialog on the reviewed viewport; native mini-program button defaults that affect width, margin, padding, and `::after` border are reset or otherwise constrained inside the contact dialog only; no Backend, auth, upload, polling, result download, or processing files change; Frontend handoff includes `node --check wechat-miniprogram\pages\index\index.js`, `git diff --check`, and visual/manual evidence or a precise limitation if DevTools screenshot is unavailable. |
-| CONTACT-REV-002 | Reviewer | pending | Re-review the Frontend contact button layout fix after the Frontend handoff is available. | Review only; write `docs/agents/handoffs/YYYY-MM-DD-reviewer-contact-button-fix.md` | Reviewer verifies the P2 button overflow finding is resolved, the fix is limited to contact dialog frontend styling, API contract remains intact, and no unauthorized implementation changes are made by Reviewer. |
+| CONTACT-FE-002 | Frontend | done | Fix the contact dialog bottom action button layout reported by Reviewer. | `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-16-frontend-contact-button-fix.md` | Frontend commit `c2027c4` constrains contact dialog buttons with scoped flex/button resets and leaves Backend, auth, upload, polling, result download, processing, and API payload logic unchanged. |
+| CONTACT-REV-002 | Reviewer | done | Re-review the Frontend contact button layout fix after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-16-reviewer-contact-button-fix.md` | Reviewer commit `d5925e9` verdict: approved. The P2 button overflow finding is resolved; fix is limited to contact dialog frontend styling; API contract remains intact; Reviewer made no implementation code changes. |
 
 Status values:
 
@@ -89,6 +90,7 @@ Contract details:
 | 2026-06-16 | Assign both Frontend and Backend tasks, then require Reviewer approval. | The change crosses UI and API/email handling, so both sides need a documented contract and review. |
 | 2026-06-16 | Assign button overflow fix back to Frontend only. | Reviewer found a visual/layout blocker in Frontend CSS; Backend/API behavior is already acceptable. |
 | 2026-06-16 | Do not treat Reviewer commit `2ed6faa` as an implementation source. | Reviewer noted it was an unauthorized implementation attempt and reverted it; Frontend must make the actual fix in its own worktree. |
+| 2026-06-16 | Contact dialog task is ready for integration after reviewer approval. | Reviewer approved `CONTACT-REV-002` in commit `d5925e9`. |
 
 ## Open Questions
 
@@ -100,3 +102,5 @@ Contract details:
 - Frontend implemented contact dialog in `cede97a`.
 - Backend implemented optional contact email payload in `0e634c3`.
 - Reviewer correction commit `f0af0dd` requests Frontend button layout fix before approval.
+- Frontend fixed contact dialog button constraints in `c2027c4`.
+- Reviewer approved the button fix in `d5925e9`; PM marks contact dialog work ready for integration.
