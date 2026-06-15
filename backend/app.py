@@ -30,6 +30,8 @@ MAX_DIMENSIONS = CONFIG.get("max_dimensions", 4096)
 MAX_IMAGE_PIXELS = MAX_DIMENSIONS * MAX_DIMENSIONS
 RATE_LIMIT = CONFIG.get("rate_limit_per_minute", 10)
 TASK_TTL = CONFIG.get("task_result_ttl_seconds", 600)
+MAX_CONTACT_MESSAGE_CHARS = 1000
+MAX_CONTACT_INFO_CHARS = 200
 RUNPOD_POD_ID = os.environ.get("RUNPOD_POD_ID", "").strip()
 ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or RUNPOD_POD_ID or secrets.token_urlsafe(24)
 if os.environ.get("CHEKINANA_ACCESS_TOKEN"):
@@ -193,7 +195,7 @@ def is_token_valid(token: str) -> bool:
     return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
 
 
-def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
+def send_contact_email(message_text: str, contact_info: str, client_ip: str) -> tuple[bool, str]:
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
     try:
         smtp_port = int(os.environ.get("SMTP_PORT", "587"))
@@ -212,10 +214,12 @@ def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
     msg["Subject"] = "Chekinana 联系作者"
     msg["From"] = smtp_from
     msg["To"] = CONTACT_EMAIL_TO
+    contact_line = f"Contact: {contact_info}\n" if contact_info else ""
     msg.set_content(
         "用户在 Chekinana 小程序提交了联系内容。\n\n"
         f"IP: {client_ip}\n"
-        f"Time: {datetime.now().isoformat()}\n\n"
+        f"Time: {datetime.now().isoformat()}\n"
+        f"{contact_line}\n"
         f"{message_text}"
     )
 
@@ -672,13 +676,19 @@ def verify_token():
 @app.route("/api/contact", methods=["POST"])
 def contact_author():
     data = request.get_json(silent=True) or {}
-    message_text = str(data.get("message", "")).strip()
+    message_value = data.get("message", "")
+    contact_value = data.get("contact", "")
+    message_text = "" if message_value is None else str(message_value).strip()
+    contact_info = "" if contact_value is None else str(contact_value).strip()
     if not message_text:
         return jsonify({"ok": False, "error": "请输入内容"}), 400
-    if len(message_text) > 1000:
+    if len(message_text) > MAX_CONTACT_MESSAGE_CHARS:
         return jsonify({"ok": False, "error": "内容过长，请控制在1000字以内"}), 400
 
-    ok, error = send_contact_email(message_text, get_client_ip())
+    if len(contact_info) > MAX_CONTACT_INFO_CHARS:
+        return jsonify({"ok": False, "error": "Contact info is too long (max 200 characters)"}), 400
+
+    ok, error = send_contact_email(message_text, contact_info, get_client_ip())
     if not ok:
         return jsonify({"ok": False, "error": error}), 503
     return jsonify({"ok": True, "status": "sent"})
