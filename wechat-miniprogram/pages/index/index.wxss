@@ -301,3 +301,135 @@
   text-align: center;
   text-decoration: underline;
 }
+
+.contact-dialog-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  padding: 40rpx 28rpx;
+  background: rgba(17, 24, 39, 0.48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.contact-dialog {
+  width: 100%;
+  max-width: 680rpx;
+  padding: 28rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  border: 2rpx solid #e5e7eb;
+  box-sizing: border-box;
+}
+
+.contact-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20rpx;
+  margin-bottom: 24rpx;
+}
+
+.contact-dialog-title {
+  color: #202124;
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.contact-dialog-subtitle {
+  margin-top: 6rpx;
+  color: #6b7280;
+  font-size: 24rpx;
+  line-height: 1.4;
+}
+
+.contact-dialog-close {
+  width: 52rpx;
+  height: 52rpx;
+  min-width: 52rpx;
+  color: #6b7280;
+  font-size: 44rpx;
+  line-height: 46rpx;
+  text-align: center;
+}
+
+.contact-field {
+  margin-bottom: 20rpx;
+}
+
+.contact-label {
+  margin-bottom: 10rpx;
+  color: #374151;
+  font-size: 26rpx;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.contact-label.optional {
+  color: #4b5563;
+  font-weight: 500;
+}
+
+.contact-message-input,
+.contact-info-input {
+  width: 100%;
+  padding: 18rpx 20rpx;
+  border: 2rpx solid #d9dde5;
+  border-radius: 12rpx;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 28rpx;
+  line-height: 1.45;
+  box-sizing: border-box;
+}
+
+.contact-message-input {
+  height: 220rpx;
+}
+
+.contact-info-input {
+  height: 76rpx;
+}
+
+.contact-input-placeholder {
+  color: #9ca3af;
+  font-size: 24rpx;
+}
+
+.contact-dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18rpx;
+  margin-top: 26rpx;
+}
+
+.contact-dialog-button {
+  height: 82rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: #1f2937;
+  border: 2rpx solid #d9dde5;
+  font-size: 28rpx;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.contact-dialog-button.primary {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.contact-dialog-button[disabled] {
+  color: #a5abb5;
+  background: #eef0f4;
+  border-color: #eef0f4;
+}

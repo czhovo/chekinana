@@ -79,4 +79,50 @@
 
     <view class="contact-link" bindtap="contactAuthor">联系作者</view>
   </view>
+
+  <view wx:if="{{showContactDialog}}" class="contact-dialog-mask" catchtap="cancelContactDialog" catchtouchmove="noop">
+    <view class="contact-dialog" catchtap="noop">
+      <view class="contact-dialog-header">
+        <view>
+          <view class="contact-dialog-title">联系作者</view>
+          <view class="contact-dialog-subtitle">写下想反馈的问题或想法</view>
+        </view>
+        <view class="contact-dialog-close" catchtap="cancelContactDialog">×</view>
+      </view>
+
+      <view class="contact-field">
+        <view class="contact-label">留言内容</view>
+        <textarea
+          class="contact-message-input"
+          value="{{contactMessage}}"
+          maxlength="1000"
+          placeholder="可以输入多行内容"
+          placeholder-class="contact-input-placeholder"
+          bindinput="onContactMessageInput"
+          disabled="{{contactSubmitting}}"
+          show-confirm-bar="{{false}}"
+          cursor-spacing="24"
+        ></textarea>
+      </view>
+
+      <view class="contact-field">
+        <view class="contact-label optional">联系方式（可选）</view>
+        <input
+          class="contact-info-input"
+          value="{{contactInfo}}"
+          maxlength="200"
+          placeholder="微信号、邮箱或其它联系方式"
+          placeholder-class="contact-input-placeholder"
+          bindinput="onContactInfoInput"
+          disabled="{{contactSubmitting}}"
+          confirm-type="done"
+        />
+      </view>
+
+      <view class="contact-dialog-actions">
+        <button class="contact-dialog-button" bindtap="cancelContactDialog" disabled="{{contactSubmitting}}">取消</button>
+        <button class="contact-dialog-button primary" bindtap="submitContactDialog" loading="{{contactSubmitting}}" disabled="{{contactSubmitting}}">发送</button>
+      </view>
+    </view>
+  </view>
 </view>
