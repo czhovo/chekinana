@@ -19,29 +19,49 @@
       </view>
     </view>
 
-    <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="chooseImage">
-      <image wx:if="{{inputPath}}" class="preview-image" src="{{inputPath}}" mode="aspectFit" style="{{previewRotationStyle}}"></image>
+    <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="onInputFrameTap">
+      <block wx:if="{{inputPath}}">
+        <image class="preview-image" src="{{inputPath}}" mode="aspectFit" style="{{previewRotationStyle}}"></image>
+        <view wx:if="{{selectedImages.length > 1}}" class="preview-nav left" catchtap="showPreviousImage">‹</view>
+        <view wx:if="{{selectedImages.length > 1}}" class="preview-nav right" catchtap="showNextImage">›</view>
+        <view wx:if="{{selectedImages.length > 1}}" class="preview-index-badge">{{currentImageIndex + 1}}/{{selectedImages.length}}</view>
+      </block>
       <view wx:else class="placeholder">
         <view class="placeholder-icon">+</view>
-        <view>选择一张包含拍立得的图片</view>
+        <view>选择或添加最多 9 张图片</view>
       </view>
     </view>
 
+    <scroll-view wx:if="{{selectedImages.length}}" class="selected-image-strip" scroll-x="true">
+      <view class="selected-image-list">
+        <view
+          wx:for="{{selectedImages}}"
+          wx:key="id"
+          class="selected-image-item {{index === currentImageIndex ? 'active' : ''}}"
+          bindtap="onSelectedImageTap"
+          data-index="{{index}}"
+        >
+          <image class="selected-image-thumb" src="{{item.path}}" mode="aspectFill"></image>
+          <view class="selected-image-index">{{index + 1}}</view>
+        </view>
+      </view>
+    </scroll-view>
+
     <view class="toolbar">
-      <button class="tool-button" bindtap="chooseImage" disabled="{{processing}}">选择图片</button>
+      <button class="tool-button" bindtap="chooseImage" disabled="{{processing || selectedImages.length >= 9}}">添加图片</button>
       <button class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
         {{processing ? '处理中' : '开始提取'}}
       </button>
     </view>
 
     <view wx:if="{{inputPath && !processing && !extractedImages.length}}" class="count-input-bar">
-      <view class="count-input-label">输入待提取拍立得数量</view>
+      <view class="count-input-label">图片{{currentImageIndex + 1}}/{{selectedImages.length}}包含的拍立得数量</view>
       <input
         class="count-input"
         value="{{expectedPolaroidCount}}"
         type="number"
         maxlength="3"
-        placeholder="可选，可以不填写"
+        placeholder="可选"
         confirm-type="done"
         bindinput="onExpectedCountInput"
       />
@@ -96,8 +116,6 @@
           class="contact-message-input"
           value="{{contactMessage}}"
           maxlength="1000"
-          placeholder="可以输入多行内容"
-          placeholder-class="contact-input-placeholder"
           bindinput="onContactMessageInput"
           disabled="{{contactSubmitting}}"
           show-confirm-bar="{{false}}"
@@ -111,8 +129,6 @@
           class="contact-info-input"
           value="{{contactInfo}}"
           maxlength="200"
-          placeholder="微信号、邮箱或其它联系方式"
-          placeholder-class="contact-input-placeholder"
           bindinput="onContactInfoInput"
           disabled="{{contactSubmitting}}"
           confirm-type="done"
