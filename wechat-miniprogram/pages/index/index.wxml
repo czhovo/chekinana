@@ -48,7 +48,8 @@
     </scroll-view>
 
     <view class="toolbar">
-      <button class="tool-button" bindtap="chooseImage" disabled="{{processing || selectedImages.length >= 9}}">添加图片</button>
+      <button wx:if="{{processing}}" class="tool-button interrupt" bindtap="interruptBatchProcessing">中断</button>
+      <button wx:else class="tool-button" bindtap="chooseImage" disabled="{{selectedImages.length >= 9}}">添加图片</button>
       <button class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
         {{processing ? '处理中' : '开始提取'}}
       </button>
