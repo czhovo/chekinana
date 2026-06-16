@@ -32,6 +32,7 @@ Task branch names:
   Frontend: codex/frontend-next
   Reviewer: codex/reviewer-next
 Reviewer batch review commit: 99e8ba4
+Reviewer batch UI approval commit: bb92d5b
 ```
 
 ## Worktree Assignments
@@ -47,14 +48,17 @@ Reviewer batch review commit: 99e8ba4
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
-| BATCH-FE-001 | Frontend | review | Replace the single-image selection state with a selected-images list while preserving the existing single-image workflow. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-batch-images.md` | Frontend commits `94471d5` through `9865fe4` implement selection up to 9, add-more behavior, and selected-image state. Reviewer found remaining Frontend UI blockers listed in `BATCH-FE-005`. |
-| BATCH-FE-002 | Frontend | review | Implement current-image preview management for multiple selected images. | Same Frontend files and same handoff as `BATCH-FE-001` | Frontend implements one large current-image preview, left/right navigation, delete-on-preview, index clamping, and thumbnail strip. Reviewer/user found remaining navigation/thumbnail UI blockers listed in `BATCH-FE-005`. |
-| BATCH-FE-003 | Frontend | review | Bind polaroid count and rotation to the current image. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for independent per-image count and rotation state; no blocker currently assigned to this behavior. |
-| BATCH-FE-004 | Frontend | review | Process selected images sequentially and aggregate ordered results. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for sequential processing, partial success, all-failed behavior, selected-image order, and task-scoped result keys. |
+| BATCH-FE-001 | Frontend | done | Replace the single-image selection state with a selected-images list while preserving the existing single-image workflow. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-batch-images.md` | Frontend commits `94471d5` through `9865fe4` implement selection up to 9, add-more behavior, and selected-image state. |
+| BATCH-FE-002 | Frontend | done | Implement current-image preview management for multiple selected images. | Same Frontend files and same handoff as `BATCH-FE-001` | Frontend implements one large current-image preview, left/right navigation, delete-on-preview, index clamping, and thumbnail strip; UI blockers were resolved by `BATCH-FE-005`. |
+| BATCH-FE-003 | Frontend | done | Bind polaroid count and rotation to the current image. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for independent per-image count and rotation state. |
+| BATCH-FE-004 | Frontend | done | Process selected images sequentially and aggregate ordered results. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for sequential processing, partial success, all-failed behavior, selected-image order, and task-scoped result keys. |
 | BATCH-BE-001 | Backend | done | Audit and verify that the existing single-image backend task API safely supports V1 sequential batch orchestration. | `docs/agents/handoffs/2026-06-17-backend-batch-images.md` | Backend commit `d1af90d` adds a handoff only; no backend code changes. Reviewer confirmed existing API/rate-limit behavior supports normal 9-image sequential batches and no new batch API is needed. |
 | BATCH-REV-001 | Reviewer | done | Review the batch image implementation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-batch-images.md` | Reviewer commit `99e8ba4` verdict: changes requested. Core batch logic and Backend compatibility are acceptable, but Frontend has blocking UI issues. |
-| BATCH-FE-005 | Frontend | pending | Fix remaining batch UI blockers from Reviewer and user visual feedback. | `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `wechat-miniprogram/pages/index/index.js` only if needed for thumbnail tap behavior, `docs/agents/handoffs/YYYY-MM-DD-frontend-batch-ui-fixes.md` | Fix all three UI issues: (1) reset/constrain native `.tool-button` defaults so `添加图片` and `开始提取` fit cleanly without oversize or overflow; (2) replace the preview left/right navigation text so it renders correctly in the mini-program while preserving `catchtap` navigation; (3) shrink/reflow the thumbnail strip so all 9 selected images can be visible, and allow tapping a thumbnail to jump to that image. Fix must stay scoped to batch UI; do not change Backend, auth, upload sequencing, polling, result download, contact-author, or processing pipeline behavior. |
-| BATCH-REV-002 | Reviewer | pending | Re-review the batch UI fixes after the Frontend handoff is available. | Review only; write `docs/agents/handoffs/YYYY-MM-DD-reviewer-batch-ui-fixes.md` | Reviewer verifies the two original P2 findings and the user-added thumbnail issue are resolved, no new UI regressions are introduced, all 9 thumbnails can be displayed and tapped to navigate, and the already-reviewed batch processing semantics remain intact. |
+| BATCH-FE-005 | Frontend | done | Fix remaining batch UI blockers from Reviewer and user visual feedback. | `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-17-frontend-batch-ui-fixes.md` | Frontend commit `c0f2d39` fixes toolbar button sizing, preview navigation rendering, 9-thumbnail layout, and thumbnail tap-to-jump. |
+| BATCH-REV-002 | Reviewer | done | Re-review the batch UI fixes after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-batch-ui-fixes.md` | Reviewer commit `bb92d5b` verdict: approved. The two P2 UI findings and the 9-thumbnail tap-to-jump requirement are resolved. |
+| BATCH-FE-006 | Frontend | pending | Fix processing-time interaction, interrupt behavior, incremental result display, and batch status text found during user testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/YYYY-MM-DD-frontend-batch-processing-ux.md` | During backend processing, thumbnail taps and left/right preview navigation remain usable; while processing, the `添加图片` button is replaced by an `中断` button; interrupting stops the current frontend batch flow, prevents later image uploads, stops/ignores further polling results, leaves already received results visible, and shows an interrupted status without requiring a new backend cancel API unless Frontend proves it is necessary. Partial polaroid results must appear as soon as they are returned by `/api/status/<task_id>`, preserving the original incremental display behavior instead of waiting for the whole source image to finish. Status text restores target count display `(m/n)` and changes "已提取几张" style wording to "正在提取第几张" while processing. Existing selected-image order, task-scoped result keys, failure-continue behavior, auth, upload headers, result download, save behavior, and contact-author UI remain unchanged. |
+| CONTACT-BE-002 | Backend | pending | Fix contact-author email observability and ensure optional contact info appears in delivered email body. | `backend/app.py`, `docs/agents/handoffs/YYYY-MM-DD-backend-contact-email-log.md` | `POST /api/contact` with non-empty `contact` must produce an email body that visibly includes the contact info, preferably under a clear label such as `联系方式`; missing/empty contact remains accepted and omitted; backend logs a successful send record with timestamp, recipient or configured destination, client IP, and whether contact info was provided; failure logs remain present; do not log the full message body or sensitive contact value unless explicitly justified; existing route/auth/rate-limit/response shape remains compatible. Backend handoff includes `python -m py_compile backend\app.py` and a focused fake-SMTP test proving contact info is in the message body and success logging occurs. |
+| BATCH-REV-003 | Reviewer | pending | Review the processing UX and contact email/log fixes after Frontend and Backend handoffs are available. | Review only; write `docs/agents/handoffs/YYYY-MM-DD-reviewer-batch-processing-contact-fixes.md` | Reviewer verifies processing-time thumbnail navigation and interrupt behavior, incremental per-polaroid display, restored `(m/n)` / "正在提取第几张" status wording, preserved batch semantics, and contact email/log behavior. Reviewer confirms no unrelated Backend, auth, RunPod, SAM/extraction internals, contact UI, result download, or save changes. |
 
 Status values:
 
@@ -102,6 +106,14 @@ Failure contract:
 
 - A failed upload, failed task, timeout, or empty extraction for one image must not stop later images from processing.
 - Final UI must distinguish full success, partial success, and no successful results.
+- Interrupting a running batch is a frontend control for the current batch flow: stop further uploads and ignore/stop polling updates after the user interrupts. V1 does not require a backend cancel endpoint unless implementation proves frontend-only interrupt cannot satisfy the UX.
+- Frontend must keep incremental result display: results returned during `/api/status/<task_id>` polling should appear immediately, not only after the whole source image completes.
+
+Contact email contract:
+
+- `POST /api/contact` keeps the existing route, auth, rate limit, and response shape.
+- Optional `contact` must be included in the email body when provided and omitted when empty.
+- Backend must log successful contact email sends as well as failures.
 
 ## Decisions
 
@@ -114,10 +126,13 @@ Failure contract:
 | 2026-06-16 | Continue after individual image failures and preserve ordered successful results. | Provides useful partial output for long batches and matches the agreed V1 behavior. |
 | 2026-06-17 | Route remaining batch work to Frontend UI only. | Reviewer approved core batch logic and Backend compatibility, while all open blockers are display/navigation issues in the mini-program UI. |
 | 2026-06-17 | Thumbnail strip must show all 9 selected images and support tap-to-jump. | User added this visual requirement after review; it belongs with the same Frontend UI fix. |
+| 2026-06-17 | Treat processing-time interactivity and interrupt as a Frontend batch UX follow-up. | User testing found the UI becomes non-interactive during backend processing; V1 can first stop frontend orchestration without adding a backend cancel API. |
+| 2026-06-17 | Preserve incremental polaroid display during batch processing. | User expects the original behavior where each returned polaroid appears as soon as the backend reports it. |
+| 2026-06-17 | Reopen Backend contact-email work for delivered contact info and success logs. | User testing found optional contact info is not visible in the email and successful sends are not logged. |
 
 ## Open Questions
 
-- None. Reviewer findings and user-added thumbnail requirement are concrete Frontend fixes.
+- None. The new user-tested issues have concrete Frontend and Backend owners.
 
 ## Completed Work Summary
 
@@ -125,3 +140,5 @@ Failure contract:
 - Frontend implemented V1 batch behavior through `9865fe4`.
 - Backend verified existing single-image API support in `d1af90d` without backend code changes.
 - Reviewer completed `BATCH-REV-001` in `99e8ba4` with verdict `changes requested` for Frontend UI issues.
+- Frontend fixed batch UI polish in `c0f2d39`.
+- Reviewer approved `BATCH-REV-002` in `bb92d5b`.
