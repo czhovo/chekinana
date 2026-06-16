@@ -2,14 +2,16 @@
 
 ## Current Objective
 
-Update the WeChat mini-program contact-author experience so users can enter a multi-line message, optionally provide one-line contact information, and see a polished dialog that matches the app style.
+Implement V1 batch image processing for the WeChat mini-program: users can select up to 9 images, add more images later, manage the selected-image list, enter per-image polaroid counts and rotations, then process each selected image in order and display all extracted polaroids in stable order.
 
 Scope constraints:
 
-- Do not change token/auth behavior.
-- Do not change RunPod startup, backend processing, or image extraction behavior.
-- Do not add phone/local-backend requirements.
-- Keep the change limited to contact-author UI, request payload, and email handling.
+- Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
+- Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
+- Preserve token/auth behavior, RunPod startup, SAM/extraction internals, result download auth, and existing single-image behavior.
+- Batch result order must be: selected image order, then detected polaroid order inside each image.
+- Continue processing later images if one image fails; report partial failures clearly.
+- Maximum selected images: 9.
 
 ## Current Workspace State
 
@@ -19,34 +21,37 @@ Required fields:
 Branch: codex/pm-next
 Worktree: C:\Users\20888\Desktop\chekinana-pm
 Git status: clean at task start
-Relevant existing changes: none
+Relevant existing changes:
+  Frontend direct/simple commit: 29fa626 frontend: remove contact placeholders
+  Frontend contact dialog approved baseline includes c2027c4 and 29fa626
+  Backend contact payload baseline: 0e634c3
+  Reviewer contact dialog approval baseline: d5925e9
 Task branch names:
   PM: codex/pm-next
   Backend: codex/backend-next
   Frontend: codex/frontend-next
   Reviewer: codex/reviewer-next
-Reviewer correction commit: f0af0dd
-Reviewer button-fix approval commit: d5925e9
 ```
 
 ## Worktree Assignments
 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
-| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, API contract, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Build the custom contact dialog UI and send optional contact info |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Accept optional contact info and include it in contact email |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend and Backend diffs against this taskboard |
+| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Implement batch selection, per-image controls, sequential processing, and ordered result aggregation |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Verify existing single-image API supports V1 batch orchestration and make only necessary compatibility fixes |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend/Backend diffs against this taskboard and the agreed V1 behavior |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
-| CONTACT-FE-001 | Frontend | done | Replace the current single-line `wx.showModal` contact prompt with an in-page/custom modal containing a multi-line message input and a separate optional one-line contact input. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-16-frontend-contact-dialog.md` | Frontend commit `cede97a` implements the dialog and request payload; the follow-up button layout blocker was resolved by `CONTACT-FE-002`. |
-| CONTACT-BE-001 | Backend | done | Extend `/api/contact` handling so optional contact info is accepted, validated, and included in the email body without changing existing response shape. | `backend/app.py`, `docs/agents/handoffs/2026-06-16-backend-contact-dialog.md` | Backend commit `0e634c3` matches the API contract: `message` required, optional trimmed `contact` max 200, compatible response shape, unchanged auth/rate-limit behavior. Reviewer found no Backend blocker. |
-| CONTACT-REV-001 | Reviewer | done | Review the contact dialog UI/API change after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-16-reviewer-contact-dialog.md`, `docs/agents/handoffs/2026-06-16-reviewer-contact-dialog-correction.md` | Reviewer final verdict in commit `f0af0dd`: changes requested. Blocking finding: native contact dialog buttons overflow the modal because default mini-program button width/margin/padding/`::after` styles are not reset inside the two-column action grid. |
-| CONTACT-FE-002 | Frontend | done | Fix the contact dialog bottom action button layout reported by Reviewer. | `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-16-frontend-contact-button-fix.md` | Frontend commit `c2027c4` constrains contact dialog buttons with scoped flex/button resets and leaves Backend, auth, upload, polling, result download, processing, and API payload logic unchanged. |
-| CONTACT-REV-002 | Reviewer | done | Re-review the Frontend contact button layout fix after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-16-reviewer-contact-button-fix.md` | Reviewer commit `d5925e9` verdict: approved. The P2 button overflow finding is resolved; fix is limited to contact dialog frontend styling; API contract remains intact; Reviewer made no implementation code changes. |
+| BATCH-FE-001 | Frontend | pending | Replace the single-image selection state with a selected-images list while preserving the existing single-image workflow. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/YYYY-MM-DD-frontend-batch-images.md` | Users can select up to 9 images in one picker action; users can click the add button later to append more images up to 9; the old "选择图片" button becomes "添加图片"; the empty preview copy reflects adding/selecting images; adding more images keeps existing selected images and their per-image state; existing contact-author changes, auth, upload headers, result download, and save behavior are not regressed. |
+| BATCH-FE-002 | Frontend | pending | Implement current-image preview management for multiple selected images. | Same Frontend files and same handoff as `BATCH-FE-001` | The preview frame still displays only one current image even when multiple images are selected; when more than one image exists, left/right edge controls switch to previous/next image; the current index is clamped after deletion; tapping a selected preview no longer opens replace choices and instead offers only a delete-image action; deleting the final image returns the page to empty/idle selection state. |
+| BATCH-FE-003 | Frontend | pending | Bind polaroid count and rotation to the current image. | Same Frontend files and same handoff as `BATCH-FE-001` | The count label reads `图片n/m包含的拍立得数量`; count placeholder is `可选`; switching to an image with no count shows an empty input; each image retains its own count value; the rotate button affects only the current image; switching images shows that image's own rotation preview; upload form uses the current image's own `expected_polaroids`/`polaroid_count` and `rotation_degrees`. |
+| BATCH-FE-004 | Frontend | pending | Process selected images sequentially and aggregate ordered results. | Same Frontend files and same handoff as `BATCH-FE-001` | Start extraction submits images one at a time to existing `POST /api/process`; no more than one backend task is actively uploaded/polled at once; if an image fails, Frontend records the failure and continues with the next image; final results are ordered by selected image index, then backend polaroid order within that image; result IDs/merge keys are unique across tasks, for example `taskId:resultId`; status text shows batch progress such as current image `n/m`, extracted count, and partial-failure summary; if all images fail or extract nothing, user sees a clear failure/notice. |
+| BATCH-BE-001 | Backend | pending | Audit and verify that the existing single-image backend task API safely supports V1 sequential batch orchestration. | `backend/app.py`, `backend/config.json` only if a compatibility fix is necessary, `docs/agents/handoffs/YYYY-MM-DD-backend-batch-images.md` | Backend confirms existing `POST /api/process`, `/api/status/<task_id>`, and `/api/result/<task_id>/<result_id>` support repeated sequential submissions from one user; rate limit behavior is checked against the 9-image maximum and does not break a normal 9-image batch; per-image `expected_polaroids`/`polaroid_count`, `rotation_degrees`, `wb`, and `denoise` remain honored; no new API route is added unless explicitly justified in the handoff; RunPod startup, auth, SAM extraction internals, and result response shape remain unchanged. |
+| BATCH-REV-001 | Reviewer | pending | Review the batch image implementation after Frontend and Backend handoffs are available. | Review only; write `docs/agents/handoffs/YYYY-MM-DD-reviewer-batch-images.md` | Reviewer verifies the agreed V1 design is implemented, max 9 selection is enforced, add/delete/navigation behavior works from code evidence, per-image count/rotation state is independent, sequential processing continues after individual failures, result ordering and unique result keys are correct, Backend contract/rate-limit checks are covered, and unrelated contact/auth/RunPod/processing behavior is not changed. |
 
 Status values:
 
@@ -61,46 +66,54 @@ paused
 
 ## API / Configuration Contract
 
-`POST /api/contact` keeps the existing route, auth, rate limit, and response conventions.
+V1 keeps the existing single-image task API.
 
-Request JSON:
+Frontend request flow:
 
-```json
-{
-  "message": "required non-empty string, existing max length remains 1000 characters",
-  "contact": "optional string, trim before use, max length 200 characters"
-}
-```
+- For each selected image, submit one `POST /api/process` request with multipart field `image`.
+- Submit images sequentially in selected-image order.
+- Include existing form fields per image:
+  - `token`
+  - `wb`
+  - `denoise`
+  - `rotation_degrees`
+  - optional `expected_polaroids`
+  - optional `polaroid_count`
+- Poll each returned `task_id` through existing `/api/status/<task_id>`.
+- Download each result through existing `/api/result/<task_id>/<result_id>`.
 
-Contract details:
+Backend response contract:
 
-- `message` is the multi-line content entered by the user.
-- `contact` is optional one-line contact information such as WeChat ID, email, phone, or other preferred contact method.
-- Missing or empty `contact` must be accepted.
-- Backend must reject overlong `contact` with a clear 400 error.
-- Backend success response remains compatible with the existing frontend success check, for example `{ "ok": true, "status": "sent" }`.
-- Frontend must not change token storage, auth headers, API base URL behavior, upload, polling, result download, or save behavior.
+- Existing `/api/process` response shape remains compatible.
+- Existing `/api/status/<task_id>` fields remain compatible, including `results`, `expected_polaroids`, `total_polaroids`, `warning`, and `extraction_complete`.
+- Existing `/api/result/<task_id>/<result_id>` behavior remains compatible.
+- No new batch route is required for V1.
+
+Ordering contract:
+
+- Overall display order is selected image order.
+- Within each image, display order is backend result order, which should remain the existing detected polaroid order.
+- Frontend must use a result key unique across backend tasks, such as `taskId:resultId`, to avoid merging result `0` from different images.
+
+Failure contract:
+
+- A failed upload, failed task, timeout, or empty extraction for one image must not stop later images from processing.
+- Final UI must distinguish full success, partial success, and no successful results.
 
 ## Decisions
 
 | Date | Decision | Reason |
 |---|---|---|
-| 2026-06-16 | Use a custom mini-program dialog instead of `wx.showModal({ editable: true })`. | The platform modal supports only a single editable field and cannot satisfy multi-line plus optional contact input. |
-| 2026-06-16 | Add optional `contact` as an explicit `/api/contact` JSON field. | Keeps user message and contact method semantically separate while preserving the existing route and response shape. |
-| 2026-06-16 | Assign both Frontend and Backend tasks, then require Reviewer approval. | The change crosses UI and API/email handling, so both sides need a documented contract and review. |
-| 2026-06-16 | Assign button overflow fix back to Frontend only. | Reviewer found a visual/layout blocker in Frontend CSS; Backend/API behavior is already acceptable. |
-| 2026-06-16 | Do not treat Reviewer commit `2ed6faa` as an implementation source. | Reviewer noted it was an unauthorized implementation attempt and reverted it; Frontend must make the actual fix in its own worktree. |
-| 2026-06-16 | Contact dialog task is ready for integration after reviewer approval. | Reviewer approved `CONTACT-REV-002` in commit `d5925e9`. |
+| 2026-06-16 | Use V1 sequential orchestration on top of existing single-image `/api/process`. | Avoids a larger backend batch-task redesign and keeps extraction internals stable. |
+| 2026-06-16 | Limit selected images to 9. | Keeps upload volume within WeChat and backend rate-limit constraints for the first batch version. |
+| 2026-06-16 | Bind count input and rotation state to the current image. | User explicitly requested per-image counts and rotations while previewing one image at a time. |
+| 2026-06-16 | Tapping an already selected preview should offer delete only. | User explicitly changed the preview tap behavior from replace to delete. |
+| 2026-06-16 | Continue after individual image failures and preserve ordered successful results. | Provides useful partial output for long batches and matches the agreed V1 behavior. |
 
 ## Open Questions
 
-- None. Reviewer provided the concrete Frontend CSS issue and owner.
+- None at assignment time.
 
 ## Completed Work Summary
 
-- PM planning committed as `66261b3`.
-- Frontend implemented contact dialog in `cede97a`.
-- Backend implemented optional contact email payload in `0e634c3`.
-- Reviewer correction commit `f0af0dd` requests Frontend button layout fix before approval.
-- Frontend fixed contact dialog button constraints in `c2027c4`.
-- Reviewer approved the button fix in `d5925e9`; PM marks contact dialog work ready for integration.
+- PM discussed and captured the agreed V1 batch design before publishing this taskboard.
