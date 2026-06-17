@@ -266,11 +266,12 @@ Page({
     const selectedImages = this.data.selectedImages;
     if (!selectedImages.length) return;
     const clampedIndex = Math.max(0, Math.min(currentImageIndex, selectedImages.length - 1));
+    const hasCompletedActionState = this.hasCompletedActionState();
     const nextState = Object.assign(this.getCurrentImageState(selectedImages, clampedIndex), {
       currentImageIndex: clampedIndex,
-      showCountInput: !this.data.processing
+      showCountInput: !this.data.processing && !hasCompletedActionState
     });
-    if (!this.data.processing) {
+    if (!this.data.processing && !hasCompletedActionState) {
       Object.assign(nextState, {
         extractedImages: [],
         statusText: selectedImages.length > 1
@@ -281,6 +282,11 @@ Page({
     }
     this.pendingAuthRestoreState = nextState;
     this.setData(nextState);
+  },
+
+  hasCompletedActionState() {
+    return !this.data.processing
+      && ((this.data.extractedImages || []).length > 0 || (this.data.failedImageIndexes || []).length > 0);
   },
 
   showDeleteCurrentImageAction() {
@@ -683,7 +689,12 @@ Page({
           if (settled || this.shouldIgnoreProcessingRun(runId)) return;
           settled = true;
           this.clearActiveUploadAttempt(uploadAttemptId);
+          this.cancelUploadAttempt(uploadAttemptId);
           console.error("uploadFile failed", err);
+          if (retryCount < UPLOAD_MAX_RETRIES) {
+            startAttempt(retryCount + 1);
+            return;
+          }
           done({ error: this.getUploadErrorMessage(err) });
         }
       });
@@ -858,7 +869,7 @@ Page({
     this.clearPollTimer();
     this.activeTaskId = "";
     const hasImages = images.length > 0;
-    const shortageText = this.getFirstShortageText(failures);
+    const shortageText = this.getShortageSummaryText(failures);
     const statusText = hasImages
       ? shortageText
         ? `批量处理完成，共提取 ${images.length} 张，${shortageText}`
@@ -888,9 +899,11 @@ Page({
     }
   },
 
-  getFirstShortageText(failures) {
-    const shortage = failures.find((failure) => failure && failure.message && failure.message.includes("结果不足"));
-    return shortage ? `图片${shortage.imageIndex + 1}${shortage.message}` : "";
+  getShortageSummaryText(failures) {
+    return failures
+      .filter((failure) => failure && failure.message && failure.message.includes("结果不足"))
+      .map((failure) => `图片${failure.imageIndex + 1}${failure.message}`)
+      .join("；");
   },
 
   getShortageStatusText(receivedCount, expectedCount) {
@@ -899,6 +912,15 @@ Page({
 
   getUploadErrorMessage(err) {
     const errMsg = err && err.errMsg ? err.errMsg : "";
+    const normalizedErrMsg = errMsg.toLowerCase();
+    if (
+      normalizedErrMsg.includes("socket")
+      || normalizedErrMsg.includes("tls")
+      || normalizedErrMsg.includes("ssl")
+      || normalizedErrMsg.includes("secure")
+    ) {
+      return "图片上传失败，请检查网络后重试";
+    }
     if (errMsg.includes("url not in domain list") || errMsg.includes("domain list")) {
       return `上传域名未配置到微信合法域名：${errMsg}`;
     }
@@ -906,7 +928,7 @@ Page({
       return "处理时间过长 请稍后重试";
     }
     if (errMsg.includes("fail")) {
-      return `上传失败：${errMsg}`;
+      return "图片上传失败，请检查网络后重试";
     }
     return "上传失败，请检查网络或域名配置";
   },
