@@ -11,6 +11,7 @@ const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 Page({
   data: {
     inputPath: "",
+    currentPreviewImages: [],
     selectedImages: [],
     currentImageIndex: 0,
     rotationDegrees: 0,
@@ -143,6 +144,9 @@ Page({
     if (this.data.inputPath) {
       return {
         processing: false,
+        currentPreviewImages: this.data.currentPreviewImages.length
+          ? this.data.currentPreviewImages
+          : this.getCurrentPreviewImages(this.data.selectedImages, this.data.currentImageIndex),
         statusText: "图片已选择，点击开始提取",
         statusKind: "ready",
         showCountInput: true
@@ -164,6 +168,7 @@ Page({
     this.setData({
       processing: false,
       inputPath: "",
+      currentPreviewImages: [],
       selectedImages: [],
       currentImageIndex: 0,
       rotationDegrees: 0,
@@ -292,6 +297,7 @@ Page({
     if (!selectedImages.length) {
       const nextState = {
         inputPath: "",
+        currentPreviewImages: [],
         selectedImages: [],
         currentImageIndex: 0,
         rotationDegrees: 0,
@@ -355,10 +361,12 @@ Page({
     const sourcePath = currentImage.path || currentImage.previewPath || this.data.inputPath;
     const selectedImages = this.updateCurrentSelectedImage({
       rotationDegrees,
-      previewPath: sourcePath
+      previewPath: sourcePath,
+      previewRotationDegrees: rotationDegrees
     });
     this.setData({
       inputPath: sourcePath,
+      currentPreviewImages: this.getCurrentPreviewImages(selectedImages, currentImageIndex),
       rotationDegrees,
       selectedImages,
       extractedImages: [],
@@ -1311,6 +1319,7 @@ Page({
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       path,
       previewPath: path,
+      previewRotationDegrees: 0,
       rotationDegrees: 0,
       expectedPolaroidCount: ""
     };
@@ -1320,9 +1329,22 @@ Page({
     const currentImage = selectedImages[currentImageIndex] || {};
     return {
       inputPath: currentImage.path || currentImage.previewPath || "",
+      currentPreviewImages: this.getCurrentPreviewImages(selectedImages, currentImageIndex),
       rotationDegrees: currentImage.rotationDegrees || 0,
       expectedPolaroidCount: currentImage.expectedPolaroidCount || ""
     };
+  },
+
+  getCurrentPreviewImages(selectedImages, currentImageIndex) {
+    const currentImage = selectedImages[currentImageIndex] || {};
+    const previewPath = currentImage.previewPath || currentImage.path || "";
+    if (!previewPath) return [];
+    const previewRotationDegrees = currentImage.previewRotationDegrees || currentImage.rotationDegrees || 0;
+    return [{
+      previewKey: `${currentImage.id || previewPath}-${previewPath}-${previewRotationDegrees}`,
+      previewPath,
+      previewRotationDegrees
+    }];
   },
 
   noop() {},
@@ -1527,6 +1549,7 @@ Page({
     this.pendingAuthRestoreState = null;
     this.setData({
       inputPath: "",
+      currentPreviewImages: [],
       selectedImages: [],
       currentImageIndex: 0,
       rotationDegrees: 0,
