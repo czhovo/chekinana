@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Resolve the remaining `BATCH-REV-005` blocker: align Frontend pre-task upload cancellation with Backend's canonical `POST /api/upload-cancel/<upload_attempt_id>` route so timed-out or interrupted uploads cannot later queue an uncanceled backend extraction.
+Upload/status follow-up fixes are approved and ready for integration: rotated thumbnails, upload timeout/retry, active-task-based status display, and pre-task upload cancellation now align with the Backend canonical `POST /api/upload-cancel/<upload_attempt_id>` contract.
 
 Scope constraints:
 
@@ -42,6 +42,8 @@ Integration push: f3b60ed main includes approved preview/status fixes
 Backend upload/status contract commit: d765c72
 Frontend upload/status fix commit: 7ce31e5
 Reviewer upload/status review commit: 72a4369
+Frontend upload cancel endpoint commit: f644539
+Reviewer upload cancel endpoint approval commit: e07e1e8
 ```
 
 ## Worktree Assignments
@@ -49,9 +51,9 @@ Reviewer upload/status review commit: 72a4369
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Align pre-task upload cancel endpoint with Backend canonical contract |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Upload/status fixes approved through `f644539`; no open Frontend implementation task |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Backend upload/status contract implemented in `d765c72`; no open Backend implementation task unless re-review finds a regression |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Re-review the pre-task upload cancel endpoint alignment after Frontend handoff |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Upload cancel endpoint alignment approved in `e07e1e8`; no open review task |
 
 ## Current Tasks
 
@@ -73,10 +75,10 @@ Reviewer upload/status review commit: 72a4369
 | BATCH-FE-007 | Frontend | done | Fix post-integration preview rotation and status-phase text issues found during mini-program testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-preview-status-fixes.md` | Frontend commit `091947e` passed reviewer checks: preview now uses per-image generated `previewPath` instead of preview-frame rotation transforms, switching differently rotated images updates source/orientation together, upload/backend-waiting/queued/processing phases are distinct, queued status includes queue position when available, incremental result display and interrupt/cancel behavior remain intact, and no backend API contract changed. |
 | BATCH-REV-004 | Reviewer | done | Review `BATCH-FE-007` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-preview-status-fixes.md` | Reviewer commit `8c99538` verdict: approved. Reviewer confirmed the diff is scoped to Frontend preview/status behavior, no Backend/auth/contact/result API contracts changed, `node --check` and `git diff --check` passed, and mocked checks covered rotated-image switching, upload status, queued status with queue position, processing progress, incremental display, and interrupt. |
 | BATCH-BE-003 | Backend | done | Add backend support for active-task status and pre-task upload cancellation. | `backend/app.py`, `docs/agents/handoffs/2026-06-17-backend-upload-status-contract.md` | Backend commit `d765c72` implements active processing task fields in `/api/status/<task_id>` and pre-task upload cancellation. Reviewer smoke confirmed `POST /api/upload-cancel/<upload_attempt_id>` records cancellation and a late `/api/process` with the same `upload_attempt_id` returns 409 without queuing. No Backend follow-up is required unless Frontend alignment or re-review finds a regression. |
-| BATCH-FE-008 | Frontend | review | Fix thumbnails, upload timeout/retry, pre-task interrupt, and active-task-based status display. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-upload-status-fixes.md` | Frontend commit `7ce31e5` implements rotated thumbnails, bounded upload timeout/retry, upload attempt ids, abort handling, active-task-based status helpers, and stale callback guards. Reviewer confirmed these pieces statically, but the end-to-end pre-task cancel requirement is blocked because Frontend calls `/api/upload-attempts/<id>/cancel` while Backend exposes `/api/upload-cancel/<id>`; `BATCH-FE-009` owns the endpoint alignment. |
+| BATCH-FE-008 | Frontend | done | Fix thumbnails, upload timeout/retry, pre-task interrupt, and active-task-based status display. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-upload-status-fixes.md` | Frontend commit `7ce31e5` implements rotated thumbnails, bounded upload timeout/retry, upload attempt ids, abort handling, active-task-based status helpers, and stale callback guards. Its only review blocker was the pre-task cancel endpoint mismatch; `BATCH-FE-009` fixed that blocker and `BATCH-REV-006` approved the end-to-end behavior. |
 | BATCH-REV-005 | Reviewer | done | Review `BATCH-BE-003` and `BATCH-FE-008` together after both handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-status-fixes.md` | Reviewer commit `72a4369` verdict: changes requested. Blocking P1: Frontend and Backend implemented different pre-task upload cancel endpoints, so an interrupted/timed-out upload can still arrive late at `/api/process` and be queued. Rotated thumbnails, upload timeout/retry scaffolding, active-task status fields, and active-task-based status helpers were otherwise reviewed. |
-| BATCH-FE-009 | Frontend | pending | Align pre-task upload cancel endpoint with the Backend canonical route. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-17-frontend-upload-cancel-endpoint.md` | Use Backend's canonical protected endpoint `POST /api/upload-cancel/<upload_attempt_id>` for all pre-task upload cancellation calls. Remove or stop using the mismatched `/api/upload-attempts/<upload_attempt_id>/cancel` path. Verify timeout and interrupt-before-task-id both send the canonical endpoint, late callbacks remain ignored, retry limits still apply, and existing `/api/cancel/<task_id>` remains unchanged after a backend `task_id` exists. Handoff must include `node --check`, `git diff --check`, and a mocked route check proving `cancelUploadAttempt("attempt-route")` calls `/api/upload-cancel/attempt-route`. |
-| BATCH-REV-006 | Reviewer | pending | Re-review `BATCH-FE-009` endpoint alignment after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-cancel-endpoint.md` | Verify the end-to-end pre-task upload cancel contract now works with Backend `d765c72`: Frontend sends `POST /api/upload-cancel/<upload_attempt_id>`, Backend records the attempt, and a late `/api/process` with that id returns 409 and does not queue/extract. Re-check no regressions to rotated thumbnails, upload timeout/retry, active-task status display, task-id cancellation, auth, result APIs, or contact behavior. |
+| BATCH-FE-009 | Frontend | done | Align pre-task upload cancel endpoint with the Backend canonical route. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-17-frontend-upload-cancel-endpoint.md` | Frontend commit `f644539` uses Backend's canonical protected endpoint `POST /api/upload-cancel/<upload_attempt_id>` for all pre-task upload cancellation calls and no longer uses `/api/upload-attempts/<upload_attempt_id>/cancel`. Handoff verification covered `node --check`, `git diff --check`, timeout canonical cancel, interrupt-before-task canonical cancel, and canonical route checks. |
+| BATCH-REV-006 | Reviewer | done | Re-review `BATCH-FE-009` endpoint alignment after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-cancel-endpoint.md` | Reviewer commit `e07e1e8` verdict: approved. Reviewer confirmed Frontend sends `POST /api/upload-cancel/<upload_attempt_id>`, timeout and interrupt-before-task-id use the canonical route, interrupt after `task_id` still uses `/api/cancel/<task_id>`, Backend rejects late canceled uploads with 409 and does not queue them, normal uploads still queue, active task fields remain in status, and auth behavior is not loosened. |
 
 Status values:
 
@@ -185,6 +187,7 @@ Contact email contract:
 | 2026-06-17 | Queue display must follow Backend active processing task id. | `queue_position: 0` and stale queued upload responses can mislabel active SAM detection/extraction as queued; the backend's active task id is the authoritative signal. |
 | 2026-06-17 | Upload timeout/cancel needs a pre-task upload attempt id contract. | A stuck upload may not have a backend `task_id`; canceling only by task id cannot stop a late upload from later being accepted and processed. |
 | 2026-06-17 | Canonical pre-task upload cancel endpoint is `POST /api/upload-cancel/<upload_attempt_id>`. | Reviewer found Frontend and Backend implemented different routes; Backend's route already passed the late-upload rejection smoke, so Frontend should align to it. |
+| 2026-06-17 | Upload/status follow-up fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-006` in commit `e07e1e8`; no open implementation or review tasks remain. |
 
 ## Open Questions
 
@@ -210,3 +213,5 @@ Contact email contract:
 - Backend completed `BATCH-BE-003` in `d765c72`.
 - Frontend completed initial `BATCH-FE-008` work in `7ce31e5`.
 - Reviewer completed `BATCH-REV-005` in `72a4369` with verdict `changes requested`; only the Frontend pre-task cancel endpoint is misaligned with Backend's canonical route.
+- Frontend completed `BATCH-FE-009` in `f644539`.
+- Reviewer approved `BATCH-REV-006` in `e07e1e8`; PM marks the upload/status follow-up fixes ready for integration.
