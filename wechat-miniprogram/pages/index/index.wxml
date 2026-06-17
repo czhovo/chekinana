@@ -21,7 +21,13 @@
 
     <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="onInputFrameTap">
       <block wx:if="{{inputPath}}">
-        <image class="preview-image" src="{{inputPath}}" mode="aspectFit"></image>
+        <image
+          wx:for="{{currentPreviewImages}}"
+          wx:key="previewKey"
+          class="preview-image rotation-{{item.previewRotationDegrees}}"
+          src="{{item.previewPath}}"
+          mode="aspectFit"
+        ></image>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav left" catchtap="showPreviousImage">‹</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav right" catchtap="showNextImage">›</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-index-badge">{{currentImageIndex + 1}}/{{selectedImages.length}}</view>
@@ -41,7 +47,7 @@
           bindtap="onSelectedImageTap"
           data-index="{{index}}"
         >
-          <image class="selected-image-thumb" src="{{item.previewPath ? item.previewPath : item.path}}" mode="aspectFill"></image>
+          <image class="selected-image-thumb rotation-{{item.previewRotationDegrees}}" src="{{item.previewPath}}" mode="aspectFit"></image>
           <view class="selected-image-index">{{index + 1}}</view>
         </view>
       </view>
@@ -49,8 +55,12 @@
 
     <view class="toolbar">
       <button wx:if="{{processing}}" class="tool-button interrupt" bindtap="interruptBatchProcessing">中断</button>
+      <block wx:elif="{{extractedImages.length || failedImageIndexes.length}}">
+        <button class="tool-button" bindtap="downloadAllResults" disabled="{{!extractedImages.length}}">全部下载</button>
+        <button class="tool-button danger" bindtap="clearProcessedImages">删除全部图片</button>
+      </block>
       <button wx:else class="tool-button" bindtap="chooseImage" disabled="{{selectedImages.length >= 9}}">添加图片</button>
-      <button class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
+      <button wx:if="{{processing || (!extractedImages.length && !failedImageIndexes.length)}}" class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
         {{processing ? '处理中' : '开始提取'}}
       </button>
     </view>
@@ -72,11 +82,6 @@
       <view class="status-dot"></view>
       <text>{{statusText}}</text>
     </view>
-    <canvas
-      class="rotation-canvas"
-      canvas-id="preview-rotation-canvas"
-      style="width: {{previewCanvasWidth}}px; height: {{previewCanvasHeight}}px;"
-    ></canvas>
   </view>
 
   <view class="result-section">

@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Upload/status follow-up fixes are approved and ready for integration: rotated thumbnails, upload timeout/retry, active-task-based status display, and pre-task upload cancellation now align with the Backend canonical `POST /api/upload-cancel/<upload_attempt_id>` contract.
+Rotation/timeout/queue/action and shortage-status fixes are approved and ready for integration: completed status reports insufficient extracted polaroids against the user-entered expected count, even when Backend completion payload fields have been reduced to the actual detected/extracted count.
 
 Scope constraints:
 
@@ -44,6 +44,12 @@ Frontend upload/status fix commit: 7ce31e5
 Reviewer upload/status review commit: 72a4369
 Frontend upload cancel endpoint commit: f644539
 Reviewer upload cancel endpoint approval commit: e07e1e8
+Integration push: dcda349 main includes approved upload/status fixes
+Frontend rotation/timeout/action commits: 9105b7f, c056be0, 3163107
+Reviewer rotation/timeout/action partial approval commit: b315634
+Reviewer shortage-status changes-requested commit: 1873ae9
+Frontend shortage status commits: e3488e3, b698c4b
+Reviewer shortage status approval commit: 1ee2872
 ```
 
 ## Worktree Assignments
@@ -51,9 +57,9 @@ Reviewer upload cancel endpoint approval commit: e07e1e8
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Upload/status fixes approved through `f644539`; no open Frontend implementation task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Rotation/timeout/action and shortage-status fixes approved through `b698c4b`; no open Frontend implementation task |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Backend upload/status contract implemented in `d765c72`; no open Backend implementation task unless re-review finds a regression |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Upload cancel endpoint alignment approved in `e07e1e8`; no open review task |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Shortage-status fix approved in `1ee2872`; no open review task |
 
 ## Current Tasks
 
@@ -79,6 +85,10 @@ Reviewer upload cancel endpoint approval commit: e07e1e8
 | BATCH-REV-005 | Reviewer | done | Review `BATCH-BE-003` and `BATCH-FE-008` together after both handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-status-fixes.md` | Reviewer commit `72a4369` verdict: changes requested. Blocking P1: Frontend and Backend implemented different pre-task upload cancel endpoints, so an interrupted/timed-out upload can still arrive late at `/api/process` and be queued. Rotated thumbnails, upload timeout/retry scaffolding, active-task status fields, and active-task-based status helpers were otherwise reviewed. |
 | BATCH-FE-009 | Frontend | done | Align pre-task upload cancel endpoint with the Backend canonical route. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-17-frontend-upload-cancel-endpoint.md` | Frontend commit `f644539` uses Backend's canonical protected endpoint `POST /api/upload-cancel/<upload_attempt_id>` for all pre-task upload cancellation calls and no longer uses `/api/upload-attempts/<upload_attempt_id>/cancel`. Handoff verification covered `node --check`, `git diff --check`, timeout canonical cancel, interrupt-before-task canonical cancel, and canonical route checks. |
 | BATCH-REV-006 | Reviewer | done | Re-review `BATCH-FE-009` endpoint alignment after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-cancel-endpoint.md` | Reviewer commit `e07e1e8` verdict: approved. Reviewer confirmed Frontend sends `POST /api/upload-cancel/<upload_attempt_id>`, timeout and interrupt-before-task-id use the canonical route, interrupt after `task_id` still uses `/api/cancel/<task_id>`, Backend rejects late canceled uploads with 409 and does not queue them, normal uploads still queue, active task fields remain in status, and auth behavior is not loosened. |
+| BATCH-FE-010 | Frontend | done | Fix rotated preview reliability, upload timeout/retry limits, queued status copy, final insufficient-count status, and completed-batch actions. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-17-frontend-rotation-timeout-queue.md` | Frontend commits `9105b7f`, `c056be0`, and `3163107` implement rotation reliability/fallback behavior, 15-second upload timeout with max 2 retries, queued copy without queue position, completed-batch actions, and related UI checks. Reviewer commit `b315634` approved the original rotation/timeout/queue/action scope; the later shortage-status blocker from `1873ae9` was fixed by `BATCH-FE-011` and approved by `BATCH-REV-008`. |
+| BATCH-REV-007 | Reviewer | done | Review `BATCH-FE-010` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-rotation-timeout-queue.md` | Final reviewer verdict is changes requested in commit `1873ae9`. Prior commit `b315634` approved rotation fallback, keyed preview switching, 15-second timeout with 2 retries, queued copy, active-task status, all-download, clear-successful-images, failed-image preservation, and cancel route behavior. Blocking P1 remains Frontend shortage status: when the user expects 5 but Backend completion reports actual counts as 3, both single-image and batch completion paths can show success instead of final `3/5` shortage. |
+| BATCH-FE-011 | Frontend | done | Fix final insufficient-count status to preserve the user-entered expected count. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-18-frontend-shortage-status.md` | Frontend commits `e3488e3` and `b698c4b` preserve the user-entered expected count, or `payload.requested_polaroids` when available, before falling back to Backend actual/finalized count fields. Final single-image and batch completion now show shortages such as `3/5` when the user expected 5 but Backend actual completion fields are 3, while preserving partial results and failed source image indexes. |
+| BATCH-REV-008 | Reviewer | done | Re-review `BATCH-FE-011` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-shortage-status.md` | Reviewer commit `1ee2872` verdict: approved. Reviewer confirmed single-image direct and polling completion, requested-polaroids fallback, batch direct and polling completion, and final batch status all show `3/5` shortages while preserving partial results. Regression checks covered rotation, 15-second timeout with 2 retries, canonical pre-task upload cancel, task cancel, all-download, and clear-successful-images preserving failed source images. |
 
 Status values:
 
@@ -126,6 +136,7 @@ Failure contract:
 
 - A failed upload, failed task, timeout, or empty extraction for one image must not stop later images from processing.
 - Final UI must distinguish full success, partial success, and no successful results.
+- After processing completes, failed source images must remain selectable/visible when the user clears successful images, so failed images can be retried or inspected.
 - Interrupting a running batch must cancel the currently active backend task as well as stop the frontend batch flow.
 - Frontend must call the Backend cancel endpoint for the active `task_id`, then stop further uploads and ignore/stop polling updates after the user interrupts.
 - Backend cancellation should terminate queued tasks immediately and stop processing tasks as soon as practical through explicit cancel state checks; after cancellation it must not continue extracting additional polaroids for that task.
@@ -135,12 +146,18 @@ Frontend preview/status contract:
 
 - The preview for the selected image must render as the image in its current rotation state, not by applying a transient rotation transform to the preview frame that can affect the previously displayed image during image switches.
 - Thumbnail previews must render from the same per-image rotated preview source/state as the large preview.
+- Rotated preview generation must be bounded and failure-safe: if preview generation fails, times out, or becomes stale, the mini-program must keep showing the original selected image and keep the backend upload rotation value intact.
+- Late rotated-preview callbacks must not overwrite a newer selected image or newer rotation state.
 - Per-image rotation remains part of the existing upload contract through `rotation_degrees`; this task does not require backend API changes.
 - Status text must distinguish these phases in order: upload (`图片上传中`), queued/waiting, processing/extracting, completed/partial/failed/canceled.
+- Final status text must report insufficient extracted polaroids when the final received count is lower than the expected count, including received/expected counts when available.
+- For final shortage display, a user-entered expected count, or Backend `requested_polaroids` that preserves that user input, is authoritative over Backend actual count fields such as `total_polaroids` and `expected_polaroids`.
+- Backend actual count fields must not hide a shortage by replacing a larger user-entered target during final completion.
 - Queued/waiting state must be derived from the backend's active processing task id for the current status response, not from `queue_position: 0` or from an initial queued upload response alone.
 - If the backend reports that the active processing task id matches the current image's `task_id`, the frontend must show processing/detecting/extracting status for that image even if no polaroid result has been returned yet.
-- If the backend reports another active processing task id, the frontend may show queued/waiting for the current image and include queue position when available.
+- If the backend reports another active processing task id, the frontend may show queued/waiting for the current image but must not display queue position.
 - If no backend active processing task id is present and the current task is not yet active, the frontend should show backend waiting rather than incorrectly claiming another task is in the queue.
+- Completed processing actions should replace the normal two action buttons with `全部下载` and `删除全部图片`; `全部下载` applies to every extracted polaroid result, while `删除全部图片` clears successfully processed source images but preserves failed source images.
 
 Upload timeout/cancel contract:
 
@@ -149,6 +166,8 @@ Upload timeout/cancel contract:
 - The canonical pre-task upload cancel endpoint is `POST /api/upload-cancel/<upload_attempt_id>`.
 - If a late `/api/process` request arrives with an upload attempt id already marked canceled, Backend must not enqueue or extract that image.
 - Frontend must abort timed-out or interrupted `wx.uploadFile` attempts when possible and send the pre-task cancel signal for the upload attempt id.
+- Upload timeout is 15 seconds per upload attempt before retry/cancel handling begins.
+- Upload timeout retry is capped at 2 retries per image upload attempt.
 - Once `/api/process` returns a `task_id`, existing `/api/cancel/<task_id>` remains the cancellation path for queued or processing backend tasks.
 
 Backend cancellation contract:
@@ -188,6 +207,13 @@ Contact email contract:
 | 2026-06-17 | Upload timeout/cancel needs a pre-task upload attempt id contract. | A stuck upload may not have a backend `task_id`; canceling only by task id cannot stop a late upload from later being accepted and processed. |
 | 2026-06-17 | Canonical pre-task upload cancel endpoint is `POST /api/upload-cancel/<upload_attempt_id>`. | Reviewer found Frontend and Backend implemented different routes; Backend's route already passed the late-upload rejection smoke, so Frontend should align to it. |
 | 2026-06-17 | Upload/status follow-up fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-006` in commit `e07e1e8`; no open implementation or review tasks remain. |
+| 2026-06-17 | Keep the rotation/timeout/queue copy follow-up Frontend-only. | User-reported issues are mini-program preview generation, upload attempt timeout duration, and status text copy; existing Backend APIs remain sufficient. |
+| 2026-06-17 | Queued status should omit queue position. | With current single-worker/sequential frontend flow, the displayed queue position is always 1 and adds noise rather than useful information. |
+| 2026-06-17 | Upload timeout retries are capped at 2. | User clarified the maximum retry count after setting the timeout duration to 15 seconds. |
+| 2026-06-17 | Final status must show insufficient polaroid count after all processing finishes. | User expects count shortage to be visible in the completed status bar, not only during processing or hidden in partial results. |
+| 2026-06-17 | Completed processing actions should be `全部下载` and `删除全部图片`. | User wants result-focused actions after processing; failed source images should remain so they can be retried or reviewed. |
+| 2026-06-18 | User-entered expected count is authoritative for final shortage display. | Reviewer found Backend completion can reduce `total_polaroids` / `expected_polaroids` to the actual detected count, which hides shortages unless Frontend preserves the original user target. |
+| 2026-06-18 | Rotation/timeout/action and shortage-status fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-008` in commit `1ee2872`; no open implementation or review tasks remain. |
 
 ## Open Questions
 
@@ -215,3 +241,9 @@ Contact email contract:
 - Reviewer completed `BATCH-REV-005` in `72a4369` with verdict `changes requested`; only the Frontend pre-task cancel endpoint is misaligned with Backend's canonical route.
 - Frontend completed `BATCH-FE-009` in `f644539`.
 - Reviewer approved `BATCH-REV-006` in `e07e1e8`; PM marks the upload/status follow-up fixes ready for integration.
+- User testing after integration commit `dcda349` found rotated preview reliability, upload timeout duration, and queued status copy issues; PM assigned `BATCH-FE-010` and `BATCH-REV-007`.
+- User added two `BATCH-FE-010` requirements: upload timeout retries max 2 and final status must show insufficient polaroid count after all processing finishes.
+- User added completed-processing action requirements to `BATCH-FE-010`: show `全部下载` and `删除全部图片`, and preserve failed source images when clearing.
+- Reviewer first approved the rotation/timeout/queue/action scope in `b315634`, then requested changes in `1873ae9` for the remaining final shortage-status blocker.
+- Frontend completed `BATCH-FE-011` in `e3488e3` and `b698c4b`.
+- Reviewer approved `BATCH-REV-008` in `1ee2872`; PM marks the rotation/timeout/action and shortage-status fixes ready for integration.
