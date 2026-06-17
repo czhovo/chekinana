@@ -4,9 +4,6 @@ const MAX_POLL_COUNT = 180;
 const MAX_SELECTED_IMAGES = 9;
 const CONTACT_MESSAGE_MAX_LENGTH = 1000;
 const CONTACT_INFO_MAX_LENGTH = 200;
-const PREVIEW_ROTATION_CANVAS_ID = "preview-rotation-canvas";
-const PREVIEW_ROTATION_MAX_SIZE = 1600;
-const PREVIEW_ROTATION_TIMEOUT_MS = 3000;
 const UPLOAD_TIMEOUT_MS = 15000;
 const UPLOAD_MAX_RETRIES = 2;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
@@ -17,8 +14,6 @@ Page({
     selectedImages: [],
     currentImageIndex: 0,
     rotationDegrees: 0,
-    previewCanvasWidth: 1,
-    previewCanvasHeight: 1,
     extractedImages: [],
     processing: false,
     wbEnabled: true,
@@ -44,7 +39,6 @@ Page({
   activeUploadTask: null,
   activeUploadAttemptId: "",
   activeUploadTimer: null,
-  rotationPreviewRunId: 0,
   batchInterrupted: false,
 
   onUnload() {
@@ -262,7 +256,6 @@ Page({
   setCurrentImageIndex(currentImageIndex) {
     const selectedImages = this.data.selectedImages;
     if (!selectedImages.length) return;
-    this.rotationPreviewRunId += 1;
     const clampedIndex = Math.max(0, Math.min(currentImageIndex, selectedImages.length - 1));
     const nextState = Object.assign(this.getCurrentImageState(selectedImages, clampedIndex), {
       currentImageIndex: clampedIndex,
@@ -359,10 +352,13 @@ Page({
     const rotationDegrees = (this.data.rotationDegrees + 90) % 360;
     const currentImageIndex = this.data.currentImageIndex;
     const currentImage = this.data.selectedImages[currentImageIndex] || {};
+    const sourcePath = currentImage.path || currentImage.previewPath || this.data.inputPath;
     const selectedImages = this.updateCurrentSelectedImage({
-      rotationDegrees
+      rotationDegrees,
+      previewPath: sourcePath
     });
     this.setData({
+      inputPath: sourcePath,
       rotationDegrees,
       selectedImages,
       extractedImages: [],
@@ -370,122 +366,6 @@ Page({
       statusText: "图片已选择，点击开始提取",
       statusKind: "ready"
     });
-    this.updateRotatedPreviewPath(currentImage.path || this.data.inputPath, rotationDegrees, currentImageIndex);
-  },
-
-  updateRotatedPreviewPath(sourcePath, rotationDegrees, imageIndex) {
-    const rotationRunId = this.rotationPreviewRunId + 1;
-    this.rotationPreviewRunId = rotationRunId;
-    if (!sourcePath) return;
-    if (!rotationDegrees) {
-      this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees, rotationRunId);
-      return;
-    }
-    if (!wx.getImageInfo || !wx.createCanvasContext || !wx.canvasToTempFilePath) {
-      this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees, rotationRunId);
-      return;
-    }
-
-    let settled = false;
-    const finishPreview = (previewPath) => {
-      if (settled || !this.isCurrentRotationPreviewRun(rotationRunId, imageIndex, sourcePath, rotationDegrees)) return;
-      settled = true;
-      this.setSelectedImagePreviewPath(imageIndex, sourcePath, previewPath || sourcePath, rotationDegrees, rotationRunId);
-    };
-    const fallbackTimer = setTimeout(() => {
-      finishPreview(sourcePath);
-    }, PREVIEW_ROTATION_TIMEOUT_MS);
-    const clearFallback = () => {
-      if (fallbackTimer) clearTimeout(fallbackTimer);
-    };
-
-    wx.getImageInfo({
-      src: sourcePath,
-      success: (info) => {
-        if (settled || !this.isCurrentRotationPreviewRun(rotationRunId, imageIndex, sourcePath, rotationDegrees)) return;
-        const sourceWidth = Number(info.width || 0);
-        const sourceHeight = Number(info.height || 0);
-        if (!sourceWidth || !sourceHeight) {
-          clearFallback();
-          finishPreview(sourcePath);
-          return;
-        }
-
-        const scale = Math.min(1, PREVIEW_ROTATION_MAX_SIZE / Math.max(sourceWidth, sourceHeight));
-        const drawWidth = Math.max(1, Math.round(sourceWidth * scale));
-        const drawHeight = Math.max(1, Math.round(sourceHeight * scale));
-        const normalizedDegrees = ((rotationDegrees % 360) + 360) % 360;
-        const swapSize = normalizedDegrees === 90 || normalizedDegrees === 270;
-        const canvasWidth = swapSize ? drawHeight : drawWidth;
-        const canvasHeight = swapSize ? drawWidth : drawHeight;
-        this.setData({
-          previewCanvasWidth: canvasWidth,
-          previewCanvasHeight: canvasHeight
-        });
-
-        const drawPreview = () => {
-          if (settled || !this.isCurrentRotationPreviewRun(rotationRunId, imageIndex, sourcePath, rotationDegrees)) return;
-          const ctx = wx.createCanvasContext(PREVIEW_ROTATION_CANVAS_ID, this);
-          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-          ctx.save();
-          ctx.translate(canvasWidth / 2, canvasHeight / 2);
-          ctx.rotate((-normalizedDegrees * Math.PI) / 180);
-          ctx.drawImage(sourcePath, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
-          ctx.restore();
-          ctx.draw(false, () => {
-            wx.canvasToTempFilePath({
-              canvasId: PREVIEW_ROTATION_CANVAS_ID,
-              destWidth: canvasWidth,
-              destHeight: canvasHeight,
-              fileType: "jpg",
-              quality: 0.95,
-              success: (res) => {
-                clearFallback();
-                finishPreview(res.tempFilePath);
-              },
-              fail: () => {
-                clearFallback();
-                finishPreview(sourcePath);
-              }
-            }, this);
-          });
-        };
-        if (wx.nextTick) {
-          wx.nextTick(drawPreview);
-        } else {
-          setTimeout(drawPreview, 0);
-        }
-      },
-      fail: () => {
-        clearFallback();
-        finishPreview(sourcePath);
-      }
-    });
-  },
-
-  isCurrentRotationPreviewRun(rotationRunId, imageIndex, sourcePath, rotationDegrees) {
-    if (rotationRunId !== this.rotationPreviewRunId) return false;
-    const image = this.data.selectedImages[imageIndex];
-    return !!image
-      && image.path === sourcePath
-      && (image.rotationDegrees || 0) === rotationDegrees;
-  },
-
-  setSelectedImagePreviewPath(imageIndex, sourcePath, previewPath, rotationDegrees, rotationRunId) {
-    if (rotationRunId && !this.isCurrentRotationPreviewRun(rotationRunId, imageIndex, sourcePath, rotationDegrees)) return;
-    const selectedImages = this.data.selectedImages.map((image, index) => {
-      if (index !== imageIndex) return image;
-      if (image.path !== sourcePath || (image.rotationDegrees || 0) !== rotationDegrees) return image;
-      return Object.assign({}, image, {
-        previewPath
-      });
-    });
-    const patch = { selectedImages };
-    const currentImage = selectedImages[this.data.currentImageIndex] || {};
-    if (this.data.currentImageIndex === imageIndex && currentImage.path === sourcePath) {
-      patch.inputPath = currentImage.previewPath || currentImage.path || "";
-    }
-    this.setData(patch);
   },
 
   updateCurrentSelectedImage(patch) {
@@ -1439,7 +1319,7 @@ Page({
   getCurrentImageState(selectedImages, currentImageIndex) {
     const currentImage = selectedImages[currentImageIndex] || {};
     return {
-      inputPath: currentImage.previewPath || currentImage.path || "",
+      inputPath: currentImage.path || currentImage.previewPath || "",
       rotationDegrees: currentImage.rotationDegrees || 0,
       expectedPolaroidCount: currentImage.expectedPolaroidCount || ""
     };

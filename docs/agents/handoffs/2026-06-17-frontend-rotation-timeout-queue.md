@@ -15,21 +15,24 @@ Fixed rotated-preview fallback/stale handling, upload timeout/retry limits, queu
 ## Files Changed
 
 - `wechat-miniprogram/pages/index/index.js`
-  - change: Added bounded rotated-preview generation with timeout fallback and stale callback guards.
+  - change: Removed rotated-preview canvas export after real WeChat testing showed exported temp images could become stretched, cropped, or single-color.
+  - change: Kept preview and thumbnails on the original image path and moved rotation to per-image display state.
   - change: Set upload timeout to 15 seconds and timeout retries to 2 retries per upload attempt.
   - change: Removed queue-position text from queued/waiting status while preserving active-task processing status.
   - change: Report final insufficient polaroid counts for single-image and batch completion while preserving partial results.
   - change: Added all-result download and clear-successful-source-image actions, preserving failed source images.
 - `wechat-miniprogram/pages/index/index.wxml`
+  - change: Rendered preview and thumbnails from original image paths with per-image rotation classes.
   - change: Replaced completed-result toolbar actions with `全部下载` and `删除全部图片`; disabled all-download when no extracted results exist.
 - `wechat-miniprogram/pages/index/index.wxss`
+  - change: Added CSS rotation rules for the large preview and thumbnail strip.
   - change: Added danger styling for the completed-result delete action.
 - `docs/agents/handoffs/2026-06-17-frontend-rotation-timeout-queue.md`
   - change: Added this handoff.
 
 ## Behavior Changed
 
-Rotated preview generation now falls back to the original selected image if image info/canvas export fails or the fallback timer fires, while preserving the per-image `rotation_degrees` upload value. Late rotation callbacks are ignored when a newer image or rotation state supersedes them.
+Rotated preview display no longer generates a temporary rotated image through canvas export. The mini-program keeps the original selected image path visible and applies the current per-image rotation as UI display state, while preserving the per-image `rotation_degrees` upload value. This avoids the real-WeChat failure mode where canvas-exported temp images can render stretched, cropped, or as a single-color block.
 
 Upload timeout handling now starts retry/cancel handling after 15 seconds per attempt and stops after 2 timeout retries. Queued/waiting status no longer displays queue position, but active current-task processing/extracting status is still shown.
 
@@ -49,6 +52,7 @@ Commands run:
 node --check wechat-miniprogram\pages\index\index.js
 git diff --check
 node - mocked BATCH-FE-010 behavior checks
+node - mocked real-WeChat rotation regression checks
 ```
 
 Results:
@@ -57,11 +61,11 @@ Results:
 node --check passed.
 git diff --check passed.
 Mocked checks passed:
-- rotation success updates large preview and thumbnail from the rotated export
-- rotation image-info failure falls back to original image and keeps rotation_degrees
-- rotation timeout fallback is bounded at 3000ms
-- stale rotation export callback is ignored
-- thumbnail fallback remains visible
+- rotation updates large preview and thumbnail from the original image path plus per-image rotation class
+- rotation updates large preview and thumbnail by per-image display state without canvas export
+- original image path remains visible after rotation and keeps rotation_degrees
+- stale canvas/export callbacks cannot occur because preview no longer uses canvas export
+- thumbnail remains visible from the same original source path
 - upload timeout constant is 15000ms
 - upload timeout retry cap is 2 retries, producing 3 total timed-out attempts
 - queued text omits queue position
@@ -70,6 +74,10 @@ Mocked checks passed:
 - all-download saves every extracted result
 - clear-successful-images removes successful source images
 - failed source image is preserved with its rotation state
+- real-WeChat rotation regression mock keeps original image paths for large preview and thumbnails
+- real-WeChat rotation regression mock confirms preview rotation no longer calls image info, canvas, or canvas export APIs
+- real-WeChat rotation regression mock confirms switching selected images keeps per-image path/rotation state
+- real-WeChat rotation regression mock confirms upload still sends rotation_degrees
 ```
 
 ## Risks / Follow-up
