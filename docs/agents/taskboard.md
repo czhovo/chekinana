@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Post-integration V1 batch image processing preview/status fixes are approved and ready for integration: rotated previews switch cleanly between selected images, upload status remains distinct from processing status, and queued backend tasks are shown in the status bar.
+Fix post-integration V1 batch image processing issues found during mini-program testing: rotated thumbnails must match the large preview, image upload must have bounded timeout/retry and cancel semantics even before a backend `task_id` exists, and queued/processing status must be driven by the backend's active processing task id instead of stale queue-position heuristics.
 
 Scope constraints:
 
@@ -38,6 +38,7 @@ Reviewer contact email approval commit: 1497688
 Integration push: 7e6b03d main includes approved batch/contact work
 Frontend preview/status fix commit: 091947e
 Reviewer preview/status approval commit: 8c99538
+Integration push: f3b60ed main includes approved preview/status fixes
 ```
 
 ## Worktree Assignments
@@ -45,9 +46,9 @@ Reviewer preview/status approval commit: 8c99538
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Preview/status fix completed in `091947e`; no open Frontend implementation task |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Verify existing single-image API supports V1 batch orchestration and make only necessary compatibility fixes |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Preview/status fix approved in `8c99538`; no open review task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Fix rotated thumbnails, upload timeout/retry, pre-task interrupt, and active-task-based status display |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Expose active processing task id and support canceling/ignoring timed-out upload attempts before `task_id` exists |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend/Backend diffs against the new upload/status contract |
 
 ## Current Tasks
 
@@ -68,6 +69,9 @@ Reviewer preview/status approval commit: 8c99538
 | CONTACT-REV-003 | Reviewer | done | Re-review `CONTACT-BE-002` after Backend adds success logging and the missing handoff. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-contact-email-log.md` | Reviewer commit `1497688` verdict: approved. Successful contact email sends now produce the required safe log, contact info remains visible in the email body when provided, no sensitive full message/contact value is logged, and existing `/api/contact` behavior remains compatible. |
 | BATCH-FE-007 | Frontend | done | Fix post-integration preview rotation and status-phase text issues found during mini-program testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-preview-status-fixes.md` | Frontend commit `091947e` passed reviewer checks: preview now uses per-image generated `previewPath` instead of preview-frame rotation transforms, switching differently rotated images updates source/orientation together, upload/backend-waiting/queued/processing phases are distinct, queued status includes queue position when available, incremental result display and interrupt/cancel behavior remain intact, and no backend API contract changed. |
 | BATCH-REV-004 | Reviewer | done | Review `BATCH-FE-007` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-preview-status-fixes.md` | Reviewer commit `8c99538` verdict: approved. Reviewer confirmed the diff is scoped to Frontend preview/status behavior, no Backend/auth/contact/result API contracts changed, `node --check` and `git diff --check` passed, and mocked checks covered rotated-image switching, upload status, queued status with queue position, processing progress, incremental display, and interrupt. |
+| BATCH-BE-003 | Backend | pending | Add backend support for active-task status and pre-task upload cancellation. | `backend/app.py`, `docs/agents/handoffs/2026-06-17-backend-upload-status-contract.md` | `/api/status/<task_id>` must include a clear field for the single worker's currently active processing task id, for example `active_task_id` or `processing_task_id`, plus existing `status`, `phase`, and `queue_position` fields. While a task is in SAM detection (`phase=detecting`) or extraction (`phase=extracting`), the active task id must match that task. When no task is actively processing, the field must be empty. Add a protected pre-task upload cancel mechanism keyed by a frontend-supplied upload attempt id, so if the user interrupts or an upload attempt times out before `/api/process` returns a `task_id`, the backend can record that upload attempt as canceled and reject/drop a late `/api/process` arrival without queuing or extracting it. Preserve existing `/api/cancel/<task_id>` semantics for queued/processing tasks, existing auth/token/rate-limit behavior, RunPod startup, extraction internals, and result endpoints. Handoff must document the exact new field names and cancel endpoint/request shape, plus mocked checks for active task id, queued task id mismatch, pre-canceled late upload, and normal upload compatibility. |
+| BATCH-FE-008 | Frontend | pending | Fix thumbnails, upload timeout/retry, pre-task interrupt, and active-task-based status display. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-upload-status-fixes.md` | Thumbnail images below the large preview must use the same rotated preview source/state as the large preview, so every selected image's thumbnail reflects its per-image rotation. `wx.uploadFile` must be wrapped in a bounded timeout and retry flow with documented constants; on timeout, abort the current upload task if possible, mark that upload attempt canceled through the Backend pre-task cancel contract, retry only within the configured limit, and then fail or continue according to existing partial-failure batch behavior without leaving the UI stuck on `图片上传中`. If the user taps interrupt before a backend `task_id` exists, the frontend must abort the upload task when possible, send the pre-task cancel signal using the upload attempt id, stop further uploads, and ignore late callbacks. Once a `task_id` exists, keep calling `/api/cancel/<task_id>` as before. Queue display must use the backend active processing task id: show queued/waiting only when the backend reports another active task id for the current status response; when the active task id matches the current image's `task_id`, show `图片处理中` for loading/detecting phases and `正在提取第 x 张 (x/N)` for extraction progress, even before the first polaroid result arrives. Do not regress ordered results, incremental display, per-image count/rotation, interrupt/cancel for active tasks, auth, contact UI, or save/download behavior. Handoff must include `node --check`, `git diff --check`, and mocked checks for rotated thumbnails, upload timeout/retry, interrupt during upload before task id, late-upload cancellation, active-task queue detection, detecting phase status, extracting-first-result status, and normal sequential batch behavior. |
+| BATCH-REV-005 | Reviewer | pending | Review `BATCH-BE-003` and `BATCH-FE-008` together after both handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-upload-status-fixes.md` | Verify the three user-reported issues are resolved end to end: thumbnails rotate with the large preview, a stuck upload cannot leave the UI indefinitely in `图片上传中` and cannot later create an uncanceled backend extraction after the user interrupted, and queue/processing status follows the backend active task id rather than `queue_position: 0` or stale queued payloads. Reviewer must also check no RunPod/auth/result/contact behavior regressed and run the relevant backend static/mocked checks, frontend `node --check`, and `git diff --check`. |
 
 Status values:
 
@@ -123,9 +127,21 @@ Failure contract:
 Frontend preview/status contract:
 
 - The preview for the selected image must render as the image in its current rotation state, not by applying a transient rotation transform to the preview frame that can affect the previously displayed image during image switches.
+- Thumbnail previews must render from the same per-image rotated preview source/state as the large preview.
 - Per-image rotation remains part of the existing upload contract through `rotation_degrees`; this task does not require backend API changes.
 - Status text must distinguish these phases in order: upload (`图片上传中`), queued/waiting, processing/extracting, completed/partial/failed/canceled.
-- Queued/waiting state should be derived from existing status payloads when available, including `status`, phase-like fields, and `queue_position`.
+- Queued/waiting state must be derived from the backend's active processing task id for the current status response, not from `queue_position: 0` or from an initial queued upload response alone.
+- If the backend reports that the active processing task id matches the current image's `task_id`, the frontend must show processing/detecting/extracting status for that image even if no polaroid result has been returned yet.
+- If the backend reports another active processing task id, the frontend may show queued/waiting for the current image and include queue position when available.
+- If no backend active processing task id is present and the current task is not yet active, the frontend should show backend waiting rather than incorrectly claiming another task is in the queue.
+
+Upload timeout/cancel contract:
+
+- Frontend must generate a unique upload attempt id for each image upload attempt and include it in the `/api/process` request.
+- Backend must provide a protected way to record an upload attempt id as canceled before `/api/process` returns a `task_id`.
+- If a late `/api/process` request arrives with an upload attempt id already marked canceled, Backend must not enqueue or extract that image.
+- Frontend must abort timed-out or interrupted `wx.uploadFile` attempts when possible and send the pre-task cancel signal for the upload attempt id.
+- Once `/api/process` returns a `task_id`, existing `/api/cancel/<task_id>` remains the cancellation path for queued or processing backend tasks.
 
 Backend cancellation contract:
 
@@ -159,10 +175,13 @@ Contact email contract:
 | 2026-06-17 | Reopen Frontend batch work for post-integration preview/status issues. | User testing after integration found three UI problems: rotated preview switching, lost upload phase text, and missing queued/waiting status display. |
 | 2026-06-17 | Keep the preview/status fix Frontend-only unless implementation discovers a real backend contract gap. | The requested behavior can be expressed through existing per-image rotation state and existing task status polling; backend batch/cancel/contact contracts should stay stable. |
 | 2026-06-17 | Preview/status fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-004` in commit `8c99538`; no open implementation or review tasks remain. |
+| 2026-06-17 | Reopen batch work for thumbnail rotation, upload timeout/cancel, and active-task status. | User testing after integration `f3b60ed` found three remaining issues that need coordinated Frontend and Backend fixes. |
+| 2026-06-17 | Queue display must follow Backend active processing task id. | `queue_position: 0` and stale queued upload responses can mislabel active SAM detection/extraction as queued; the backend's active task id is the authoritative signal. |
+| 2026-06-17 | Upload timeout/cancel needs a pre-task upload attempt id contract. | A stuck upload may not have a backend `task_id`; canceling only by task id cannot stop a late upload from later being accepted and processed. |
 
 ## Open Questions
 
-- None. The new user-tested issues have concrete Frontend and Reviewer owners.
+- None. The new user-tested issues have concrete Backend, Frontend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -180,3 +199,4 @@ Contact email contract:
 - User testing after integration commit `7e6b03d` found new Frontend batch preview/status issues; PM assigned `BATCH-FE-007` and `BATCH-REV-004`.
 - Frontend completed `BATCH-FE-007` in `091947e`.
 - Reviewer approved `BATCH-REV-004` in `8c99538`; PM marks the preview/status fixes ready for integration.
+- User testing after integration commit `f3b60ed` found thumbnail rotation, stuck upload/cancel, and stale queued-status issues; PM assigned `BATCH-BE-003`, `BATCH-FE-008`, and `BATCH-REV-005`.
