@@ -837,7 +837,7 @@ Page({
     const shortageText = this.getFirstShortageText(failures);
     const statusText = hasImages
       ? shortageText
-        ? `批量处理完成，${shortageText}，共提取 ${images.length} 张`
+        ? `批量处理完成，共提取 ${images.length} 张，${shortageText}`
         : failures.length
           ? `批量处理完成，提取 ${images.length} 张，${failures.length}/${totalImages} 张图片失败`
           : `批量处理完成，共提取 ${images.length} 张`
@@ -866,7 +866,7 @@ Page({
 
   getFirstShortageText(failures) {
     const shortage = failures.find((failure) => failure && failure.message && failure.message.includes("结果不足"));
-    return shortage ? shortage.message : "";
+    return shortage ? `图片${shortage.imageIndex + 1}${shortage.message}` : "";
   },
 
   getShortageStatusText(receivedCount, expectedCount) {
