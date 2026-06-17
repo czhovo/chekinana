@@ -21,7 +21,7 @@
 
     <view class="image-frame input-frame {{inputPath ? 'has-image' : ''}}" bindtap="onInputFrameTap">
       <block wx:if="{{inputPath}}">
-        <image class="preview-image" src="{{inputPath}}" mode="aspectFit" style="{{previewRotationStyle}}"></image>
+        <image class="preview-image" src="{{inputPath}}" mode="aspectFit"></image>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav left" catchtap="showPreviousImage">‹</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav right" catchtap="showNextImage">›</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-index-badge">{{currentImageIndex + 1}}/{{selectedImages.length}}</view>
@@ -72,6 +72,11 @@
       <view class="status-dot"></view>
       <text>{{statusText}}</text>
     </view>
+    <canvas
+      class="rotation-canvas"
+      canvas-id="preview-rotation-canvas"
+      style="width: {{previewCanvasWidth}}px; height: {{previewCanvasHeight}}px;"
+    ></canvas>
   </view>
 
   <view class="result-section">
