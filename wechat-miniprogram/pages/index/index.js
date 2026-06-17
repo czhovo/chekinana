@@ -8,7 +8,7 @@ const PREVIEW_ROTATION_CANVAS_ID = "preview-rotation-canvas";
 const PREVIEW_ROTATION_MAX_SIZE = 1600;
 const UPLOAD_TIMEOUT_MS = 45000;
 const UPLOAD_MAX_RETRIES = 1;
-const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-attempts";
+const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 
 Page({
   data: {
@@ -532,7 +532,7 @@ Page({
     if (!apiBaseUrl || !uploadAttemptId) return;
 
     wx.request({
-      url: `${apiBaseUrl}${PRE_TASK_UPLOAD_CANCEL_PATH}/${encodeURIComponent(uploadAttemptId)}/cancel`,
+      url: `${apiBaseUrl}${PRE_TASK_UPLOAD_CANCEL_PATH}/${encodeURIComponent(uploadAttemptId)}`,
       method: "POST",
       header: Object.assign({ "content-type": "application/json" }, this.getAuthHeader()),
       data: { upload_attempt_id: uploadAttemptId },
