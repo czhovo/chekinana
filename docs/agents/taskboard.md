@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Mini/wide/auto polaroid size support is approved and ready for integration. Frontend exposes a per-image `auto / mini / wide` selector in the preview area, defaulting to `mini`; Backend processes each detected quadrilateral with the selected size, and `auto` classifies by quadrilateral edge-length ratio.
+Fix batch completion and upload-error regressions found during mini-program testing after mini/wide/auto size support. The fixes must aggregate all insufficient-count images in the final status bar, keep extraction results intact when navigating after completion, handle transient `wx.uploadFile` socket/TLS failures through the bounded upload failure path, and rename the completed clear action to `新任务`.
 
 Scope constraints:
 
@@ -55,6 +55,7 @@ Confirmed mini/wide mask geometry: 2026-06-18
 Frontend polaroid size commit: 86ddbe2
 Backend polaroid size commit: ff9851a
 Reviewer polaroid size approval commit: 85a7ed4
+User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client network socket disconnected before secure TLS connection was established`
 ```
 
 ## Worktree Assignments
@@ -62,9 +63,9 @@ Reviewer polaroid size approval commit: 85a7ed4
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Polaroid size selector completed in `86ddbe2`; no open Frontend implementation task |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Polaroid size backend support completed in `ff9851a`; no open Backend implementation task |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Polaroid size support approved in `85a7ed4`; no open review task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `BATCH-FE-012`: batch completion status/navigation/action copy and upload socket/TLS failure handling |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `BATCH-BE-004`: verify backend compatibility for upload socket/TLS failure and existing cancel/status contracts |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `BATCH-REV-009`: review Frontend fix and Backend compatibility handoff |
 
 ## Current Tasks
 
@@ -97,6 +98,9 @@ Reviewer polaroid size approval commit: 85a7ed4
 | SIZE-FE-001 | Frontend | done | Add per-image polaroid size selector and submit it with processing requests. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-18-frontend-polaroid-size.md` | Frontend commit `86ddbe2` adds a preview-area `auto / mini / wide` selector, defaults every newly selected image to `mini`, persists size per image across switching/rotation/deletion/batch processing, and submits `polaroid_size` with single-image and batch `/api/process` uploads. Reviewer verified default mini, independent per-image size state, selector placement/state, upload fields, and count/rotation compatibility. |
 | SIZE-BE-001 | Backend | done | Add mini/wide/auto output-size support for extracted polaroids. | `backend/app.py`, `scripts/check_polaroid_size.py`, `docs/agents/handoffs/2026-06-18-backend-polaroid-size.md` | Backend commit `ff9851a` accepts `polaroid_size=auto|mini|wide`, falls back to `mini` for missing/invalid values, preserves mini output `1600x2544` with vertices `[[110,200],[1490,200],[1490,2044],[110,2044]]`, adds wide output `3200x2544` with vertices `[[110,200],[3090,200],[3090,2044],[110,2044]]`, and classifies `auto` per quadrilateral with horizontal/vertical edge ratio `> 1` as wide. Reviewer verified geometry, explicit mini/wide, auto classification, default fallback, and no route/auth/startup regressions. |
 | SIZE-REV-001 | Reviewer | done | Review mini/wide/auto polaroid size support after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-polaroid-size.md` | Reviewer commit `85a7ed4` verdict: approved. Reviewer confirmed Frontend selector and upload behavior, Backend mini/wide geometry, `auto` classification, fallback to mini, selected geometry passed into fixed-border white balance, and no regressions to `/api/cancel/<task_id>`, `/api/upload-cancel/<upload_attempt_id>`, auth token flow, result routes, contact route/UI, RunPod startup, upload timeout/retry, rotation preview, shortage status, all-download, or clear-successful-images behavior. |
+| BATCH-FE-012 | Frontend | pending | Fix batch completion status, post-completion navigation, completed action copy, and upload socket/TLS failure handling. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-18-frontend-completion-upload-regressions.md` | Final batch status must list every image whose extracted count is lower than its user-entered expected count, with per-image labels and received/expected counts when available. After extraction completes, tapping left/right preview navigation or thumbnails must only switch the current preview image and must not clear/delete extracted results, partial results, failed source-image markers, completed status, or completed action state. The screenshot upload failure `uploadFile:fail Error: Client network socket disconnected before secure TLS connection was established` must flow through the existing 15-second, max-2-retry upload failure path without an infinite `图片上传中` state, stale late-callback mutation, or raw low-level TLS copy in the status bar. After completion, the former `删除全部图片` action text must become `新任务`; its behavior remains the existing completed-task reset/clear-successful-images behavior, preserving failed source images when any exist. `全部下载` must continue downloading all extracted polaroids. Do not regress per-image `polaroid_size`, rotation, thumbnails, active-task queue/processing status, `/api/upload-cancel/<upload_attempt_id>`, `/api/cancel/<task_id>`, result ordering, shortage counts, contact flow, or auth. Handoff must include `node --check`, `git diff --check`, and mocked/manual evidence for multiple shortages, post-completion navigation preserving results, TLS/socket upload failure retry/failure handling, `新任务` label/behavior, failed-source preservation, and all-download behavior. |
+| BATCH-BE-004 | Backend | pending | Verify backend compatibility for upload socket/TLS failures and current batch status/cancel contracts. | `docs/agents/handoffs/2026-06-18-backend-upload-failure-compat.md`; backend files only if a real backend blocker is found | Confirm whether the screenshot error can occur before Backend receives a request; if so, no Backend code change is required and the handoff should say that explicitly. Reconfirm existing `/api/process`, `/api/status/<task_id>`, `/api/result/<task_id>/<result_id>`, `/api/cancel/<task_id>`, and `/api/upload-cancel/<upload_attempt_id>` behavior still supports the Frontend fix, including late canceled uploads and active-task status. Do not change RunPod startup, production pod ID token flow, auth, result routes, mini/wide/auto geometry, contact email behavior, or extraction internals unless the audit proves a backend defect. If code changes are needed, include focused tests or smoke evidence and document the compatibility impact. |
+| BATCH-REV-009 | Reviewer | pending | Review `BATCH-FE-012` and `BATCH-BE-004` after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-completion-upload-regressions.md` | Verify all four user-reported issues: all insufficient-count images appear in final status, post-completion left/right and thumbnail navigation does not delete extraction results, the screenshot socket/TLS `wx.uploadFile` failure follows the bounded retry/failure/cancel path without stale mutation, and the completed action label is `新任务`. Also verify failed source images are preserved by the new-task/reset action when failures exist, `全部下载` still covers all extracted results, active-task queued/processing status still works, per-image mini/wide/auto size uploads still work, and no Backend auth/RunPod/contact/result/cancel regression is introduced. Required checks include Frontend `node --check`, `git diff --check`, Backend compatibility evidence or smoke checks from `BATCH-BE-004`, and explicit mocked/manual coverage for the screenshot error text. |
 
 Status values:
 
@@ -174,13 +178,15 @@ Frontend preview/status contract:
 - Per-image rotation remains part of the existing upload contract through `rotation_degrees`; this task does not require backend API changes.
 - Status text must distinguish these phases in order: upload (`图片上传中`), queued/waiting, processing/extracting, completed/partial/failed/canceled.
 - Final status text must report insufficient extracted polaroids when the final received count is lower than the expected count, including received/expected counts when available.
+- If multiple source images finish with insufficient extracted polaroid counts, the final status bar must include every insufficient image rather than only the first one.
 - For final shortage display, a user-entered expected count, or Backend `requested_polaroids` that preserves that user input, is authoritative over Backend actual count fields such as `total_polaroids` and `expected_polaroids`.
 - Backend actual count fields must not hide a shortage by replacing a larger user-entered target during final completion.
 - Queued/waiting state must be derived from the backend's active processing task id for the current status response, not from `queue_position: 0` or from an initial queued upload response alone.
 - If the backend reports that the active processing task id matches the current image's `task_id`, the frontend must show processing/detecting/extracting status for that image even if no polaroid result has been returned yet.
 - If the backend reports another active processing task id, the frontend may show queued/waiting for the current image but must not display queue position.
 - If no backend active processing task id is present and the current task is not yet active, the frontend should show backend waiting rather than incorrectly claiming another task is in the queue.
-- Completed processing actions should replace the normal two action buttons with `全部下载` and `删除全部图片`; `全部下载` applies to every extracted polaroid result, while `删除全部图片` clears successfully processed source images but preserves failed source images.
+- After processing completes, left/right preview navigation and thumbnail navigation must remain side-effect-free for extraction results: navigation may switch the selected source preview only and must not clear result lists, failed-image markers, completed status, or completed actions.
+- Completed processing actions should replace the normal two action buttons with `全部下载` and `新任务`; `全部下载` applies to every extracted polaroid result, while `新任务` keeps the existing completed-task reset behavior that clears successfully processed source images but preserves failed source images when any exist.
 
 Upload timeout/cancel contract:
 
@@ -191,6 +197,7 @@ Upload timeout/cancel contract:
 - Frontend must abort timed-out or interrupted `wx.uploadFile` attempts when possible and send the pre-task cancel signal for the upload attempt id.
 - Upload timeout is 15 seconds per upload attempt before retry/cancel handling begins.
 - Upload timeout retry is capped at 2 retries per image upload attempt.
+- Transient `wx.uploadFile` network/socket/TLS failures, including `Client network socket disconnected before secure TLS connection was established`, must be handled by the same bounded retry/failure path as upload timeouts; they must not leave the UI stuck in upload state or let stale late callbacks mutate a newer task.
 - Once `/api/process` returns a `task_id`, existing `/api/cancel/<task_id>` remains the cancellation path for queued or processing backend tasks.
 
 Backend cancellation contract:
@@ -242,10 +249,13 @@ Contact email contract:
 | 2026-06-18 | Confirmed wide image-area geometry before implementation. | User approved the mask where wide keeps mini top/bottom/left/right margins and expands width to `3200x2544` output with vertices `[[110,200],[3090,200],[3090,2044],[110,2044]]`. |
 | 2026-06-18 | Auto size classification uses horizontal/vertical edge ratio threshold `1`. | User specified comparing horizontal edge lengths to vertical edge lengths against 1, accounting for vertical compression from normal photo perspective. |
 | 2026-06-18 | Polaroid size support is ready for integration after reviewer approval. | Reviewer approved `SIZE-REV-001` in commit `85a7ed4`; no open implementation or review tasks remain. |
+| 2026-06-18 | Publish post-size batch completion/upload regression tasks in Frontend, Backend, Reviewer order. | User testing found multiple shortage-status aggregation, completed navigation result loss, upload socket/TLS failure, and completed action copy issues. |
+| 2026-06-18 | Keep the main fix Frontend-owned unless Backend audit finds a real contract gap. | The reported symptoms are mini-program status/action/navigation/upload-error handling, while existing Backend cancel/status/upload-cancel APIs should be sufficient if confirmed. |
+| 2026-06-18 | Completed clear action text changes from `删除全部图片` to `新任务`. | User explicitly requested the completed-state button label change while preserving the completed reset behavior. |
 
 ## Open Questions
 
-- None. Mini/wide mask geometry is confirmed, `polaroid_size` field is defined, and the new size-support work has concrete Backend, Frontend, and Reviewer owners.
+- None. The user-reported regression set has concrete Frontend, Backend, and Reviewer owners; Backend work is a compatibility audit unless it discovers a real backend defect.
 
 ## Completed Work Summary
 
@@ -280,3 +290,5 @@ Contact email contract:
 - Frontend completed `SIZE-FE-001` in `86ddbe2`.
 - Backend completed `SIZE-BE-001` in `ff9851a`.
 - Reviewer approved `SIZE-REV-001` in `85a7ed4`; PM marks polaroid size support ready for integration.
+- User testing after size support found four regressions: final status must list every insufficient-count image, post-completion navigation must not delete extracted results, `wx.uploadFile` socket/TLS failures must not leave the UI stuck in upload state, and the completed clear action should read `新任务`.
+- PM assigned `BATCH-FE-012`, `BATCH-BE-004`, and `BATCH-REV-009` in Frontend, Backend, Reviewer order.
