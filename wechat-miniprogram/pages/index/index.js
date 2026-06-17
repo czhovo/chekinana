@@ -685,7 +685,7 @@ Page({
     const directImages = this.scopeBatchImages(this.normalizeImages(payload), imageIndex, `image${imageIndex + 1}`);
     if (directImages.length > 0) {
       this.setData({ extractedImages: this.mergeImages(baseImages, directImages) });
-      const expectedCount = this.getBackendExpectedCount(payload) || fallbackExpectedCount;
+      const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
       done({
         images: directImages,
         error: expectedCount > 0 && directImages.length < expectedCount
@@ -740,7 +740,7 @@ Page({
           const images = this.scopeBatchImages(this.normalizeImages(payload, taskId), imageIndex, taskId);
           const nextCollectedImages = this.mergeImages(collectedImages, images);
           const visibleImages = this.mergeImages(baseImages, nextCollectedImages);
-          const expectedCount = this.getBackendExpectedCount(payload) || fallbackExpectedCount;
+          const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
           const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
             || payload.done_marker === true
@@ -931,7 +931,7 @@ Page({
 
     const images = this.normalizeImages(payload);
     if (images.length > 0) {
-      const expectedCount = this.getBackendExpectedCount(payload) || fallbackExpectedCount;
+      const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
       if (expectedCount > 0 && images.length < expectedCount) {
         this.finishWithShortage(images, images.length, expectedCount);
       } else {
@@ -983,7 +983,7 @@ Page({
           const status = payload.status || payload.state;
           const images = this.normalizeImages(payload, taskId);
           this.updatePartialImages(images);
-          const expectedCount = this.getBackendExpectedCount(payload) || fallbackExpectedCount;
+          const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
           const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
             || payload.done_marker === true
@@ -1126,6 +1126,16 @@ Page({
       || phase === "complete";
     const expectedCount = hasFinalizedTarget ? Number(payload.expected_polaroids || 0) : 0;
     return expectedCount > 0 ? expectedCount : 0;
+  },
+
+  getExpectedPolaroidTarget(payload, fallbackExpectedCount) {
+    const userExpectedCount = Number(fallbackExpectedCount || 0);
+    if (userExpectedCount > 0) return userExpectedCount;
+
+    const requestedCount = Number(payload.requested_polaroids || payload.requestedPolaroids || 0);
+    if (requestedCount > 0) return requestedCount;
+
+    return this.getBackendExpectedCount(payload);
   },
 
   prefetchResultImages(images) {
