@@ -28,6 +28,11 @@
           src="{{item.previewPath}}"
           mode="aspectFit"
         ></image>
+        <view class="size-selector {{processing ? 'is-disabled' : ''}}" catchtap="noop">
+          <view class="size-option {{polaroidSize === 'auto' ? 'active' : ''}}" data-size="auto" catchtap="onPolaroidSizeChange">auto</view>
+          <view class="size-option {{polaroidSize === 'mini' ? 'active' : ''}}" data-size="mini" catchtap="onPolaroidSizeChange">mini</view>
+          <view class="size-option {{polaroidSize === 'wide' ? 'active' : ''}}" data-size="wide" catchtap="onPolaroidSizeChange">wide</view>
+        </view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav left" catchtap="showPreviousImage">‹</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-nav right" catchtap="showNextImage">›</view>
         <view wx:if="{{selectedImages.length > 1}}" class="preview-index-badge">{{currentImageIndex + 1}}/{{selectedImages.length}}</view>

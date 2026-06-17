@@ -287,11 +287,39 @@ canceled_upload_attempts: dict[str, float] = {}
 canceled_upload_lock = threading.Lock()
 MAX_UPLOAD_ATTEMPT_ID_CHARS = 128
 
-BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
-POLAROID_W, POLAROID_H = 1600, 2544
-POLAROID_SCALE = min(POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H)
+POLAROID_SIZE_AUTO = "auto"
+POLAROID_SIZE_MINI = "mini"
+POLAROID_SIZE_WIDE = "wide"
+POLAROID_SIZE_VALUES = {POLAROID_SIZE_AUTO, POLAROID_SIZE_MINI, POLAROID_SIZE_WIDE}
+POLAROID_GEOMETRIES = {
+    POLAROID_SIZE_MINI: {
+        "base_width": 800,
+        "base_height": 1272,
+        "width": 1600,
+        "height": 2544,
+        "image_area_vertices": np.array([[110,200],[1490,200],[1490,2044],[110,2044]], dtype=np.int32),
+    },
+    POLAROID_SIZE_WIDE: {
+        "base_width": 1600,
+        "base_height": 1272,
+        "width": 3200,
+        "height": 2544,
+        "image_area_vertices": np.array([[110,200],[3090,200],[3090,2044],[110,2044]], dtype=np.int32),
+    },
+}
+for _geometry in POLAROID_GEOMETRIES.values():
+    _geometry["scale"] = min(
+        _geometry["width"] / _geometry["base_width"],
+        _geometry["height"] / _geometry["base_height"],
+    )
+
+BASE_POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_width"]
+BASE_POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_height"]
+POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["width"]
+POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["height"]
+POLAROID_SCALE = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["scale"]
 BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32)
-IMAGE_AREA_VERTICES = np.rint(BASE_IMAGE_AREA_VERTICES * [POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H]).astype(np.int32)
+IMAGE_AREA_VERTICES = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["image_area_vertices"]
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
 
@@ -334,6 +362,45 @@ def parse_rotation_degrees(value) -> int:
     return degrees % 360
 
 
+def parse_polaroid_size(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in POLAROID_SIZE_VALUES:
+        return normalized
+    return POLAROID_SIZE_MINI
+
+
+def get_polaroid_geometry(polaroid_size: str) -> dict:
+    return POLAROID_GEOMETRIES.get(polaroid_size, POLAROID_GEOMETRIES[POLAROID_SIZE_MINI])
+
+
+def quad_horizontal_vertical_ratio(vertices: np.ndarray) -> float:
+    verts = np.asarray(vertices, dtype=np.float32).reshape(4, 2)
+    horizontal_lengths = [
+        float(np.linalg.norm(verts[1] - verts[0])),
+        float(np.linalg.norm(verts[2] - verts[3])),
+    ]
+    vertical_lengths = [
+        float(np.linalg.norm(verts[2] - verts[1])),
+        float(np.linalg.norm(verts[3] - verts[0])),
+    ]
+    vertical_avg = float(np.mean(vertical_lengths))
+    if vertical_avg <= 0:
+        return float("inf")
+    return float(np.mean(horizontal_lengths) / vertical_avg)
+
+
+def resolve_polaroid_size(requested_size: str, vertices: np.ndarray) -> str:
+    if requested_size == POLAROID_SIZE_AUTO:
+        return (
+            POLAROID_SIZE_WIDE
+            if quad_horizontal_vertical_ratio(vertices) > 1
+            else POLAROID_SIZE_MINI
+        )
+    if requested_size == POLAROID_SIZE_WIDE:
+        return POLAROID_SIZE_WIDE
+    return POLAROID_SIZE_MINI
+
+
 def quad_area(vertices: np.ndarray) -> float:
     return float(abs(cv2.contourArea(np.asarray(vertices, dtype=np.float32))))
 
@@ -357,11 +424,12 @@ def build_detection_candidates(masks: list[np.ndarray]) -> list[dict]:
     return candidates
 
 
-def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dict]:
+def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = None) -> tuple[np.ndarray, dict]:
     """White-balance a rectified polaroid using its fixed border area."""
+    geometry = geometry or get_polaroid_geometry(POLAROID_SIZE_MINI)
     h, w = image.shape[:2]
     border_mask = np.ones((h, w), dtype=np.uint8)
-    cv2.fillPoly(border_mask, [IMAGE_AREA_VERTICES], 0)
+    cv2.fillPoly(border_mask, [geometry["image_area_vertices"]], 0)
     border_mask = border_mask.astype(bool)
 
     is_bright = np.all(image > 170, axis=2)
@@ -369,8 +437,8 @@ def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dic
     is_white = is_bright & is_neutral & border_mask
 
     blocks = []
-    block_size = max(1, int(round(32 * POLAROID_SCALE)))
-    step = max(1, int(round(16 * POLAROID_SCALE)))
+    block_size = max(1, int(round(32 * geometry["scale"])))
+    step = max(1, int(round(16 * geometry["scale"])))
     for y in range(0, h - block_size, step):
         for x in range(0, w - block_size, step):
             block = is_white[y:y+block_size, x:x+block_size]
@@ -559,6 +627,7 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         denoise_enabled = bool(task_store.get(task_id, {}).get("denoise", True))
         requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
         rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
+        requested_polaroid_size = parse_polaroid_size(task_store.get(task_id, {}).get("polaroid_size"))
 
     # --- 步骤 0: 加载图片 ---
     if cancel_if_requested(task_id):
@@ -659,18 +728,23 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         if cancel_if_requested(task_id):
             return
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
+        output_polaroid_size = resolve_polaroid_size(requested_polaroid_size, verts)
+        geometry = get_polaroid_geometry(output_polaroid_size)
+        output_width = geometry["width"]
+        output_height = geometry["height"]
+        print(f"   size={output_polaroid_size}", flush=True)
         src = verts.astype(np.float32)
-        dst = np.array([[0,0],[POLAROID_W,0],[POLAROID_W,POLAROID_H],
-                        [0,POLAROID_H]], dtype=np.float32)
+        dst = np.array([[0,0],[output_width,0],[output_width,output_height],
+                        [0,output_height]], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src, dst)
         rectified = cv2.warpPerspective(
             img_np,
             M,
-            (POLAROID_W, POLAROID_H),
+            (output_width, output_height),
             flags=cv2.INTER_CUBIC,
         )
         if white_balance_enabled:
-            rectified, wb_info = apply_fixed_border_white_balance(rectified)
+            rectified, wb_info = apply_fixed_border_white_balance(rectified, geometry)
             if wb_info["applied"]:
                 print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
             else:
@@ -917,6 +991,7 @@ def submit_task():
         request.form.get("polaroid_count"),
     )
     rotation_degrees = parse_rotation_degrees(request.form.get("rotation_degrees"))
+    polaroid_size = parse_polaroid_size(request.form.get("polaroid_size"))
     tid = uuid.uuid4().hex
     now = time.time()
     cleanup_canceled_upload_attempts(now)
@@ -927,6 +1002,7 @@ def submit_task():
             "results": [], "white_balance": white_balance, "denoise": denoise,
             "upload_attempt_id": upload_attempt_id,
             "requested_polaroids": requested_polaroids,
+            "polaroid_size": polaroid_size,
             "rotation_degrees": rotation_degrees,
             "expected_polaroids": requested_polaroids,
             "total_polaroids": 0,
@@ -944,7 +1020,7 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, denoise={denoise}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees})", flush=True)
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, denoise={denoise}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",

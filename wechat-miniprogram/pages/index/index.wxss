@@ -172,6 +172,42 @@
   box-sizing: border-box;
 }
 
+.size-selector {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  z-index: 3;
+  display: flex;
+  height: 48rpx;
+  border: 2rpx solid rgba(37, 99, 235, 0.35);
+  border-radius: 8rpx;
+  background: rgba(255, 255, 255, 0.94);
+  overflow: hidden;
+  box-sizing: border-box;
+  box-shadow: 0 4rpx 12rpx rgba(17, 24, 39, 0.12);
+}
+
+.size-selector.is-disabled {
+  opacity: 0.56;
+}
+
+.size-option {
+  min-width: 78rpx;
+  height: 44rpx;
+  padding: 0 12rpx;
+  color: #4b5563;
+  font-size: 22rpx;
+  line-height: 44rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.size-option.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .placeholder,
 .empty-results {
   color: #8a9099;
