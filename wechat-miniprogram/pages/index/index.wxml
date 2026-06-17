@@ -41,7 +41,7 @@
           bindtap="onSelectedImageTap"
           data-index="{{index}}"
         >
-          <image class="selected-image-thumb" src="{{item.path}}" mode="aspectFill"></image>
+          <image class="selected-image-thumb" src="{{item.previewPath ? item.previewPath : item.path}}" mode="aspectFill"></image>
           <view class="selected-image-index">{{index + 1}}</view>
         </view>
       </view>

@@ -6,6 +6,9 @@ const CONTACT_MESSAGE_MAX_LENGTH = 1000;
 const CONTACT_INFO_MAX_LENGTH = 200;
 const PREVIEW_ROTATION_CANVAS_ID = "preview-rotation-canvas";
 const PREVIEW_ROTATION_MAX_SIZE = 1600;
+const UPLOAD_TIMEOUT_MS = 45000;
+const UPLOAD_MAX_RETRIES = 1;
+const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 
 Page({
   data: {
@@ -36,10 +39,14 @@ Page({
   downloadingImageUrls: {},
   activeBatchRunId: 0,
   activeTaskId: "",
+  activeUploadTask: null,
+  activeUploadAttemptId: "",
+  activeUploadTimer: null,
   batchInterrupted: false,
 
   onUnload() {
     this.clearPollTimer();
+    this.clearActiveUploadAttempt();
   },
 
   onShow() {
@@ -491,6 +498,7 @@ Page({
     const taskId = this.activeTaskId;
     this.batchInterrupted = true;
     this.activeBatchRunId += 1;
+    this.cancelActiveUploadAttempt();
     this.finishInterruptedProcessing(this.data.extractedImages);
     if (taskId) this.cancelBackendTask(taskId);
   },
@@ -507,6 +515,41 @@ Page({
         console.error("cancel task failed", err);
       }
     });
+  },
+
+  cancelActiveUploadAttempt() {
+    const uploadTask = this.activeUploadTask;
+    const uploadAttemptId = this.activeUploadAttemptId;
+    if (uploadTask && typeof uploadTask.abort === "function") {
+      uploadTask.abort();
+    }
+    this.clearActiveUploadAttempt(uploadAttemptId);
+    if (uploadAttemptId) this.cancelUploadAttempt(uploadAttemptId);
+  },
+
+  cancelUploadAttempt(uploadAttemptId) {
+    const apiBaseUrl = this.getApiBaseUrl();
+    if (!apiBaseUrl || !uploadAttemptId) return;
+
+    wx.request({
+      url: `${apiBaseUrl}${PRE_TASK_UPLOAD_CANCEL_PATH}/${encodeURIComponent(uploadAttemptId)}`,
+      method: "POST",
+      header: Object.assign({ "content-type": "application/json" }, this.getAuthHeader()),
+      data: { upload_attempt_id: uploadAttemptId },
+      fail: (err) => {
+        console.error("cancel upload attempt failed", err);
+      }
+    });
+  },
+
+  clearActiveUploadAttempt(uploadAttemptId) {
+    if (uploadAttemptId && this.activeUploadAttemptId && uploadAttemptId !== this.activeUploadAttemptId) return;
+    if (this.activeUploadTimer) {
+      clearTimeout(this.activeUploadTimer);
+    }
+    this.activeUploadTimer = null;
+    this.activeUploadTask = null;
+    this.activeUploadAttemptId = "";
   },
 
   shouldIgnoreProcessingRun(runId) {
@@ -559,30 +602,13 @@ Page({
       statusKind: "processing"
     });
 
-    wx.uploadFile({
-      url: `${apiBaseUrl}/api/process`,
-      filePath: image.path,
-      name: "image",
-      header: this.getAuthHeader(),
-      formData,
-      success: (res) => {
-        if (this.shouldIgnoreProcessingRun(runId)) return;
-        const payload = this.parseResponse(res.data);
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          this.finishWithError(this.getResponseErrorMessage(res, payload, "Upload failed"));
-          return;
-        }
-        if (!payload) {
-          this.finishWithError(this.getResponseErrorMessage(res, payload, "Unexpected upload response"));
-          return;
-        }
-        this.handleProcessPayload(payload, runId);
-      },
-      fail: (err) => {
-        if (this.shouldIgnoreProcessingRun(runId)) return;
-        console.error("uploadFile failed", err);
-        this.finishWithError(this.getUploadErrorMessage(err));
+    this.uploadImageWithRetry(image, formData, apiBaseUrl, runId, "图片上传中", (result) => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
+      if (result.error) {
+        this.finishWithError(result.error);
+        return;
       }
+      this.handleProcessPayload(result.payload, runId);
     });
   },
 
@@ -638,31 +664,87 @@ Page({
       formData.polaroid_count = expectedCount;
     }
 
-    wx.uploadFile({
-      url: `${apiBaseUrl}/api/process`,
-      filePath: image.path,
-      name: "image",
-      header: this.getAuthHeader(),
-      formData,
-      success: (res) => {
-        if (this.shouldIgnoreProcessingRun(runId)) return;
-        const payload = this.parseResponse(res.data);
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          done({ error: this.getResponseErrorMessage(res, payload, "Upload failed") });
-          return;
-        }
-        if (!payload) {
-          done({ error: this.getResponseErrorMessage(res, payload, "Unexpected upload response") });
-          return;
-        }
-        this.handleBatchProcessPayload(payload, imageIndex, totalImages, baseImages, runId, done);
-      },
-      fail: (err) => {
-        if (this.shouldIgnoreProcessingRun(runId)) return;
-        console.error("batch uploadFile failed", err);
-        done({ error: this.getUploadErrorMessage(err) });
+    this.uploadImageWithRetry(image, formData, apiBaseUrl, runId, this.getUploadStatusText(imageIndex, totalImages), (result) => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
+      if (result.error) {
+        done({ error: result.error });
+        return;
       }
+      this.handleBatchProcessPayload(result.payload, imageIndex, totalImages, baseImages, runId, done);
     });
+  },
+
+  uploadImageWithRetry(image, formData, apiBaseUrl, runId, uploadStatusText, done) {
+    const startAttempt = (retryCount) => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
+
+      const uploadAttemptId = this.createUploadAttemptId();
+      const attemptFormData = Object.assign({}, formData, {
+        upload_attempt_id: uploadAttemptId
+      });
+      let settled = false;
+      this.activeUploadAttemptId = uploadAttemptId;
+      this.setData({
+        statusText: retryCount > 0
+          ? `${uploadStatusText}，重试 ${retryCount}/${UPLOAD_MAX_RETRIES}`
+          : uploadStatusText,
+        statusKind: "processing"
+      });
+      this.activeUploadTimer = setTimeout(() => {
+        if (settled || this.shouldIgnoreProcessingRun(runId)) return;
+        settled = true;
+        const uploadTask = this.activeUploadTask;
+        if (uploadTask && typeof uploadTask.abort === "function") {
+          uploadTask.abort();
+        }
+        this.clearActiveUploadAttempt(uploadAttemptId);
+        this.cancelUploadAttempt(uploadAttemptId);
+        if (retryCount < UPLOAD_MAX_RETRIES) {
+          startAttempt(retryCount + 1);
+          return;
+        }
+        done({ error: `图片上传超时，请稍后重试（已重试 ${UPLOAD_MAX_RETRIES} 次）` });
+      }, UPLOAD_TIMEOUT_MS);
+
+      const uploadTask = wx.uploadFile({
+        url: `${apiBaseUrl}/api/process`,
+        filePath: image.path,
+        name: "image",
+        header: this.getAuthHeader(),
+        formData: attemptFormData,
+        success: (res) => {
+          if (settled || this.shouldIgnoreProcessingRun(runId)) return;
+          settled = true;
+          this.clearActiveUploadAttempt(uploadAttemptId);
+          const payload = this.parseResponse(res.data);
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            done({ error: this.getResponseErrorMessage(res, payload, "Upload failed") });
+            return;
+          }
+          if (!payload) {
+            done({ error: this.getResponseErrorMessage(res, payload, "Unexpected upload response") });
+            return;
+          }
+          done({ payload });
+        },
+        fail: (err) => {
+          if (settled || this.shouldIgnoreProcessingRun(runId)) return;
+          settled = true;
+          this.clearActiveUploadAttempt(uploadAttemptId);
+          console.error("uploadFile failed", err);
+          done({ error: this.getUploadErrorMessage(err) });
+        }
+      });
+      if (!settled && this.activeUploadAttemptId === uploadAttemptId) {
+        this.activeUploadTask = uploadTask || null;
+      }
+    };
+
+    startAttempt(0);
+  },
+
+  createUploadAttemptId() {
+    return `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   },
 
   handleBatchProcessPayload(payload, imageIndex, totalImages, baseImages, runId, done) {
@@ -683,7 +765,7 @@ Page({
     if (taskId) {
       this.activeTaskId = taskId;
       this.setData({
-        statusText: this.getQueuedStatusText(imageIndex, totalImages, payload),
+        statusText: this.getQueuedStatusText(imageIndex, totalImages, payload, taskId),
         statusKind: "processing"
       });
       this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, [], runId, done);
@@ -757,9 +839,9 @@ Page({
             return;
           }
 
-          if (this.isQueuedStatusPayload(payload) && nextCollectedImages.length === collectedImages.length) {
+          if (this.isAnotherTaskActive(payload, taskId) && nextCollectedImages.length === collectedImages.length) {
             this.setData({
-              statusText: this.getQueuedStatusText(imageIndex, totalImages, payload),
+              statusText: this.getQueuedStatusText(imageIndex, totalImages, payload, taskId),
               statusKind: "processing"
             });
             this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, nextCollectedImages, runId, done);
@@ -778,8 +860,17 @@ Page({
             return;
           }
 
+          if (this.isCurrentTaskActive(payload, taskId)) {
+            this.setData({
+              statusText: this.getActiveTaskStatusText(imageIndex, totalImages, taskId, payload, nextCollectedImages.length, expectedCount, warning),
+              statusKind: "processing"
+            });
+            this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, nextCollectedImages, runId, done);
+            return;
+          }
+
           this.setData({
-            statusText: this.getBatchProcessingStatusText(imageIndex, totalImages, nextCollectedImages.length, expectedCount, warning),
+            statusText: this.getQueuedStatusText(imageIndex, totalImages, payload, taskId),
             statusKind: "processing"
           });
           this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, nextCollectedImages, runId, done);
@@ -894,7 +985,7 @@ Page({
     if (taskId) {
       this.activeTaskId = taskId;
       this.setData({
-        statusText: this.getQueuedStatusText(null, null, payload),
+        statusText: this.getQueuedStatusText(null, null, payload, taskId),
         statusKind: "processing"
       });
       this.pollTask(taskId, runId);
@@ -961,9 +1052,9 @@ Page({
             return;
           }
 
-          if (this.isQueuedStatusPayload(payload) && images.length === 0) {
+          if (this.isAnotherTaskActive(payload, taskId) && images.length === 0) {
             this.setData({
-              statusText: this.getQueuedStatusText(null, null, payload),
+              statusText: this.getQueuedStatusText(null, null, payload, taskId),
               statusKind: "processing"
             });
             this.pollTask(taskId, runId);
@@ -982,8 +1073,17 @@ Page({
             return;
           }
 
+          if (this.isCurrentTaskActive(payload, taskId)) {
+            this.setData({
+              statusText: this.getActiveTaskStatusText(null, null, taskId, payload, images.length, expectedCount, warning),
+              statusKind: "processing"
+            });
+            this.pollTask(taskId, runId);
+            return;
+          }
+
           this.setData({
-            statusText: this.getProcessingStatusText(images.length, expectedCount, warning),
+            statusText: this.getQueuedStatusText(null, null, payload, taskId),
             statusKind: "processing"
           });
           this.pollTask(taskId, runId);
@@ -1107,15 +1207,26 @@ Page({
     return "图片上传中";
   },
 
-  isQueuedStatusPayload(payload) {
-    if (!payload || typeof payload !== "object") return false;
-    const statusValue = String(payload.status || payload.state || payload.phase || "").toLowerCase();
-    return statusValue === "queued"
-      || statusValue === "waiting"
-      || statusValue === "pending"
-      || statusValue.includes("queue")
-      || statusValue.includes("wait")
-      || this.getQueuePosition(payload) !== "";
+  getBackendActiveTaskId(payload) {
+    if (!payload || typeof payload !== "object") return "";
+    const keys = ["active_task_id", "activeTaskId", "processing_task_id", "processingTaskId", "active_processing_task_id", "activeProcessingTaskId"];
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined && payload[key] !== null && payload[key] !== "") {
+        return String(payload[key]);
+      }
+    }
+    return "";
+  },
+
+  isCurrentTaskActive(payload, taskId) {
+    const activeTaskId = this.getBackendActiveTaskId(payload);
+    return !!activeTaskId && activeTaskId === String(taskId || "");
+  },
+
+  isAnotherTaskActive(payload, taskId) {
+    const activeTaskId = this.getBackendActiveTaskId(payload);
+    return !!activeTaskId && activeTaskId !== String(taskId || "");
   },
 
   getQueuePosition(payload) {
@@ -1130,15 +1241,28 @@ Page({
     return "";
   },
 
-  getQueuedStatusText(imageIndex, totalImages, payload) {
+  getQueuedStatusText(imageIndex, totalImages, payload, taskId) {
     const prefix = Number.isInteger(imageIndex) && totalImages > 1
       ? `图片 ${imageIndex + 1}/${totalImages} `
       : "";
-    const queuePosition = this.getQueuePosition(payload);
-    if (queuePosition) {
+    const queuePosition = this.isAnotherTaskActive(payload, taskId) ? this.getQueuePosition(payload) : "";
+    if (queuePosition && queuePosition !== "0") {
       return `${prefix}排队等待中，队列位置 ${queuePosition}`;
     }
-    return this.isQueuedStatusPayload(payload) ? `${prefix}排队等待中` : `${prefix}等待后端处理`;
+    return this.isAnotherTaskActive(payload, taskId) ? `${prefix}排队等待中` : `${prefix}等待后端处理`;
+  },
+
+  getActiveTaskStatusText(imageIndex, totalImages, taskId, payload, doneCount, expectedCount, warning) {
+    const prefix = Number.isInteger(imageIndex) && totalImages > 1
+      ? `正在处理图片 ${imageIndex + 1}/${totalImages}，`
+      : "";
+    const phase = String(payload.phase || payload.status || payload.state || "").toLowerCase();
+    if (phase === "extracting" || phase === "extraction" || phase.includes("extract")) {
+      return prefix
+        ? `${prefix}${this.getProcessingStatusText(doneCount, expectedCount, warning)}`
+        : this.getProcessingStatusText(doneCount, expectedCount, warning);
+    }
+    return `${prefix}图片处理中`;
   },
 
   getProcessingStatusText(doneCount, expectedCount, warning) {

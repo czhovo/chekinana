@@ -281,6 +281,11 @@ task_queue: list[str] = []
 queue_lock = threading.Lock()
 queue_event = threading.Event()
 CANCELED_STATUS = "canceled"
+active_task_id = ""
+active_task_lock = threading.Lock()
+canceled_upload_attempts: dict[str, float] = {}
+canceled_upload_lock = threading.Lock()
+MAX_UPLOAD_ATTEMPT_ID_CHARS = 128
 
 BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
 POLAROID_W, POLAROID_H = 1600, 2544
@@ -467,6 +472,81 @@ def cancel_if_requested(task_id: str) -> bool:
     return True
 
 
+def set_active_task(task_id: str):
+    global active_task_id
+    with active_task_lock:
+        active_task_id = task_id
+
+
+def clear_active_task(task_id: str):
+    global active_task_id
+    with active_task_lock:
+        if active_task_id == task_id:
+            active_task_id = ""
+
+
+def get_active_task_id() -> str:
+    with active_task_lock:
+        return active_task_id
+
+
+def normalize_upload_attempt_id(value) -> str:
+    if value is None:
+        return ""
+    attempt_id = str(value).strip()
+    if len(attempt_id) > MAX_UPLOAD_ATTEMPT_ID_CHARS:
+        return ""
+    return attempt_id
+
+
+def get_upload_attempt_id() -> str:
+    attempt_id = normalize_upload_attempt_id(request.form.get("upload_attempt_id"))
+    if attempt_id:
+        return attempt_id
+    attempt_id = normalize_upload_attempt_id(request.form.get("uploadAttemptId"))
+    if attempt_id:
+        return attempt_id
+    attempt_id = normalize_upload_attempt_id(request.args.get("upload_attempt_id"))
+    if attempt_id:
+        return attempt_id
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        attempt_id = normalize_upload_attempt_id(data.get("upload_attempt_id"))
+        if attempt_id:
+            return attempt_id
+        attempt_id = normalize_upload_attempt_id(data.get("uploadAttemptId"))
+        if attempt_id:
+            return attempt_id
+    return ""
+
+
+def cleanup_canceled_upload_attempts(now: float | None = None):
+    now = now or time.time()
+    with canceled_upload_lock:
+        for attempt_id, canceled_at in list(canceled_upload_attempts.items()):
+            if now - canceled_at > TASK_TTL:
+                del canceled_upload_attempts[attempt_id]
+
+
+def mark_upload_attempt_canceled(upload_attempt_id: str) -> bool:
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id)
+    if not attempt_id:
+        return False
+    cleanup_canceled_upload_attempts()
+    with canceled_upload_lock:
+        canceled_upload_attempts[attempt_id] = time.time()
+    return True
+
+
+def is_upload_attempt_canceled(upload_attempt_id: str) -> bool:
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id)
+    if not attempt_id:
+        return False
+    cleanup_canceled_upload_attempts()
+    with canceled_upload_lock:
+        return attempt_id in canceled_upload_attempts
+
+
 def do_process_extraction(raw_data: bytes, task_id: str):
     """主处理流程：SAM3 检测 → 四边形拟合 → 逐个提取"""
     if cancel_if_requested(task_id):
@@ -645,6 +725,7 @@ def worker_loop():
             if not t: continue
             if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
                 continue
+            set_active_task(task_id)
             t["status"] = "processing"
             t["started_at"] = time.time()
 
@@ -668,6 +749,7 @@ def worker_loop():
         with task_lock:
             if task_id in task_store:
                 task_store[task_id].pop("raw_data", None)
+        clear_active_task(task_id)
         gc.collect()
         global _device
         if _device == "cuda":
@@ -768,6 +850,21 @@ def cancel_task(task_id):
     })
 
 
+@app.route("/api/upload-cancel", methods=["POST"])
+@app.route("/api/upload-cancel/<upload_attempt_id>", methods=["POST"])
+def cancel_upload_attempt(upload_attempt_id=""):
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id) or get_upload_attempt_id()
+    if not attempt_id:
+        return jsonify({"ok": False, "error": "upload_attempt_id is required"}), 400
+    mark_upload_attempt_canceled(attempt_id)
+    print(f"[upload-cancel] attempt={attempt_id} canceled", flush=True)
+    return jsonify({
+        "ok": True,
+        "status": CANCELED_STATUS,
+        "upload_attempt_id": attempt_id,
+    })
+
+
 @app.route("/api/contact", methods=["POST"])
 def contact_author():
     data = request.get_json(silent=True) or {}
@@ -793,6 +890,15 @@ def contact_author():
 def submit_task():
     ip = get_client_ip()
     print(f"🟢 提交 | IP: {ip}", flush=True)
+    upload_attempt_id = get_upload_attempt_id()
+    if upload_attempt_id and is_upload_attempt_canceled(upload_attempt_id):
+        print(f"[upload-cancel] rejected late upload attempt={upload_attempt_id} ip={ip}", flush=True)
+        return jsonify({
+            "ok": False,
+            "status": CANCELED_STATUS,
+            "error": "Upload attempt canceled",
+            "upload_attempt_id": upload_attempt_id,
+        }), 409
     if "image" not in request.files:
         return jsonify({"error": "请上传图片"}), 400
     file = request.files["image"]
@@ -813,11 +919,13 @@ def submit_task():
     rotation_degrees = parse_rotation_degrees(request.form.get("rotation_degrees"))
     tid = uuid.uuid4().hex
     now = time.time()
+    cleanup_canceled_upload_attempts(now)
     with task_lock:
         task_store[tid] = {
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance, "denoise": denoise,
+            "upload_attempt_id": upload_attempt_id,
             "requested_polaroids": requested_polaroids,
             "rotation_degrees": rotation_degrees,
             "expected_polaroids": requested_polaroids,
@@ -845,6 +953,7 @@ def submit_task():
         "requested_polaroids": requested_polaroids,
         "rotation_degrees": rotation_degrees,
         "expected_polaroids": requested_polaroids,
+        "upload_attempt_id": upload_attempt_id,
     })
 
 # ---- 查询状态（含中间结果列表） ----
@@ -872,6 +981,8 @@ def task_status(task_id):
         extraction_complete = bool(t.get("extraction_complete", False))
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
+        upload_attempt_id = t.get("upload_attempt_id", "")
+        current_active_task_id = get_active_task_id()
 
     pos = 0
     if status == "queued":
@@ -883,6 +994,8 @@ def task_status(task_id):
         "task_id": task_id,
         "status": status,
         "phase": phase,
+        "active_task_id": current_active_task_id,
+        "processing_task_id": current_active_task_id,
         "queue_position": pos,
         "results_count": len(results_meta),
         "results": results_meta,
@@ -897,6 +1010,7 @@ def task_status(task_id):
         "extraction_complete": extraction_complete,
         "elapsed": elapsed,
         "error": error,
+        "upload_attempt_id": upload_attempt_id,
     })
 
 # ---- 获取某一步的结果图片 ----
