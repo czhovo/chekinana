@@ -2,13 +2,13 @@
 
 ## Current Objective
 
-Rotation/timeout/queue/action and shortage-status fixes are approved and ready for integration: completed status reports insufficient extracted polaroids against the user-entered expected count, even when Backend completion payload fields have been reduced to the actual detected/extracted count.
+Add support for a second polaroid size. Existing output becomes `mini` with ratio `1:1.59`; new `wide` output has ratio `2:1.59`, equivalent to two mini polaroids side by side. Frontend must expose a per-image `auto / mini / wide` selector in the preview area, defaulting to `mini`; Backend must process each detected quadrilateral with the selected size, and `auto` must classify by quadrilateral edge-length ratio.
 
 Scope constraints:
 
 - Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
 - Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
-- Preserve token/auth behavior, RunPod startup, SAM/extraction internals, result download auth, and existing single-image behavior.
+- Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
 - Batch result order must be: selected image order, then detected polaroid order inside each image.
 - Continue processing later images if one image fails; report partial failures clearly.
 - Maximum selected images: 9.
@@ -50,6 +50,8 @@ Reviewer rotation/timeout/action partial approval commit: b315634
 Reviewer shortage-status changes-requested commit: 1873ae9
 Frontend shortage status commits: e3488e3, b698c4b
 Reviewer shortage status approval commit: 1ee2872
+Integration push: d34815b main includes approved rotation/timeout/action and shortage-status fixes
+Confirmed mini/wide mask geometry: 2026-06-18
 ```
 
 ## Worktree Assignments
@@ -57,9 +59,9 @@ Reviewer shortage status approval commit: 1ee2872
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Rotation/timeout/action and shortage-status fixes approved through `b698c4b`; no open Frontend implementation task |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Backend upload/status contract implemented in `d765c72`; no open Backend implementation task unless re-review finds a regression |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Shortage-status fix approved in `1ee2872`; no open review task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Add per-image `auto / mini / wide` selector and submit selected size to Backend |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Add mini/wide geometry and selected/auto size handling for extraction output |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend/Backend size-support diffs against the confirmed geometry and API contract |
 
 ## Current Tasks
 
@@ -89,6 +91,9 @@ Reviewer shortage status approval commit: 1ee2872
 | BATCH-REV-007 | Reviewer | done | Review `BATCH-FE-010` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-rotation-timeout-queue.md` | Final reviewer verdict is changes requested in commit `1873ae9`. Prior commit `b315634` approved rotation fallback, keyed preview switching, 15-second timeout with 2 retries, queued copy, active-task status, all-download, clear-successful-images, failed-image preservation, and cancel route behavior. Blocking P1 remains Frontend shortage status: when the user expects 5 but Backend completion reports actual counts as 3, both single-image and batch completion paths can show success instead of final `3/5` shortage. |
 | BATCH-FE-011 | Frontend | done | Fix final insufficient-count status to preserve the user-entered expected count. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-18-frontend-shortage-status.md` | Frontend commits `e3488e3` and `b698c4b` preserve the user-entered expected count, or `payload.requested_polaroids` when available, before falling back to Backend actual/finalized count fields. Final single-image and batch completion now show shortages such as `3/5` when the user expected 5 but Backend actual completion fields are 3, while preserving partial results and failed source image indexes. |
 | BATCH-REV-008 | Reviewer | done | Re-review `BATCH-FE-011` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-shortage-status.md` | Reviewer commit `1ee2872` verdict: approved. Reviewer confirmed single-image direct and polling completion, requested-polaroids fallback, batch direct and polling completion, and final batch status all show `3/5` shortages while preserving partial results. Regression checks covered rotation, 15-second timeout with 2 retries, canonical pre-task upload cancel, task cancel, all-download, and clear-successful-images preserving failed source images. |
+| SIZE-BE-001 | Backend | pending | Add mini/wide/auto output-size support for extracted polaroids. | `backend/app.py`, `docs/agents/handoffs/2026-06-18-backend-polaroid-size.md` | Accept multipart form field `polaroid_size` with values `auto`, `mini`, and `wide`; missing/invalid values must fall back safely to `mini` unless Backend documents a stricter validation. Existing behavior must remain `mini` by default. `mini` uses the existing geometry: base card `800x1272`, output `1600x2544`, image-area vertices `[[110,200],[1490,200],[1490,2044],[110,2044]]`. `wide` uses confirmed geometry: base card `1600x1272`, output `3200x2544`, image-area vertices `[[110,200],[3090,200],[3090,2044],[110,2044]]`. If the selected size is `mini`, every extracted quadrilateral is warped/exported as mini. If `wide`, every extracted quadrilateral is warped/exported as wide. If `auto`, classify each quadrilateral independently by `avg(horizontal edge lengths) / avg(vertical edge lengths)`: ratio `> 1` means `wide`, otherwise `mini`. Keep detection, count retry/pruning, denoise, white balance, rotation, task queue/cancel, auth, RunPod startup, result routes, and existing status/result compatibility intact. Handoff must document exact constants, helper names, request field behavior, auto-ratio formula, and verification for mini output size, wide output size, auto mini classification, auto wide classification, default mini fallback, and no API/auth/startup regressions. |
+| SIZE-FE-001 | Frontend | pending | Add per-image polaroid size selector and submit it with processing requests. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-18-frontend-polaroid-size.md` | Add a three-option selector with values `auto`, `mini`, and `wide` inside the image preview area near the upper right. Default for every newly selected image is `mini`. The size selection is per image and must persist when switching thumbnails, rotating, deleting, adding more images, and processing a batch. Submit selected size as `polaroid_size` for each `/api/process` upload, alongside existing token, white-balance, denoise, rotation, and expected-count fields. For a single selected image, behavior is the same per-image flow with `mini` default. Do not regress preview navigation, thumbnail tap-to-jump, count input binding, rotation binding, upload timeout/retry, cancel behavior, all-download, clear-successful-images, shortage status, result download/save, auth, or contact UI. Handoff must include `node --check`, `git diff --check`, and mocked checks for default mini, per-image independent size state, selector placement/state, single-image upload field, batch per-image upload fields, and compatibility with existing count/rotation controls. |
+| SIZE-REV-001 | Reviewer | pending | Review mini/wide/auto polaroid size support after Backend and Frontend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-polaroid-size.md` | Verify the confirmed geometry and end-to-end contract: Frontend defaults each image to `mini`, selector offers `auto / mini / wide` in the preview upper-right area, uploads include `polaroid_size`, Backend default/missing behavior remains mini, mini output is `1600x2544` with mini image-area vertices, wide output is `3200x2544` with wide image-area vertices, auto classifies quadrilaterals with horizontal/vertical edge ratio `> 1` as wide and otherwise mini, and existing batch ordering/count/rotation/cancel/status/result/contact/auth behavior does not regress. Reviewer should run `python -m py_compile backend/app.py`, `node --check wechat-miniprogram/pages/index/index.js`, `git diff --check`, plus targeted mocked geometry/API checks. |
 
 Status values:
 
@@ -114,6 +119,7 @@ Frontend request flow:
   - `wb`
   - `denoise`
   - `rotation_degrees`
+  - `polaroid_size` (`auto`, `mini`, or `wide`; default `mini`)
   - optional `expected_polaroids`
   - optional `polaroid_count`
 - Poll each returned `task_id` through existing `/api/status/<task_id>`.
@@ -125,6 +131,20 @@ Backend response contract:
 - Existing `/api/status/<task_id>` fields remain compatible, including `results`, `expected_polaroids`, `total_polaroids`, `warning`, and `extraction_complete`.
 - Existing `/api/result/<task_id>/<result_id>` behavior remains compatible.
 - No new batch route is required for V1.
+
+Polaroid size contract:
+
+- Existing output size is now named `mini`.
+- `mini` ratio is `1:1.59`; current output remains `1600x2544`.
+- `wide` ratio is `2:1.59`; output must be `3200x2544`.
+- Confirmed mini output image-area vertices are `[[110,200],[1490,200],[1490,2044],[110,2044]]`.
+- Confirmed wide output image-area vertices are `[[110,200],[3090,200],[3090,2044],[110,2044]]`.
+- The wide card keeps the same top/bottom blank border heights as mini and the same left/right blank border widths as mini; only the total width and image-area width expand.
+- Frontend sends `polaroid_size` per image with value `auto`, `mini`, or `wide`; absent value must behave as `mini`.
+- If `polaroid_size=mini`, Backend warps every detected quadrilateral to mini output.
+- If `polaroid_size=wide`, Backend warps every detected quadrilateral to wide output.
+- If `polaroid_size=auto`, Backend classifies each detected quadrilateral independently using `avg(horizontal edge lengths) / avg(vertical edge lengths)`: ratio `> 1` means wide, ratio `<= 1` means mini.
+- The user confirmed the mini/wide mask geometry on 2026-06-18 before task publication.
 
 Ordering contract:
 
@@ -214,10 +234,14 @@ Contact email contract:
 | 2026-06-17 | Completed processing actions should be `全部下载` and `删除全部图片`. | User wants result-focused actions after processing; failed source images should remain so they can be retried or reviewed. |
 | 2026-06-18 | User-entered expected count is authoritative for final shortage display. | Reviewer found Backend completion can reduce `total_polaroids` / `expected_polaroids` to the actual detected count, which hides shortages unless Frontend preserves the original user target. |
 | 2026-06-18 | Rotation/timeout/action and shortage-status fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-008` in commit `1ee2872`; no open implementation or review tasks remain. |
+| 2026-06-18 | Add `mini`, `wide`, and `auto` polaroid size support. | User requested a second wide format equivalent to two mini polaroids side by side, plus frontend per-image selection. |
+| 2026-06-18 | Keep `mini` as the default size. | Existing behavior must remain compatible unless the user explicitly selects `auto` or `wide`. |
+| 2026-06-18 | Confirmed wide image-area geometry before implementation. | User approved the mask where wide keeps mini top/bottom/left/right margins and expands width to `3200x2544` output with vertices `[[110,200],[3090,200],[3090,2044],[110,2044]]`. |
+| 2026-06-18 | Auto size classification uses horizontal/vertical edge ratio threshold `1`. | User specified comparing horizontal edge lengths to vertical edge lengths against 1, accounting for vertical compression from normal photo perspective. |
 
 ## Open Questions
 
-- None. The new user-tested issues have concrete Backend, Frontend, and Reviewer owners.
+- None. Mini/wide mask geometry is confirmed, `polaroid_size` field is defined, and the new size-support work has concrete Backend, Frontend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -247,3 +271,5 @@ Contact email contract:
 - Reviewer first approved the rotation/timeout/queue/action scope in `b315634`, then requested changes in `1873ae9` for the remaining final shortage-status blocker.
 - Frontend completed `BATCH-FE-011` in `e3488e3` and `b698c4b`.
 - Reviewer approved `BATCH-REV-008` in `1ee2872`; PM marks the rotation/timeout/action and shortage-status fixes ready for integration.
+- PM drew and user confirmed mini/wide image-area masks before publishing size-support tasks.
+- PM assigned `SIZE-BE-001`, `SIZE-FE-001`, and `SIZE-REV-001` for mini/wide/auto polaroid size support.
