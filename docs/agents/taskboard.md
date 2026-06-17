@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Fix post-integration V1 batch image processing issues found in WeChat mini-program testing: rotated previews must switch cleanly between selected images, upload status must remain distinct from processing status, and queued backend tasks must be shown in the status bar.
+Post-integration V1 batch image processing preview/status fixes are approved and ready for integration: rotated previews switch cleanly between selected images, upload status remains distinct from processing status, and queued backend tasks are shown in the status bar.
 
 Scope constraints:
 
@@ -36,6 +36,8 @@ Reviewer batch UI approval commit: bb92d5b
 Reviewer processing/contact review commit: 9cea878
 Reviewer contact email approval commit: 1497688
 Integration push: 7e6b03d main includes approved batch/contact work
+Frontend preview/status fix commit: 091947e
+Reviewer preview/status approval commit: 8c99538
 ```
 
 ## Worktree Assignments
@@ -43,9 +45,9 @@ Integration push: 7e6b03d main includes approved batch/contact work
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Fix post-integration batch preview rotation display and status-phase text |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Preview/status fix completed in `091947e`; no open Frontend implementation task |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Verify existing single-image API supports V1 batch orchestration and make only necessary compatibility fixes |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend/Backend diffs against this taskboard and the agreed V1 behavior |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Preview/status fix approved in `8c99538`; no open review task |
 
 ## Current Tasks
 
@@ -64,8 +66,8 @@ Integration push: 7e6b03d main includes approved batch/contact work
 | CONTACT-BE-002 | Backend | done | Finish contact-author email success logging and handoff for the existing contact email behavior. | `backend/app.py`, `docs/agents/handoffs/2026-06-17-backend-contact-email-log.md` | Backend commit `ef6d945` adds safe successful-send logging for contact emails without logging full message/contact values. Reviewer verified contact info remains in the email body and route/auth/rate-limit/response behavior remains compatible. |
 | BATCH-REV-003 | Reviewer | done | Review the processing UX, backend cancellation, and contact email/log fixes after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-batch-processing-contact-fixes.md` | Reviewer commit `9cea878` verdict: changes requested. Frontend processing UX and Backend cancellation passed; contact email includes contact info; blocker remains Backend missing successful-send log and missing `CONTACT-BE-002` handoff. |
 | CONTACT-REV-003 | Reviewer | done | Re-review `CONTACT-BE-002` after Backend adds success logging and the missing handoff. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-contact-email-log.md` | Reviewer commit `1497688` verdict: approved. Successful contact email sends now produce the required safe log, contact info remains visible in the email body when provided, no sensitive full message/contact value is logged, and existing `/api/contact` behavior remains compatible. |
-| BATCH-FE-007 | Frontend | pending | Fix post-integration preview rotation and status-phase text issues found during mini-program testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-preview-status-fixes.md` | The large preview displays the current selected image already rotated for its own per-image rotation state and no longer relies on rotating the preview image/frame with `previewRotationStyle` or an equivalent CSS transform that can rotate the previous image during switches. Switching between images with different rotations updates image and orientation together without a visible old-image rotation step. During upload, the status bar keeps the explicit `图片上传中` phase before backend task processing begins. If the backend task is queued or waiting, including when `/api/status/<task_id>` exposes `queued`, waiting, or `queue_position`, the status bar shows a queue/waiting message and includes the queue position when available. Once processing starts, the status text still shows the current image position and extraction progress such as `正在处理图片 m/n，正在提取第 x 张 (x/N)` using backend-reported target counts when available. Existing batch limits, ordered results, incremental result display, interrupt/cancel behavior, contact UI, auth, and backend API contracts must remain unchanged. Frontend handoff must document manual or mocked checks for rotated-preview switching, upload status, queued status, processing status, interrupt, and `node --check` / `git diff --check`. |
-| BATCH-REV-004 | Reviewer | pending | Review `BATCH-FE-007` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-preview-status-fixes.md` | Verify the Frontend diff only changes the scoped preview/status behavior and does not regress batch selection, thumbnail navigation, per-image count/rotation, incremental result display, interrupt/cancel, auth, or contact behavior. Reviewer should explicitly test or inspect the three user-reported cases: switching between differently rotated images, upload phase showing `图片上传中`, and queued/waiting status display with queue position when available. |
+| BATCH-FE-007 | Frontend | done | Fix post-integration preview rotation and status-phase text issues found during mini-program testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-preview-status-fixes.md` | Frontend commit `091947e` passed reviewer checks: preview now uses per-image generated `previewPath` instead of preview-frame rotation transforms, switching differently rotated images updates source/orientation together, upload/backend-waiting/queued/processing phases are distinct, queued status includes queue position when available, incremental result display and interrupt/cancel behavior remain intact, and no backend API contract changed. |
+| BATCH-REV-004 | Reviewer | done | Review `BATCH-FE-007` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-preview-status-fixes.md` | Reviewer commit `8c99538` verdict: approved. Reviewer confirmed the diff is scoped to Frontend preview/status behavior, no Backend/auth/contact/result API contracts changed, `node --check` and `git diff --check` passed, and mocked checks covered rotated-image switching, upload status, queued status with queue position, processing progress, incremental display, and interrupt. |
 
 Status values:
 
@@ -156,6 +158,7 @@ Contact email contract:
 | 2026-06-17 | Batch/contact work is ready for integration after reviewer approval. | Reviewer approved `CONTACT-REV-003` in commit `1497688`; no open implementation tasks remain. |
 | 2026-06-17 | Reopen Frontend batch work for post-integration preview/status issues. | User testing after integration found three UI problems: rotated preview switching, lost upload phase text, and missing queued/waiting status display. |
 | 2026-06-17 | Keep the preview/status fix Frontend-only unless implementation discovers a real backend contract gap. | The requested behavior can be expressed through existing per-image rotation state and existing task status polling; backend batch/cancel/contact contracts should stay stable. |
+| 2026-06-17 | Preview/status fixes are ready for integration after reviewer approval. | Reviewer approved `BATCH-REV-004` in commit `8c99538`; no open implementation or review tasks remain. |
 
 ## Open Questions
 
@@ -175,3 +178,5 @@ Contact email contract:
 - Backend completed contact email success logging in `ef6d945`.
 - Reviewer approved `CONTACT-REV-003` in `1497688`; PM marks the batch/contact work ready for integration.
 - User testing after integration commit `7e6b03d` found new Frontend batch preview/status issues; PM assigned `BATCH-FE-007` and `BATCH-REV-004`.
+- Frontend completed `BATCH-FE-007` in `091947e`.
+- Reviewer approved `BATCH-REV-004` in `8c99538`; PM marks the preview/status fixes ready for integration.
