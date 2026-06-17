@@ -49,8 +49,12 @@
 
     <view class="toolbar">
       <button wx:if="{{processing}}" class="tool-button interrupt" bindtap="interruptBatchProcessing">中断</button>
+      <block wx:elif="{{extractedImages.length || failedImageIndexes.length}}">
+        <button class="tool-button" bindtap="downloadAllResults" disabled="{{!extractedImages.length}}">全部下载</button>
+        <button class="tool-button danger" bindtap="clearProcessedImages">删除全部图片</button>
+      </block>
       <button wx:else class="tool-button" bindtap="chooseImage" disabled="{{selectedImages.length >= 9}}">添加图片</button>
-      <button class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
+      <button wx:if="{{processing || (!extractedImages.length && !failedImageIndexes.length)}}" class="tool-button primary" bindtap="startExtract" loading="{{processing}}" disabled="{{!inputPath || processing}}">
         {{processing ? '处理中' : '开始提取'}}
       </button>
     </view>

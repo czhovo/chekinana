@@ -273,6 +273,13 @@
   border-color: #fed7aa;
 }
 
+.toolbar .tool-button.danger,
+.toolbar button.tool-button.danger {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
 .toolbar .tool-button[disabled],
 .toolbar button.tool-button[disabled] {
   color: #a5abb5;
