@@ -1,10 +1,15 @@
 const { AUTH_STORAGE_KEY, getApiBaseUrl, isLocalPreviewToken } = require("../../utils/config");
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_COUNT = 180;
+const MAX_SELECTED_IMAGES = 9;
+const CONTACT_MESSAGE_MAX_LENGTH = 1000;
+const CONTACT_INFO_MAX_LENGTH = 200;
 
 Page({
   data: {
     inputPath: "",
+    selectedImages: [],
+    currentImageIndex: 0,
     rotationDegrees: 0,
     previewRotationStyle: "",
     extractedImages: [],
@@ -13,6 +18,10 @@ Page({
     denoiseEnabled: true,
     expectedPolaroidCount: "",
     showCountInput: false,
+    showContactDialog: false,
+    contactMessage: "",
+    contactInfo: "",
+    contactSubmitting: false,
     statusText: "请选择一张包含拍立得的图片",
     statusKind: "idle"
   },
@@ -22,6 +31,9 @@ Page({
   verifyingCachedToken: false,
   pendingAuthRestoreState: null,
   downloadingImageUrls: {},
+  activeBatchRunId: 0,
+  activeTaskId: "",
+  batchInterrupted: false,
 
   onUnload() {
     this.clearPollTimer();
@@ -145,6 +157,8 @@ Page({
     this.setData({
       processing: false,
       inputPath: "",
+      selectedImages: [],
+      currentImageIndex: 0,
       rotationDegrees: 0,
       previewRotationStyle: "",
       extractedImages: [],
@@ -159,31 +173,41 @@ Page({
   chooseImage() {
     if (this.data.processing) return;
 
+    const remainingCount = MAX_SELECTED_IMAGES - this.data.selectedImages.length;
+    if (remainingCount <= 0) {
+      wx.showToast({ title: `最多添加 ${MAX_SELECTED_IMAGES} 张图片`, icon: "none" });
+      return;
+    }
+
     wx.chooseMedia({
-      count: 1,
+      count: remainingCount,
       mediaType: ["image"],
       sourceType: ["album", "camera"],
       sizeType: ["original"],
       success: (res) => {
-        const file = res.tempFiles && res.tempFiles[0];
-        if (!file || !file.tempFilePath) {
+        const files = (res.tempFiles || []).filter((file) => file && file.tempFilePath);
+        if (!files.length) {
           wx.showToast({ title: "未选择图片", icon: "none" });
           return;
         }
 
         this.clearPollTimer();
         this.downloadingImageUrls = {};
-        const nextState = {
-          inputPath: file.tempFilePath,
-          rotationDegrees: 0,
-          previewRotationStyle: "",
+        const selectedImages = this.data.selectedImages.concat(
+          files.slice(0, remainingCount).map((file) => this.createSelectedImage(file.tempFilePath))
+        );
+        const currentImageIndex = this.data.selectedImages.length ? this.data.currentImageIndex : 0;
+        const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+          selectedImages,
+          currentImageIndex,
           extractedImages: [],
           processing: false,
-          expectedPolaroidCount: "",
           showCountInput: true,
-          statusText: "图片已选择，点击开始提取",
+          statusText: selectedImages.length > 1
+            ? `已添加 ${selectedImages.length} 张图片，当前仍按单张流程处理`
+            : "图片已选择，点击开始提取",
           statusKind: "ready"
-        };
+        });
         this.pendingAuthRestoreState = nextState;
         this.setData(nextState);
       },
@@ -191,6 +215,105 @@ Page({
         wx.showToast({ title: "选择图片失败", icon: "none" });
       }
     });
+  },
+
+  onInputFrameTap() {
+    if (this.data.processing) return;
+    if (!this.data.inputPath) {
+      this.chooseImage();
+      return;
+    }
+    this.showDeleteCurrentImageAction();
+  },
+
+  showPreviousImage() {
+    if (this.data.selectedImages.length <= 1) return;
+    const currentImageIndex = (this.data.currentImageIndex - 1 + this.data.selectedImages.length)
+      % this.data.selectedImages.length;
+    this.setCurrentImageIndex(currentImageIndex);
+  },
+
+  showNextImage() {
+    if (this.data.selectedImages.length <= 1) return;
+    const currentImageIndex = (this.data.currentImageIndex + 1) % this.data.selectedImages.length;
+    this.setCurrentImageIndex(currentImageIndex);
+  },
+
+  onSelectedImageTap(event) {
+    const index = Number(event.currentTarget.dataset.index);
+    if (!Number.isInteger(index)) return;
+    this.setCurrentImageIndex(index);
+  },
+
+  setCurrentImageIndex(currentImageIndex) {
+    const selectedImages = this.data.selectedImages;
+    if (!selectedImages.length) return;
+    const clampedIndex = Math.max(0, Math.min(currentImageIndex, selectedImages.length - 1));
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, clampedIndex), {
+      currentImageIndex: clampedIndex,
+      showCountInput: !this.data.processing
+    });
+    if (!this.data.processing) {
+      Object.assign(nextState, {
+        extractedImages: [],
+        statusText: selectedImages.length > 1
+          ? `当前图片 ${clampedIndex + 1}/${selectedImages.length}，点击开始提取`
+          : "图片已选择，点击开始提取",
+        statusKind: "ready"
+      });
+    }
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
+  },
+
+  showDeleteCurrentImageAction() {
+    wx.showActionSheet({
+      itemList: ["删除图片"],
+      success: (res) => {
+        if (res.tapIndex === 0) this.deleteCurrentImage();
+      }
+    });
+  },
+
+  deleteCurrentImage() {
+    if (!this.data.selectedImages.length || this.data.processing) return;
+
+    this.clearPollTimer();
+    this.downloadingImageUrls = {};
+    const selectedImages = this.data.selectedImages.filter((image, index) => index !== this.data.currentImageIndex);
+    if (!selectedImages.length) {
+      const nextState = {
+        inputPath: "",
+        selectedImages: [],
+        currentImageIndex: 0,
+        rotationDegrees: 0,
+        previewRotationStyle: "",
+        extractedImages: [],
+        processing: false,
+        expectedPolaroidCount: "",
+        showCountInput: false,
+        statusText: "请选择一张包含拍立得的图片",
+        statusKind: "idle"
+      };
+      this.pendingAuthRestoreState = nextState;
+      this.setData(nextState);
+      return;
+    }
+
+    const currentImageIndex = Math.min(this.data.currentImageIndex, selectedImages.length - 1);
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+      selectedImages,
+      currentImageIndex,
+      extractedImages: [],
+      processing: false,
+      showCountInput: true,
+      statusText: selectedImages.length > 1
+        ? `当前图片 ${currentImageIndex + 1}/${selectedImages.length}，点击开始提取`
+        : "图片已选择，点击开始提取",
+      statusKind: "ready"
+    });
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
   },
 
   onWhiteBalanceChange(event) {
@@ -207,8 +330,10 @@ Page({
 
   onExpectedCountInput(event) {
     const value = String(event.detail.value || "").replace(/\D/g, "").slice(0, 3);
+    const selectedImages = this.updateCurrentSelectedImage({ expectedPolaroidCount: value });
     this.setData({
-      expectedPolaroidCount: value
+      expectedPolaroidCount: value,
+      selectedImages
     });
   },
 
@@ -216,17 +341,32 @@ Page({
     if (!this.data.inputPath || this.data.processing) return;
 
     const rotationDegrees = (this.data.rotationDegrees + 90) % 360;
+    const previewRotationStyle = rotationDegrees ? `transform: rotate(${-rotationDegrees}deg);` : "";
+    const selectedImages = this.updateCurrentSelectedImage({
+      rotationDegrees,
+      previewRotationStyle
+    });
     this.setData({
       rotationDegrees,
-      previewRotationStyle: rotationDegrees ? `transform: rotate(${-rotationDegrees}deg);` : "",
+      previewRotationStyle,
+      selectedImages,
       extractedImages: [],
       statusText: "图片已选择，点击开始提取",
       statusKind: "ready"
     });
   },
 
+  updateCurrentSelectedImage(patch) {
+    if (!this.data.selectedImages.length) return [];
+    return this.data.selectedImages.map((image, index) => {
+      if (index !== this.data.currentImageIndex) return image;
+      return Object.assign({}, image, patch);
+    });
+  },
+
   startExtract() {
-    if (!this.data.inputPath || this.data.processing) return;
+    const processImages = this.getProcessImages();
+    if (!processImages.length || this.data.processing) return;
 
     const token = this.getAuthToken();
     if (!token) {
@@ -247,17 +387,84 @@ Page({
     this.clearPollTimer();
     this.pollCount = 0;
     this.downloadingImageUrls = {};
+    this.batchInterrupted = false;
+    this.activeTaskId = "";
+    this.activeBatchRunId += 1;
+    const runId = this.activeBatchRunId;
+    if (processImages.length > 1) {
+      this.startBatchExtract(processImages, apiBaseUrl, token, runId);
+      return;
+    }
+
+    this.startSingleExtract(processImages[0], apiBaseUrl, token, runId);
+  },
+
+  interruptBatchProcessing() {
+    if (!this.data.processing) return;
+
+    const taskId = this.activeTaskId;
+    this.batchInterrupted = true;
+    this.activeBatchRunId += 1;
+    this.finishInterruptedProcessing(this.data.extractedImages);
+    if (taskId) this.cancelBackendTask(taskId);
+  },
+
+  cancelBackendTask(taskId) {
+    const apiBaseUrl = this.getApiBaseUrl();
+    if (!apiBaseUrl || !taskId) return;
+
+    wx.request({
+      url: `${apiBaseUrl}/api/cancel/${encodeURIComponent(taskId)}`,
+      method: "POST",
+      header: this.getAuthHeader(),
+      fail: (err) => {
+        console.error("cancel task failed", err);
+      }
+    });
+  },
+
+  shouldIgnoreProcessingRun(runId) {
+    return this.batchInterrupted || runId !== this.activeBatchRunId;
+  },
+
+  finishInterruptedProcessing(images) {
+    this.clearPollTimer();
+    const visibleImages = Array.isArray(images) ? images : this.data.extractedImages;
+    this.activeTaskId = "";
+    this.setData({
+      extractedImages: visibleImages,
+      processing: false,
+      showCountInput: false,
+      statusText: visibleImages.length
+        ? `已中断处理，已保留 ${visibleImages.length} 张结果`
+        : "已中断处理",
+      statusKind: "error"
+    });
+  },
+
+  getProcessImages() {
+    if (this.data.selectedImages.length) return this.data.selectedImages.slice();
+    if (!this.data.inputPath) return [];
+    return [{
+      path: this.data.inputPath,
+      rotationDegrees: this.data.rotationDegrees || 0,
+      expectedPolaroidCount: this.data.expectedPolaroidCount || ""
+    }];
+  },
+
+  startSingleExtract(image, apiBaseUrl, token, runId) {
     const formData = {
       token,
       wb: this.data.wbEnabled ? "1" : "0",
       denoise: this.data.denoiseEnabled ? "1" : "0",
-      rotation_degrees: String(this.data.rotationDegrees || 0)
+      rotation_degrees: String(image.rotationDegrees || 0)
     };
-    const expectedCount = this.getExpectedPolaroidCount();
+    const expectedCount = this.getExpectedPolaroidCount(image.expectedPolaroidCount);
     if (expectedCount) {
       formData.expected_polaroids = expectedCount;
       formData.polaroid_count = expectedCount;
     }
+    this.activeTaskId = "";
     this.setData({
       processing: true,
       extractedImages: [],
@@ -268,11 +475,12 @@ Page({
 
     wx.uploadFile({
       url: `${apiBaseUrl}/api/process`,
-      filePath: this.data.inputPath,
+      filePath: image.path,
       name: "image",
       header: this.getAuthHeader(),
       formData,
       success: (res) => {
+        if (this.shouldIgnoreProcessingRun(runId)) return;
         const payload = this.parseResponse(res.data);
         if (res.statusCode < 200 || res.statusCode >= 300) {
           this.finishWithError(this.getResponseErrorMessage(res, payload, "Upload failed"));
@@ -282,13 +490,247 @@ Page({
           this.finishWithError(this.getResponseErrorMessage(res, payload, "Unexpected upload response"));
           return;
         }
-        this.handleProcessPayload(payload);
+        this.handleProcessPayload(payload, runId);
       },
       fail: (err) => {
+        if (this.shouldIgnoreProcessingRun(runId)) return;
         console.error("uploadFile failed", err);
         this.finishWithError(this.getUploadErrorMessage(err));
       }
     });
+  },
+
+  startBatchExtract(processImages, apiBaseUrl, token, runId) {
+    this.setData({
+      processing: true,
+      extractedImages: [],
+      showCountInput: false,
+      statusText: `正在处理图片 1/${processImages.length}，正在提取第1张`,
+      statusKind: "processing"
+    });
+    this.processBatchImage(processImages, 0, [], [], apiBaseUrl, token, runId);
+  },
+
+  processBatchImage(processImages, imageIndex, accumulatedImages, failures, apiBaseUrl, token, runId) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
+    if (imageIndex >= processImages.length) {
+      this.finishBatchExtract(accumulatedImages, failures, processImages.length);
+      return;
+    }
+
+    const image = processImages[imageIndex];
+    this.setData(Object.assign(this.getCurrentImageState(processImages, imageIndex), {
+      currentImageIndex: imageIndex,
+      statusText: this.getBatchProcessingStatusText(imageIndex, processImages.length, 0, this.getExpectedPolaroidCount(image.expectedPolaroidCount)),
+      statusKind: "processing"
+    }));
+
+    this.uploadBatchImage(image, imageIndex, processImages.length, accumulatedImages, apiBaseUrl, token, runId, (result) => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
+      const nextImages = accumulatedImages.concat(result.images || []);
+      const nextFailures = result.error
+        ? failures.concat({ imageIndex, message: result.error })
+        : failures;
+      this.setData({ extractedImages: this.mergeImages(this.data.extractedImages, nextImages) });
+      this.processBatchImage(processImages, imageIndex + 1, nextImages, nextFailures, apiBaseUrl, token, runId);
+    });
+  },
+
+  uploadBatchImage(image, imageIndex, totalImages, baseImages, apiBaseUrl, token, runId, done) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
+    this.pollCount = 0;
+    this.activeTaskId = "";
+    const formData = {
+      token,
+      wb: this.data.wbEnabled ? "1" : "0",
+      denoise: this.data.denoiseEnabled ? "1" : "0",
+      rotation_degrees: String(image.rotationDegrees || 0)
+    };
+    const expectedCount = this.getExpectedPolaroidCount(image.expectedPolaroidCount);
+    if (expectedCount) {
+      formData.expected_polaroids = expectedCount;
+      formData.polaroid_count = expectedCount;
+    }
+
+    wx.uploadFile({
+      url: `${apiBaseUrl}/api/process`,
+      filePath: image.path,
+      name: "image",
+      header: this.getAuthHeader(),
+      formData,
+      success: (res) => {
+        if (this.shouldIgnoreProcessingRun(runId)) return;
+        const payload = this.parseResponse(res.data);
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          done({ error: this.getResponseErrorMessage(res, payload, "Upload failed") });
+          return;
+        }
+        if (!payload) {
+          done({ error: this.getResponseErrorMessage(res, payload, "Unexpected upload response") });
+          return;
+        }
+        this.handleBatchProcessPayload(payload, imageIndex, totalImages, baseImages, runId, done);
+      },
+      fail: (err) => {
+        if (this.shouldIgnoreProcessingRun(runId)) return;
+        console.error("batch uploadFile failed", err);
+        done({ error: this.getUploadErrorMessage(err) });
+      }
+    });
+  },
+
+  handleBatchProcessPayload(payload, imageIndex, totalImages, baseImages, runId, done) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
+    if (payload.error || payload.message && payload.status === "error") {
+      done({ error: payload.error || payload.message });
+      return;
+    }
+
+    const directImages = this.scopeBatchImages(this.normalizeImages(payload), imageIndex, `image${imageIndex + 1}`);
+    if (directImages.length > 0) {
+      this.setData({ extractedImages: this.mergeImages(baseImages, directImages) });
+      done({ images: directImages });
+      return;
+    }
+
+    const taskId = payload.task_id || payload.taskId || payload.id;
+    if (taskId) {
+      this.activeTaskId = taskId;
+      this.setData({
+        statusText: this.getBatchProcessingStatusText(imageIndex, totalImages, 0, 0),
+        statusKind: "processing"
+      });
+      this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, [], runId, done);
+      return;
+    }
+
+    done({ error: "没有收到处理任务或结果图片" });
+  },
+
+  pollBatchTask(taskId, imageIndex, totalImages, baseImages, collectedImages, runId, done) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
+    this.clearPollTimer();
+    this.pollTimer = setTimeout(() => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
+      this.pollCount += 1;
+      if (this.pollCount > MAX_POLL_COUNT) {
+        done({ images: collectedImages, error: "处理时间过长 请稍后重试" });
+        return;
+      }
+
+      wx.request({
+        url: `${this.getApiBaseUrl()}/api/status/${taskId}`,
+        method: "GET",
+        header: this.getAuthHeader(),
+        success: (res) => {
+          if (this.shouldIgnoreProcessingRun(runId)) return;
+          const payload = res.data;
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            done({ images: collectedImages, error: this.getResponseErrorMessage(res, payload, "Status failed") });
+            return;
+          }
+          if (!payload || typeof payload !== "object") {
+            done({ images: collectedImages, error: this.getResponseErrorMessage(res, payload, "Unexpected status response") });
+            return;
+          }
+
+          const status = payload.status || payload.state;
+          const images = this.scopeBatchImages(this.normalizeImages(payload, taskId), imageIndex, taskId);
+          const nextCollectedImages = this.mergeImages(collectedImages, images);
+          const visibleImages = this.mergeImages(baseImages, nextCollectedImages);
+          const expectedCount = this.getBackendExpectedCount(payload);
+          const warning = payload.warning || payload.detection_warning || "";
+          const extractionComplete = payload.extraction_complete === true
+            || payload.done_marker === true
+            || payload.complete === true;
+
+          if (nextCollectedImages.length > collectedImages.length) {
+            this.setData({ extractedImages: visibleImages });
+            this.prefetchResultImages(visibleImages);
+          }
+
+          if (extractionComplete) {
+            this.activeTaskId = "";
+            if (expectedCount > 0 && nextCollectedImages.length !== expectedCount) {
+              done({
+                images: nextCollectedImages,
+                error: `结果传输不完整：已收到 ${nextCollectedImages.length}/${expectedCount} 张`
+              });
+            } else if (nextCollectedImages.length > 0) {
+              done({ images: nextCollectedImages, warning });
+            } else {
+              done({ error: warning || "处理结束，但未提取到拍立得" });
+            }
+            return;
+          }
+
+          if (status === "canceled" || status === "cancelled") {
+            this.batchInterrupted = true;
+            this.activeBatchRunId += 1;
+            this.finishInterruptedProcessing(visibleImages);
+            return;
+          }
+
+          if (status === "done" || status === "finished" || status === "success") {
+            this.activeTaskId = "";
+            done({ images: nextCollectedImages, error: "处理状态缺少结束标记" });
+            return;
+          }
+
+          if (status === "failed" || status === "error") {
+            this.activeTaskId = "";
+            done({ images: nextCollectedImages, error: payload.error || payload.message || "处理失败" });
+            return;
+          }
+
+          this.setData({
+            statusText: this.getBatchProcessingStatusText(imageIndex, totalImages, nextCollectedImages.length, expectedCount, warning),
+            statusKind: "processing"
+          });
+          this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, nextCollectedImages, runId, done);
+        },
+        fail: (err) => {
+          if (this.shouldIgnoreProcessingRun(runId)) return;
+          console.error("batch status request failed", err);
+          done({ images: collectedImages, error: "查询处理状态失败" });
+        }
+      });
+    }, POLL_INTERVAL_MS);
+  },
+
+  scopeBatchImages(images, imageIndex, taskId) {
+    return images.map((image, index) => {
+      const resultId = Object.prototype.hasOwnProperty.call(image, "id") ? image.id : `p${index + 1}`;
+      const scopedId = `${taskId}:${resultId}`;
+      return Object.assign({}, image, {
+        id: scopedId,
+        sourceImageIndex: imageIndex,
+        title: `图片${imageIndex + 1} ${image.title || `拍立得${index + 1}`}`
+      });
+    });
+  },
+
+  finishBatchExtract(images, failures, totalImages) {
+    this.clearPollTimer();
+    this.activeTaskId = "";
+    const hasImages = images.length > 0;
+    const statusText = hasImages
+      ? failures.length
+        ? `批量处理完成，提取 ${images.length} 张，${failures.length}/${totalImages} 张图片失败`
+        : `批量处理完成，共提取 ${images.length} 张`
+      : `批量处理失败，${failures.length || totalImages}/${totalImages} 张图片未提取到结果`;
+    this.setData({
+      extractedImages: images,
+      processing: false,
+      showCountInput: false,
+      statusText,
+      statusKind: hasImages ? "done" : "error"
+    });
+    if (hasImages) {
+      this.prefetchResultImages(images);
+    } else {
+      wx.showToast({ title: "批量处理失败", icon: "none" });
+    }
   },
 
   getUploadErrorMessage(err) {
@@ -305,8 +747,8 @@ Page({
     return "上传失败，请检查网络或域名配置";
   },
 
-  getExpectedPolaroidCount() {
-    const value = parseInt(this.data.expectedPolaroidCount, 10);
+  getExpectedPolaroidCount(rawValue = this.data.expectedPolaroidCount) {
+    const value = parseInt(rawValue, 10);
     return Number.isFinite(value) && value > 0 ? String(value) : "";
   },
 
@@ -340,7 +782,8 @@ Page({
     }
   },
 
-  handleProcessPayload(payload) {
+  handleProcessPayload(payload, runId) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
     if (payload.error || payload.message && payload.status === "error") {
       this.finishWithError(payload.error || payload.message);
       return;
@@ -354,20 +797,23 @@ Page({
 
     const taskId = payload.task_id || payload.taskId || payload.id;
     if (taskId) {
+      this.activeTaskId = taskId;
       this.setData({
         statusText: "图片处理中...",
         statusKind: "processing"
       });
-      this.pollTask(taskId);
+      this.pollTask(taskId, runId);
       return;
     }
 
     this.finishWithError("没有收到处理任务或结果图片");
   },
 
-  pollTask(taskId) {
+  pollTask(taskId, runId) {
+    if (this.shouldIgnoreProcessingRun(runId)) return;
     this.clearPollTimer();
     this.pollTimer = setTimeout(() => {
+      if (this.shouldIgnoreProcessingRun(runId)) return;
       this.pollCount += 1;
       if (this.pollCount > MAX_POLL_COUNT) {
         this.finishWithError("处理时间过长 请稍后重试");
@@ -379,6 +825,7 @@ Page({
         method: "GET",
         header: this.getAuthHeader(),
         success: (res) => {
+          if (this.shouldIgnoreProcessingRun(runId)) return;
           const payload = res.data;
           if (res.statusCode < 200 || res.statusCode >= 300) {
             this.finishWithError(this.getResponseErrorMessage(res, payload, "Status failed"));
@@ -398,6 +845,7 @@ Page({
             || payload.complete === true;
 
           if (extractionComplete) {
+            this.activeTaskId = "";
             const completedImages = this.mergeImages(this.data.extractedImages, images);
             if (expectedCount > 0 && completedImages.length !== expectedCount) {
               this.finishWithError(`结果传输不完整：已收到 ${completedImages.length}/${expectedCount} 张`);
@@ -411,12 +859,21 @@ Page({
             return;
           }
 
+          if (status === "canceled" || status === "cancelled") {
+            this.batchInterrupted = true;
+            this.activeBatchRunId += 1;
+            this.finishInterruptedProcessing(this.data.extractedImages);
+            return;
+          }
+
           if (status === "done" || status === "finished" || status === "success") {
+            this.activeTaskId = "";
             this.finishWithError("处理状态缺少结束标记");
             return;
           }
 
           if (status === "failed" || status === "error") {
+            this.activeTaskId = "";
             this.finishWithError(payload.error || payload.message || "处理失败");
             return;
           }
@@ -425,9 +882,10 @@ Page({
             statusText: this.getProcessingStatusText(images.length, expectedCount, warning),
             statusKind: "processing"
           });
-          this.pollTask(taskId);
+          this.pollTask(taskId, runId);
         },
         fail: (err) => {
+          if (this.shouldIgnoreProcessingRun(runId)) return;
           console.error("status request failed", err);
           this.finishWithError("查询处理状态失败");
         }
@@ -539,22 +997,17 @@ Page({
   },
 
   getProcessingStatusText(doneCount, expectedCount, warning) {
-    if (warning && doneCount > 0 && expectedCount > 0) {
-      return `${warning}，已提取 ${doneCount}/${expectedCount} 张`;
-    }
-    if (warning && doneCount > 0) {
-      return `${warning}，已提取 ${doneCount} 张`;
-    }
-    if (warning) {
-      return warning;
-    }
-    if (expectedCount > 0) {
-      return `已提取 ${doneCount}/${expectedCount} 张`;
-    }
-    if (doneCount > 0) {
-      return `已提取 ${doneCount} 张，继续处理`;
-    }
-    return "图片处理中...";
+    const targetCount = Number(expectedCount || 0);
+    const nextIndex = targetCount > 0
+      ? Math.max(1, Math.min(doneCount + 1, targetCount))
+      : doneCount + 1;
+    const countText = targetCount > 0 ? ` (${nextIndex}/${targetCount})` : "";
+    const statusText = `正在提取第${nextIndex}张${countText}`;
+    return warning ? `${statusText}，${warning}` : statusText;
+  },
+
+  getBatchProcessingStatusText(imageIndex, totalImages, doneCount, expectedCount, warning) {
+    return `正在处理图片 ${imageIndex + 1}/${totalImages}，${this.getProcessingStatusText(doneCount, expectedCount, warning)}`;
   },
 
   resolveUrl(url) {
@@ -577,6 +1030,7 @@ Page({
 
   finishWithImages(images, message) {
     this.clearPollTimer();
+    this.activeTaskId = "";
     const merged = this.mergeImages(this.data.extractedImages, images);
     this.setData({
       extractedImages: merged,
@@ -590,6 +1044,7 @@ Page({
 
   finishWithNotice(message) {
     this.clearPollTimer();
+    this.activeTaskId = "";
     this.setData({
       processing: false,
       statusText: message || "处理结束",
@@ -599,6 +1054,7 @@ Page({
 
   finishWithError(message) {
     this.clearPollTimer();
+    this.activeTaskId = "";
     this.setData({
       processing: false,
       statusText: message || "处理失败",
@@ -608,24 +1064,76 @@ Page({
   },
 
   contactAuthor() {
-    wx.showModal({
-      title: "联系作者",
-      editable: true,
-      placeholderText: "请输入想发送给作者的内容",
-      confirmText: "发送",
-      success: (res) => {
-        if (!res.confirm) return;
-        const message = (res.content || "").trim();
-        if (!message) {
-          wx.showToast({ title: "请输入内容", icon: "none" });
-          return;
-        }
-        this.sendContactMessage(message);
-      }
+    this.setData({
+      showContactDialog: true,
+      contactMessage: "",
+      contactInfo: "",
+      contactSubmitting: false
     });
   },
 
-  sendContactMessage(message) {
+  createSelectedImage(path) {
+    return {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      path,
+      rotationDegrees: 0,
+      previewRotationStyle: "",
+      expectedPolaroidCount: ""
+    };
+  },
+
+  getCurrentImageState(selectedImages, currentImageIndex) {
+    const currentImage = selectedImages[currentImageIndex] || {};
+    return {
+      inputPath: currentImage.path || "",
+      rotationDegrees: currentImage.rotationDegrees || 0,
+      previewRotationStyle: currentImage.previewRotationStyle || "",
+      expectedPolaroidCount: currentImage.expectedPolaroidCount || ""
+    };
+  },
+
+  noop() {},
+
+  onContactMessageInput(event) {
+    this.setData({
+      contactMessage: String(event.detail.value || "").slice(0, CONTACT_MESSAGE_MAX_LENGTH)
+    });
+  },
+
+  onContactInfoInput(event) {
+    this.setData({
+      contactInfo: String(event.detail.value || "").slice(0, CONTACT_INFO_MAX_LENGTH)
+    });
+  },
+
+  cancelContactDialog() {
+    if (this.data.contactSubmitting) return;
+    this.resetContactDialogState();
+  },
+
+  resetContactDialogState() {
+    this.setData({
+      showContactDialog: false,
+      contactMessage: "",
+      contactInfo: "",
+      contactSubmitting: false
+    });
+  },
+
+  submitContactDialog() {
+    if (this.data.contactSubmitting) return;
+
+    const message = (this.data.contactMessage || "").trim();
+    const contact = (this.data.contactInfo || "").trim();
+    if (!message) {
+      wx.showToast({ title: "请输入内容", icon: "none" });
+      return;
+    }
+
+    this.sendContactMessage(message, contact);
+  },
+
+  sendContactMessage(message, contact) {
     const apiBaseUrl = this.getApiBaseUrl();
     const token = this.getAuthToken();
     if (!apiBaseUrl || isLocalPreviewToken(token)) {
@@ -633,31 +1141,32 @@ Page({
       return;
     }
 
-    wx.showLoading({ title: "发送中..." });
+    this.setData({ contactSubmitting: true });
     wx.request({
       url: `${apiBaseUrl}/api/contact`,
       method: "POST",
       header: Object.assign({
         "content-type": "application/json"
       }, this.getAuthHeader()),
-      data: { message },
+      data: { message, contact },
       success: (res) => {
-        wx.hideLoading();
         const ok = res.statusCode >= 200
           && res.statusCode < 300
           && res.data
           && (res.data.ok === true || res.data.status === "sent");
         if (ok) {
+          this.resetContactDialogState();
           wx.showToast({ title: "已发送", icon: "success" });
           return;
         }
+        this.setData({ contactSubmitting: false });
         wx.showToast({
           title: (res.data && (res.data.error || res.data.message)) || "发送失败，请稍后重试",
           icon: "none"
         });
       },
       fail: () => {
-        wx.hideLoading();
+        this.setData({ contactSubmitting: false });
         wx.showToast({ title: "发送失败，请稍后重试", icon: "none" });
       }
     });

@@ -30,6 +30,8 @@ MAX_DIMENSIONS = CONFIG.get("max_dimensions", 4096)
 MAX_IMAGE_PIXELS = MAX_DIMENSIONS * MAX_DIMENSIONS
 RATE_LIMIT = CONFIG.get("rate_limit_per_minute", 10)
 TASK_TTL = CONFIG.get("task_result_ttl_seconds", 600)
+MAX_CONTACT_MESSAGE_CHARS = 1000
+MAX_CONTACT_INFO_CHARS = 200
 RUNPOD_POD_ID = os.environ.get("RUNPOD_POD_ID", "").strip()
 ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or RUNPOD_POD_ID or secrets.token_urlsafe(24)
 if os.environ.get("CHEKINANA_ACCESS_TOKEN"):
@@ -193,7 +195,7 @@ def is_token_valid(token: str) -> bool:
     return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
 
 
-def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
+def send_contact_email(message_text: str, contact_info: str, client_ip: str) -> tuple[bool, str]:
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
     try:
         smtp_port = int(os.environ.get("SMTP_PORT", "587"))
@@ -212,10 +214,12 @@ def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
     msg["Subject"] = "Chekinana 联系作者"
     msg["From"] = smtp_from
     msg["To"] = CONTACT_EMAIL_TO
+    contact_line = f"Contact: {contact_info}\n" if contact_info else ""
     msg.set_content(
         "用户在 Chekinana 小程序提交了联系内容。\n\n"
         f"IP: {client_ip}\n"
-        f"Time: {datetime.now().isoformat()}\n\n"
+        f"Time: {datetime.now().isoformat()}\n"
+        f"{contact_line}\n"
         f"{message_text}"
     )
 
@@ -224,6 +228,11 @@ def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
             server.starttls()
             server.login(smtp_username, smtp_password)
             server.send_message(msg)
+        print(
+            f"[contact] email sent time={datetime.now().isoformat()} "
+            f"to={CONTACT_EMAIL_TO} ip={client_ip} has_contact={bool(contact_info)}",
+            flush=True,
+        )
         return True, ""
     except Exception as exc:
         print(f"💥 contact email failed: {type(exc).__name__}: {exc}", flush=True)
@@ -271,6 +280,7 @@ task_lock = threading.Lock()
 task_queue: list[str] = []
 queue_lock = threading.Lock()
 queue_event = threading.Event()
+CANCELED_STATUS = "canceled"
 
 BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
 POLAROID_W, POLAROID_H = 1600, 2544
@@ -414,6 +424,8 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
     with task_lock:
         t = task_store.get(task_id)
         if not t: return
+        if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
+            return
         if "results" not in t:
             t["results"] = []
         rid = len(t["results"])
@@ -423,9 +435,45 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
         })
 
 
+def mark_task_canceled(task_id: str, *, drop_raw_data: bool = False) -> bool:
+    now = time.time()
+    with task_lock:
+        t = task_store.get(task_id)
+        if not t:
+            return False
+        t["cancel_requested"] = True
+        t["status"] = CANCELED_STATUS
+        t["phase"] = CANCELED_STATUS
+        t["error"] = "Task canceled"
+        t["extraction_complete"] = True
+        t["finished_at"] = now
+        if t.get("started_at") and "elapsed" not in t:
+            t["elapsed"] = now - t["started_at"]
+        if drop_raw_data:
+            t.pop("raw_data", None)
+        return True
+
+
+def is_task_cancel_requested(task_id: str) -> bool:
+    with task_lock:
+        t = task_store.get(task_id)
+        return bool(t and (t.get("cancel_requested") or t.get("status") == CANCELED_STATUS))
+
+
+def cancel_if_requested(task_id: str) -> bool:
+    if not is_task_cancel_requested(task_id):
+        return False
+    mark_task_canceled(task_id)
+    return True
+
+
 def do_process_extraction(raw_data: bytes, task_id: str):
     """主处理流程：SAM3 检测 → 四边形拟合 → 逐个提取"""
+    if cancel_if_requested(task_id):
+        return
     model, processor, device = get_sam3()
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
         denoise_enabled = bool(task_store.get(task_id, {}).get("denoise", True))
@@ -433,6 +481,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
 
     # --- 步骤 0: 加载图片 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "loading"
     image = Image.open(io.BytesIO(raw_data)).convert("RGB")
@@ -443,6 +493,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     print(f"🖼️  图片: {image.size[0]}x{image.size[1]} (rotation={rotation_degrees})", flush=True)
 
     # --- 步骤 1: SAM3 检测纸框 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "detecting"
     print(f"🔍 SAM3 检测拍立得纸框... (目标: {requested_polaroids or '自动'})", flush=True)
@@ -474,6 +526,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
 
     del inputs, outputs
     torch.cuda.empty_cache() if device == "cuda" else None
+    if cancel_if_requested(task_id):
+        return
     detected_count = len(candidates)
     detection_warning = ""
     print(f"   检测到 {detected_count} 张拍立得 (阈值 {threshold_used:.1f}, 耗时 {time.time()-t0:.1f}s)", flush=True)
@@ -491,6 +545,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         print(f"   检测到 {detected_count} 张，高于目标 {requested_polaroids} 张，已按四边形面积丢弃最小 {drop_count} 张: {smallest_dropped}", flush=True)
 
     if not candidates:
+        if cancel_if_requested(task_id):
+            return
         with task_lock:
             task_store[task_id]["status"] = "done" if requested_polaroids else "failed"
             task_store[task_id]["phase"] = "complete"
@@ -509,6 +565,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     all_vertices.sort(key=lambda verts: float(verts[:, 0].mean()))
 
     # --- 步骤 2: 逐个提取 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "extracting"
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
@@ -518,6 +576,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["warning"] = detection_warning
         task_store[task_id]["extraction_complete"] = False
     for pidx, verts in enumerate(all_vertices):
+        if cancel_if_requested(task_id):
+            return
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
         src = verts.astype(np.float32)
         dst = np.array([[0,0],[POLAROID_W,0],[POLAROID_W,POLAROID_H],
@@ -541,11 +601,15 @@ def do_process_extraction(raw_data: bytes, task_id: str):
                 print(f"   ✓ 降噪 #{pidx+1}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
             else:
                 print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
+        if cancel_if_requested(task_id):
+            return
         add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
                          f"拍立得 #{pidx+1}")
         print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
 
     # --- 完成 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["status"] = "done"
         task_store[task_id]["phase"] = "complete"
@@ -579,6 +643,8 @@ def worker_loop():
         with task_lock:
             t = task_store.get(task_id)
             if not t: continue
+            if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
+                continue
             t["status"] = "processing"
             t["started_at"] = time.time()
 
@@ -586,7 +652,7 @@ def worker_loop():
         try:
             do_process_extraction(t["raw_data"], task_id)
             with task_lock:
-                if task_id in task_store:
+                if task_id in task_store and task_store[task_id].get("status") != CANCELED_STATUS:
                     task_store[task_id]["elapsed"] = time.time() - task_store[task_id]["started_at"]
                     task_store[task_id]["finished_at"] = time.time()
         except Exception as e:
@@ -594,8 +660,9 @@ def worker_loop():
             traceback.print_exc()
             with task_lock:
                 if task_id in task_store:
-                    task_store[task_id]["status"] = "failed"
-                    task_store[task_id]["error"] = str(e)[:200]
+                    if task_store[task_id].get("status") != CANCELED_STATUS:
+                        task_store[task_id]["status"] = "failed"
+                        task_store[task_id]["error"] = str(e)[:200]
 
         # 清理 raw_data 释放内存
         with task_lock:
@@ -669,16 +736,54 @@ def verify_token():
     return jsonify({"ok": True, "status": "ok"})
 
 
+@app.route("/api/cancel/<task_id>", methods=["POST"])
+def cancel_task(task_id):
+    queue_removed = False
+    with queue_lock:
+        while task_id in task_queue:
+            task_queue.remove(task_id)
+            queue_removed = True
+
+    with task_lock:
+        t = task_store.get(task_id)
+        if not t:
+            return jsonify({"ok": False, "error": "Task not found"}), 404
+        previous_status = t.get("status", "")
+
+    if previous_status in ("done", "failed"):
+        return jsonify({
+            "ok": False,
+            "status": previous_status,
+            "error": "Task already finished",
+        }), 409
+
+    mark_task_canceled(task_id, drop_raw_data=queue_removed or previous_status == "queued")
+    print(f"[cancel] task={task_id[:8]} canceled (previous={previous_status}, queue_removed={queue_removed})", flush=True)
+    return jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "status": CANCELED_STATUS,
+        "previous_status": previous_status,
+        "queue_removed": queue_removed,
+    })
+
+
 @app.route("/api/contact", methods=["POST"])
 def contact_author():
     data = request.get_json(silent=True) or {}
-    message_text = str(data.get("message", "")).strip()
+    message_value = data.get("message", "")
+    contact_value = data.get("contact", "")
+    message_text = "" if message_value is None else str(message_value).strip()
+    contact_info = "" if contact_value is None else str(contact_value).strip()
     if not message_text:
         return jsonify({"ok": False, "error": "请输入内容"}), 400
-    if len(message_text) > 1000:
+    if len(message_text) > MAX_CONTACT_MESSAGE_CHARS:
         return jsonify({"ok": False, "error": "内容过长，请控制在1000字以内"}), 400
 
-    ok, error = send_contact_email(message_text, get_client_ip())
+    if len(contact_info) > MAX_CONTACT_INFO_CHARS:
+        return jsonify({"ok": False, "error": "Contact info is too long (max 200 characters)"}), 400
+
+    ok, error = send_contact_email(message_text, contact_info, get_client_ip())
     if not ok:
         return jsonify({"ok": False, "error": error}), 503
     return jsonify({"ok": True, "status": "sent"})
@@ -725,7 +830,7 @@ def submit_task():
         # 清理过期
         for k in list(task_store.keys()):
             t = task_store[k]
-            if t["status"] in ("done","failed") and now - t.get("finished_at", t["created_at"]) > TASK_TTL:
+            if t["status"] in ("done", "failed", CANCELED_STATUS) and now - t.get("finished_at", t["created_at"]) > TASK_TTL:
                 del task_store[k]
 
     with queue_lock:
