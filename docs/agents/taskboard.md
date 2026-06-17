@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Implement V1 batch image processing for the WeChat mini-program: users can select up to 9 images, add more images later, manage the selected-image list, enter per-image polaroid counts and rotations, then process each selected image in order and display all extracted polaroids in stable order.
+Fix post-integration V1 batch image processing issues found in WeChat mini-program testing: rotated previews must switch cleanly between selected images, upload status must remain distinct from processing status, and queued backend tasks must be shown in the status bar.
 
 Scope constraints:
 
@@ -34,6 +34,8 @@ Task branch names:
 Reviewer batch review commit: 99e8ba4
 Reviewer batch UI approval commit: bb92d5b
 Reviewer processing/contact review commit: 9cea878
+Reviewer contact email approval commit: 1497688
+Integration push: 7e6b03d main includes approved batch/contact work
 ```
 
 ## Worktree Assignments
@@ -41,7 +43,7 @@ Reviewer processing/contact review commit: 9cea878
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Implement batch selection, per-image controls, sequential processing, and ordered result aggregation |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Fix post-integration batch preview rotation display and status-phase text |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Verify existing single-image API supports V1 batch orchestration and make only necessary compatibility fixes |
 | Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Review Frontend/Backend diffs against this taskboard and the agreed V1 behavior |
 
@@ -59,9 +61,11 @@ Reviewer processing/contact review commit: 9cea878
 | BATCH-REV-002 | Reviewer | done | Re-review the batch UI fixes after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-batch-ui-fixes.md` | Reviewer commit `bb92d5b` verdict: approved. The two P2 UI findings and the 9-thumbnail tap-to-jump requirement are resolved. |
 | BATCH-FE-006 | Frontend | done | Fix processing-time interaction, interrupt behavior, incremental result display, and batch status text found during user testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-batch-processing-ux.md` | Frontend commit `3dc750d` passed reviewer checks: processing-time thumbnail/left-right navigation remains usable, interrupt calls `POST /api/cancel/<task_id>`, already received results remain visible, stale callbacks do not resume work, incremental status results display immediately, and status text includes "正在提取第2张 (2/2)" style wording. |
 | BATCH-BE-002 | Backend | done | Add backend task cancellation support so the interrupt button terminates the active extraction task. | `backend/app.py`, `docs/agents/handoffs/2026-06-17-backend-task-cancel.md` | Backend commit `02ec512` passed reviewer checks: protected `POST /api/cancel/<task_id>`, queued cancel, processing cancel state, canceled status, result compatibility for produced outputs, unauthorized cancel rejection, and no RunPod/startup changes. |
-| CONTACT-BE-002 | Backend | pending | Finish contact-author email success logging and handoff for the existing contact email behavior. | `backend/app.py`, `docs/agents/handoffs/YYYY-MM-DD-backend-contact-email-log.md` | Reviewer confirmed contact info is already included in the email body, but success logging is missing. Backend must add a successful-send log record with timestamp, configured recipient/destination, client IP, and whether contact info was provided; keep failure logging; do not log the full message body or sensitive contact value; preserve route/auth/rate-limit/response shape. Backend must provide the missing `CONTACT-BE-002` handoff with `python -m py_compile backend\app.py` and a focused fake-SMTP/stdout test proving contact info is in the message body and success logging occurs. |
+| CONTACT-BE-002 | Backend | done | Finish contact-author email success logging and handoff for the existing contact email behavior. | `backend/app.py`, `docs/agents/handoffs/2026-06-17-backend-contact-email-log.md` | Backend commit `ef6d945` adds safe successful-send logging for contact emails without logging full message/contact values. Reviewer verified contact info remains in the email body and route/auth/rate-limit/response behavior remains compatible. |
 | BATCH-REV-003 | Reviewer | done | Review the processing UX, backend cancellation, and contact email/log fixes after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-batch-processing-contact-fixes.md` | Reviewer commit `9cea878` verdict: changes requested. Frontend processing UX and Backend cancellation passed; contact email includes contact info; blocker remains Backend missing successful-send log and missing `CONTACT-BE-002` handoff. |
-| CONTACT-REV-003 | Reviewer | pending | Re-review `CONTACT-BE-002` after Backend adds success logging and the missing handoff. | Review only; write `docs/agents/handoffs/YYYY-MM-DD-reviewer-contact-email-log.md` | Reviewer verifies successful contact email sends produce the required safe log, contact info remains visible in the email body when provided and omitted when empty, no sensitive full message/contact value is logged, existing `/api/contact` auth/rate-limit/response behavior remains compatible, and the Backend handoff includes py_compile plus focused fake-SMTP/stdout evidence. |
+| CONTACT-REV-003 | Reviewer | done | Re-review `CONTACT-BE-002` after Backend adds success logging and the missing handoff. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-contact-email-log.md` | Reviewer commit `1497688` verdict: approved. Successful contact email sends now produce the required safe log, contact info remains visible in the email body when provided, no sensitive full message/contact value is logged, and existing `/api/contact` behavior remains compatible. |
+| BATCH-FE-007 | Frontend | pending | Fix post-integration preview rotation and status-phase text issues found during mini-program testing. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-preview-status-fixes.md` | The large preview displays the current selected image already rotated for its own per-image rotation state and no longer relies on rotating the preview image/frame with `previewRotationStyle` or an equivalent CSS transform that can rotate the previous image during switches. Switching between images with different rotations updates image and orientation together without a visible old-image rotation step. During upload, the status bar keeps the explicit `图片上传中` phase before backend task processing begins. If the backend task is queued or waiting, including when `/api/status/<task_id>` exposes `queued`, waiting, or `queue_position`, the status bar shows a queue/waiting message and includes the queue position when available. Once processing starts, the status text still shows the current image position and extraction progress such as `正在处理图片 m/n，正在提取第 x 张 (x/N)` using backend-reported target counts when available. Existing batch limits, ordered results, incremental result display, interrupt/cancel behavior, contact UI, auth, and backend API contracts must remain unchanged. Frontend handoff must document manual or mocked checks for rotated-preview switching, upload status, queued status, processing status, interrupt, and `node --check` / `git diff --check`. |
+| BATCH-REV-004 | Reviewer | pending | Review `BATCH-FE-007` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-17-reviewer-preview-status-fixes.md` | Verify the Frontend diff only changes the scoped preview/status behavior and does not regress batch selection, thumbnail navigation, per-image count/rotation, incremental result display, interrupt/cancel, auth, or contact behavior. Reviewer should explicitly test or inspect the three user-reported cases: switching between differently rotated images, upload phase showing `图片上传中`, and queued/waiting status display with queue position when available. |
 
 Status values:
 
@@ -114,6 +118,13 @@ Failure contract:
 - Backend cancellation should terminate queued tasks immediately and stop processing tasks as soon as practical through explicit cancel state checks; after cancellation it must not continue extracting additional polaroids for that task.
 - Frontend must keep incremental result display: results returned during `/api/status/<task_id>` polling should appear immediately, not only after the whole source image completes.
 
+Frontend preview/status contract:
+
+- The preview for the selected image must render as the image in its current rotation state, not by applying a transient rotation transform to the preview frame that can affect the previously displayed image during image switches.
+- Per-image rotation remains part of the existing upload contract through `rotation_degrees`; this task does not require backend API changes.
+- Status text must distinguish these phases in order: upload (`图片上传中`), queued/waiting, processing/extracting, completed/partial/failed/canceled.
+- Queued/waiting state should be derived from existing status payloads when available, including `status`, phase-like fields, and `queue_position`.
+
 Backend cancellation contract:
 
 - Add a protected task cancellation endpoint for the existing task model, for example `POST /api/cancel/<task_id>`.
@@ -142,10 +153,13 @@ Contact email contract:
 | 2026-06-17 | Preserve incremental polaroid display during batch processing. | User expects the original behavior where each returned polaroid appears as soon as the backend reports it. |
 | 2026-06-17 | Reopen Backend contact-email work for delivered contact info and success logs. | User testing found optional contact info is not visible in the email and successful sends are not logged. |
 | 2026-06-17 | Keep the next fix Backend-only for contact success logging. | Reviewer verified Frontend processing UX, Backend cancellation, and contact email body behavior; only Backend success logging and handoff remain incomplete. |
+| 2026-06-17 | Batch/contact work is ready for integration after reviewer approval. | Reviewer approved `CONTACT-REV-003` in commit `1497688`; no open implementation tasks remain. |
+| 2026-06-17 | Reopen Frontend batch work for post-integration preview/status issues. | User testing after integration found three UI problems: rotated preview switching, lost upload phase text, and missing queued/waiting status display. |
+| 2026-06-17 | Keep the preview/status fix Frontend-only unless implementation discovers a real backend contract gap. | The requested behavior can be expressed through existing per-image rotation state and existing task status polling; backend batch/cancel/contact contracts should stay stable. |
 
 ## Open Questions
 
-- None. The new user-tested issues have concrete Frontend and Backend owners.
+- None. The new user-tested issues have concrete Frontend and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -158,3 +172,6 @@ Contact email contract:
 - Frontend completed processing UX and interrupt wiring in `3dc750d`.
 - Backend completed task cancellation in `02ec512`.
 - Reviewer completed `BATCH-REV-003` in `9cea878` with verdict `changes requested`; only `CONTACT-BE-002` success logging/handoff remains open.
+- Backend completed contact email success logging in `ef6d945`.
+- Reviewer approved `CONTACT-REV-003` in `1497688`; PM marks the batch/contact work ready for integration.
+- User testing after integration commit `7e6b03d` found new Frontend batch preview/status issues; PM assigned `BATCH-FE-007` and `BATCH-REV-004`.
