@@ -7,6 +7,8 @@ const CONTACT_INFO_MAX_LENGTH = 200;
 const UPLOAD_TIMEOUT_MS = 15000;
 const UPLOAD_MAX_RETRIES = 2;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
+const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
+const DEFAULT_POLAROID_SIZE = "mini";
 
 Page({
   data: {
@@ -15,6 +17,7 @@ Page({
     selectedImages: [],
     currentImageIndex: 0,
     rotationDegrees: 0,
+    polaroidSize: DEFAULT_POLAROID_SIZE,
     extractedImages: [],
     processing: false,
     wbEnabled: true,
@@ -172,6 +175,7 @@ Page({
       selectedImages: [],
       currentImageIndex: 0,
       rotationDegrees: 0,
+      polaroidSize: DEFAULT_POLAROID_SIZE,
       extractedImages: [],
       failedImageIndexes: [],
       expectedPolaroidCount: "",
@@ -301,6 +305,7 @@ Page({
         selectedImages: [],
         currentImageIndex: 0,
         rotationDegrees: 0,
+        polaroidSize: DEFAULT_POLAROID_SIZE,
         extractedImages: [],
         failedImageIndexes: [],
         processing: false,
@@ -349,6 +354,22 @@ Page({
     this.setData({
       expectedPolaroidCount: value,
       selectedImages
+    });
+  },
+
+  onPolaroidSizeChange(event) {
+    if (this.data.processing) return;
+
+    const polaroidSize = this.getValidPolaroidSize(event.currentTarget.dataset.size);
+    if (polaroidSize === this.data.polaroidSize) return;
+
+    const selectedImages = this.updateCurrentSelectedImage({ polaroidSize });
+    this.setData({
+      polaroidSize,
+      selectedImages,
+      extractedImages: [],
+      failedImageIndexes: [],
+      statusKind: "ready"
     });
   },
 
@@ -505,6 +526,7 @@ Page({
     return [{
       path: this.data.inputPath,
       rotationDegrees: this.data.rotationDegrees || 0,
+      polaroidSize: this.getValidPolaroidSize(this.data.polaroidSize),
       expectedPolaroidCount: this.data.expectedPolaroidCount || ""
     }];
   },
@@ -514,7 +536,8 @@ Page({
       token,
       wb: this.data.wbEnabled ? "1" : "0",
       denoise: this.data.denoiseEnabled ? "1" : "0",
-      rotation_degrees: String(image.rotationDegrees || 0)
+      rotation_degrees: String(image.rotationDegrees || 0),
+      polaroid_size: this.getValidPolaroidSize(image.polaroidSize)
     };
     const expectedCount = this.getExpectedPolaroidCount(image.expectedPolaroidCount);
     if (expectedCount) {
@@ -584,7 +607,8 @@ Page({
       token,
       wb: this.data.wbEnabled ? "1" : "0",
       denoise: this.data.denoiseEnabled ? "1" : "0",
-      rotation_degrees: String(image.rotationDegrees || 0)
+      rotation_degrees: String(image.rotationDegrees || 0),
+      polaroid_size: this.getValidPolaroidSize(image.polaroidSize)
     };
     const expectedCount = this.getExpectedPolaroidCount(image.expectedPolaroidCount);
     if (expectedCount) {
@@ -1331,6 +1355,7 @@ Page({
       previewPath: path,
       previewRotationDegrees: 0,
       rotationDegrees: 0,
+      polaroidSize: DEFAULT_POLAROID_SIZE,
       expectedPolaroidCount: ""
     };
   },
@@ -1341,8 +1366,13 @@ Page({
       inputPath: currentImage.path || currentImage.previewPath || "",
       currentPreviewImages: this.getCurrentPreviewImages(selectedImages, currentImageIndex),
       rotationDegrees: currentImage.rotationDegrees || 0,
+      polaroidSize: this.getValidPolaroidSize(currentImage.polaroidSize),
       expectedPolaroidCount: currentImage.expectedPolaroidCount || ""
     };
+  },
+
+  getValidPolaroidSize(size) {
+    return POLAROID_SIZE_OPTIONS.indexOf(size) >= 0 ? size : DEFAULT_POLAROID_SIZE;
   },
 
   getCurrentPreviewImages(selectedImages, currentImageIndex) {
@@ -1563,6 +1593,7 @@ Page({
       selectedImages: [],
       currentImageIndex: 0,
       rotationDegrees: 0,
+      polaroidSize: DEFAULT_POLAROID_SIZE,
       extractedImages: [],
       failedImageIndexes: [],
       processing: false,
