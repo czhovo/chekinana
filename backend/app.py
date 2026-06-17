@@ -228,6 +228,11 @@ def send_contact_email(message_text: str, contact_info: str, client_ip: str) -> 
             server.starttls()
             server.login(smtp_username, smtp_password)
             server.send_message(msg)
+        print(
+            f"[contact] email sent time={datetime.now().isoformat()} "
+            f"to={CONTACT_EMAIL_TO} ip={client_ip} has_contact={bool(contact_info)}",
+            flush=True,
+        )
         return True, ""
     except Exception as exc:
         print(f"💥 contact email failed: {type(exc).__name__}: {exc}", flush=True)
