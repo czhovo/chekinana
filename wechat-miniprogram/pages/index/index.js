@@ -4,6 +4,8 @@ const MAX_POLL_COUNT = 180;
 const MAX_SELECTED_IMAGES = 9;
 const CONTACT_MESSAGE_MAX_LENGTH = 1000;
 const CONTACT_INFO_MAX_LENGTH = 200;
+const PREVIEW_ROTATION_CANVAS_ID = "preview-rotation-canvas";
+const PREVIEW_ROTATION_MAX_SIZE = 1600;
 
 Page({
   data: {
@@ -11,7 +13,8 @@ Page({
     selectedImages: [],
     currentImageIndex: 0,
     rotationDegrees: 0,
-    previewRotationStyle: "",
+    previewCanvasWidth: 1,
+    previewCanvasHeight: 1,
     extractedImages: [],
     processing: false,
     wbEnabled: true,
@@ -160,7 +163,6 @@ Page({
       selectedImages: [],
       currentImageIndex: 0,
       rotationDegrees: 0,
-      previewRotationStyle: "",
       extractedImages: [],
       expectedPolaroidCount: "",
       showCountInput: false,
@@ -287,7 +289,6 @@ Page({
         selectedImages: [],
         currentImageIndex: 0,
         rotationDegrees: 0,
-        previewRotationStyle: "",
         extractedImages: [],
         processing: false,
         expectedPolaroidCount: "",
@@ -341,19 +342,104 @@ Page({
     if (!this.data.inputPath || this.data.processing) return;
 
     const rotationDegrees = (this.data.rotationDegrees + 90) % 360;
-    const previewRotationStyle = rotationDegrees ? `transform: rotate(${-rotationDegrees}deg);` : "";
+    const currentImageIndex = this.data.currentImageIndex;
+    const currentImage = this.data.selectedImages[currentImageIndex] || {};
     const selectedImages = this.updateCurrentSelectedImage({
-      rotationDegrees,
-      previewRotationStyle
+      rotationDegrees
     });
     this.setData({
       rotationDegrees,
-      previewRotationStyle,
       selectedImages,
       extractedImages: [],
       statusText: "图片已选择，点击开始提取",
       statusKind: "ready"
     });
+    this.updateRotatedPreviewPath(currentImage.path || this.data.inputPath, rotationDegrees, currentImageIndex);
+  },
+
+  updateRotatedPreviewPath(sourcePath, rotationDegrees, imageIndex) {
+    if (!sourcePath) return;
+    if (!rotationDegrees) {
+      this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees);
+      return;
+    }
+    if (!wx.getImageInfo || !wx.createCanvasContext || !wx.canvasToTempFilePath) {
+      this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees);
+      return;
+    }
+
+    wx.getImageInfo({
+      src: sourcePath,
+      success: (info) => {
+        const sourceWidth = Number(info.width || 0);
+        const sourceHeight = Number(info.height || 0);
+        if (!sourceWidth || !sourceHeight) {
+          this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees);
+          return;
+        }
+
+        const scale = Math.min(1, PREVIEW_ROTATION_MAX_SIZE / Math.max(sourceWidth, sourceHeight));
+        const drawWidth = Math.max(1, Math.round(sourceWidth * scale));
+        const drawHeight = Math.max(1, Math.round(sourceHeight * scale));
+        const normalizedDegrees = ((rotationDegrees % 360) + 360) % 360;
+        const swapSize = normalizedDegrees === 90 || normalizedDegrees === 270;
+        const canvasWidth = swapSize ? drawHeight : drawWidth;
+        const canvasHeight = swapSize ? drawWidth : drawHeight;
+        this.setData({
+          previewCanvasWidth: canvasWidth,
+          previewCanvasHeight: canvasHeight
+        });
+
+        const drawPreview = () => {
+          const ctx = wx.createCanvasContext(PREVIEW_ROTATION_CANVAS_ID, this);
+          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+          ctx.save();
+          ctx.translate(canvasWidth / 2, canvasHeight / 2);
+          ctx.rotate((-normalizedDegrees * Math.PI) / 180);
+          ctx.drawImage(sourcePath, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+          ctx.restore();
+          ctx.draw(false, () => {
+            wx.canvasToTempFilePath({
+              canvasId: PREVIEW_ROTATION_CANVAS_ID,
+              destWidth: canvasWidth,
+              destHeight: canvasHeight,
+              fileType: "jpg",
+              quality: 0.95,
+              success: (res) => {
+                this.setSelectedImagePreviewPath(imageIndex, sourcePath, res.tempFilePath, rotationDegrees);
+              },
+              fail: () => {
+                this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees);
+              }
+            }, this);
+          });
+        };
+        if (wx.nextTick) {
+          wx.nextTick(drawPreview);
+        } else {
+          setTimeout(drawPreview, 0);
+        }
+      },
+      fail: () => {
+        this.setSelectedImagePreviewPath(imageIndex, sourcePath, sourcePath, rotationDegrees);
+      }
+    });
+  },
+
+  setSelectedImagePreviewPath(imageIndex, sourcePath, previewPath, rotationDegrees) {
+    const selectedImages = this.data.selectedImages.map((image, index) => {
+      if (index !== imageIndex) return image;
+      if (image.path !== sourcePath || (image.rotationDegrees || 0) !== rotationDegrees) return image;
+      return Object.assign({}, image, {
+        previewPath
+      });
+    });
+    const patch = { selectedImages };
+    const currentImage = selectedImages[this.data.currentImageIndex] || {};
+    if (this.data.currentImageIndex === imageIndex && currentImage.path === sourcePath) {
+      patch.inputPath = currentImage.previewPath || currentImage.path || "";
+    }
+    this.setData(patch);
   },
 
   updateCurrentSelectedImage(patch) {
@@ -469,7 +555,7 @@ Page({
       processing: true,
       extractedImages: [],
       showCountInput: false,
-      statusText: "正在上传图片...",
+      statusText: "图片上传中",
       statusKind: "processing"
     });
 
@@ -505,7 +591,7 @@ Page({
       processing: true,
       extractedImages: [],
       showCountInput: false,
-      statusText: `正在处理图片 1/${processImages.length}，正在提取第1张`,
+      statusText: this.getUploadStatusText(0, processImages.length),
       statusKind: "processing"
     });
     this.processBatchImage(processImages, 0, [], [], apiBaseUrl, token, runId);
@@ -521,7 +607,7 @@ Page({
     const image = processImages[imageIndex];
     this.setData(Object.assign(this.getCurrentImageState(processImages, imageIndex), {
       currentImageIndex: imageIndex,
-      statusText: this.getBatchProcessingStatusText(imageIndex, processImages.length, 0, this.getExpectedPolaroidCount(image.expectedPolaroidCount)),
+      statusText: this.getUploadStatusText(imageIndex, processImages.length),
       statusKind: "processing"
     }));
 
@@ -597,7 +683,7 @@ Page({
     if (taskId) {
       this.activeTaskId = taskId;
       this.setData({
-        statusText: this.getBatchProcessingStatusText(imageIndex, totalImages, 0, 0),
+        statusText: this.getQueuedStatusText(imageIndex, totalImages, payload),
         statusKind: "processing"
       });
       this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, [], runId, done);
@@ -668,6 +754,15 @@ Page({
             this.batchInterrupted = true;
             this.activeBatchRunId += 1;
             this.finishInterruptedProcessing(visibleImages);
+            return;
+          }
+
+          if (this.isQueuedStatusPayload(payload) && nextCollectedImages.length === collectedImages.length) {
+            this.setData({
+              statusText: this.getQueuedStatusText(imageIndex, totalImages, payload),
+              statusKind: "processing"
+            });
+            this.pollBatchTask(taskId, imageIndex, totalImages, baseImages, nextCollectedImages, runId, done);
             return;
           }
 
@@ -799,7 +894,7 @@ Page({
     if (taskId) {
       this.activeTaskId = taskId;
       this.setData({
-        statusText: "图片处理中...",
+        statusText: this.getQueuedStatusText(null, null, payload),
         statusKind: "processing"
       });
       this.pollTask(taskId, runId);
@@ -863,6 +958,15 @@ Page({
             this.batchInterrupted = true;
             this.activeBatchRunId += 1;
             this.finishInterruptedProcessing(this.data.extractedImages);
+            return;
+          }
+
+          if (this.isQueuedStatusPayload(payload) && images.length === 0) {
+            this.setData({
+              statusText: this.getQueuedStatusText(null, null, payload),
+              statusKind: "processing"
+            });
+            this.pollTask(taskId, runId);
             return;
           }
 
@@ -996,6 +1100,47 @@ Page({
     this.setData({ extractedImages });
   },
 
+  getUploadStatusText(imageIndex, totalImages) {
+    if (Number.isInteger(imageIndex) && totalImages > 1) {
+      return `图片 ${imageIndex + 1}/${totalImages} 图片上传中`;
+    }
+    return "图片上传中";
+  },
+
+  isQueuedStatusPayload(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    const statusValue = String(payload.status || payload.state || payload.phase || "").toLowerCase();
+    return statusValue === "queued"
+      || statusValue === "waiting"
+      || statusValue === "pending"
+      || statusValue.includes("queue")
+      || statusValue.includes("wait")
+      || this.getQueuePosition(payload) !== "";
+  },
+
+  getQueuePosition(payload) {
+    if (!payload || typeof payload !== "object") return "";
+    const positionKeys = ["queue_position", "queuePosition", "queue_pos", "position_in_queue"];
+    for (let i = 0; i < positionKeys.length; i += 1) {
+      const key = positionKeys[i];
+      if (Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined && payload[key] !== null && payload[key] !== "") {
+        return String(payload[key]);
+      }
+    }
+    return "";
+  },
+
+  getQueuedStatusText(imageIndex, totalImages, payload) {
+    const prefix = Number.isInteger(imageIndex) && totalImages > 1
+      ? `图片 ${imageIndex + 1}/${totalImages} `
+      : "";
+    const queuePosition = this.getQueuePosition(payload);
+    if (queuePosition) {
+      return `${prefix}排队等待中，队列位置 ${queuePosition}`;
+    }
+    return this.isQueuedStatusPayload(payload) ? `${prefix}排队等待中` : `${prefix}等待后端处理`;
+  },
+
   getProcessingStatusText(doneCount, expectedCount, warning) {
     const targetCount = Number(expectedCount || 0);
     const nextIndex = targetCount > 0
@@ -1076,8 +1221,8 @@ Page({
     return {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       path,
+      previewPath: path,
       rotationDegrees: 0,
-      previewRotationStyle: "",
       expectedPolaroidCount: ""
     };
   },
@@ -1085,9 +1230,8 @@ Page({
   getCurrentImageState(selectedImages, currentImageIndex) {
     const currentImage = selectedImages[currentImageIndex] || {};
     return {
-      inputPath: currentImage.path || "",
+      inputPath: currentImage.previewPath || currentImage.path || "",
       rotationDegrees: currentImage.rotationDegrees || 0,
-      previewRotationStyle: currentImage.previewRotationStyle || "",
       expectedPolaroidCount: currentImage.expectedPolaroidCount || ""
     };
   },
