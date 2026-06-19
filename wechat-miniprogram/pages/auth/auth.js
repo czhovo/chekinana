@@ -34,6 +34,10 @@ Page({
       wx.navigateTo({ url: "/pages/izaya7-map/izaya7-map" });
       return;
     }
+    if (rawToken === "calendar") {
+      wx.navigateTo({ url: "/pages/calendar/calendar" });
+      return;
+    }
 
     const token = normalizePodId(rawToken);
     const apiBaseUrl = getApiBaseUrl(token);
