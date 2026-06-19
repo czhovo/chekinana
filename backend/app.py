@@ -322,6 +322,18 @@ BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], d
 IMAGE_AREA_VERTICES = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["image_area_vertices"]
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
+POSTPROCESS_MODE_OFF = "off"
+POSTPROCESS_MODE_DENOISE = "denoise"
+POSTPROCESS_MODE_SHARPEN = "sharpen"
+POSTPROCESS_MODE_VALUES = {POSTPROCESS_MODE_OFF, POSTPROCESS_MODE_DENOISE, POSTPROCESS_MODE_SHARPEN}
+WHITE_BALANCE_COLOR_SPACE = "linear_rgb"
+LAB_DENOISE_L_H = 3.5
+LAB_DENOISE_AB_H = 6.0
+LAB_DENOISE_TEMPLATE_WINDOW = 7
+LAB_DENOISE_SEARCH_WINDOW = 21
+LAB_SHARPEN_SIGMA = 1.0
+LAB_SHARPEN_AMOUNT = 0.45
+LAB_SHARPEN_THRESHOLD = 3.0
 
 
 def img_to_png_bytes(img_np: np.ndarray) -> bytes:
@@ -367,6 +379,15 @@ def parse_polaroid_size(value) -> str:
     if normalized in POLAROID_SIZE_VALUES:
         return normalized
     return POLAROID_SIZE_MINI
+
+
+def parse_postprocess_mode(value, legacy_denoise=True) -> str:
+    if value is not None:
+        normalized = str(value).strip().lower()
+        if normalized in POSTPROCESS_MODE_VALUES:
+            return normalized
+        return POSTPROCESS_MODE_DENOISE
+    return POSTPROCESS_MODE_DENOISE if legacy_denoise else POSTPROCESS_MODE_OFF
 
 
 def get_polaroid_geometry(polaroid_size: str) -> dict:
@@ -424,16 +445,39 @@ def build_detection_candidates(masks: list[np.ndarray]) -> list[dict]:
     return candidates
 
 
+def srgb_u8_to_linear_rgb(image: np.ndarray) -> np.ndarray:
+    srgb = image.astype(np.float32) / 255.0
+    return np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+
+
+def srgb_channel_to_linear(value: float) -> float:
+    value = float(np.clip(value, 0.0, 1.0))
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def linear_rgb_to_srgb_u8(linear: np.ndarray) -> np.ndarray:
+    linear = np.clip(linear, 0.0, 1.0)
+    srgb = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * (linear ** (1.0 / 2.4)) - 0.055)
+    return np.clip(np.rint(srgb * 255.0), 0, 255).astype(np.uint8)
+
+
 def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = None) -> tuple[np.ndarray, dict]:
     """White-balance a rectified polaroid using its fixed border area."""
     geometry = geometry or get_polaroid_geometry(POLAROID_SIZE_MINI)
+    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+        return image, {"applied": False, "reason": "unsupported_image_shape", "color_space": WHITE_BALANCE_COLOR_SPACE}
     h, w = image.shape[:2]
     border_mask = np.ones((h, w), dtype=np.uint8)
     cv2.fillPoly(border_mask, [geometry["image_area_vertices"]], 0)
     border_mask = border_mask.astype(bool)
 
-    is_bright = np.all(image > 170, axis=2)
-    is_neutral = np.std(image.astype(np.float32), axis=2) < 25
+    linear = srgb_u8_to_linear_rgb(image)
+    bright_threshold = srgb_channel_to_linear(170.0 / 255.0)
+    neutral_threshold = 25.0 / 255.0
+    is_bright = np.all(linear > bright_threshold, axis=2)
+    is_neutral = np.std(linear, axis=2) < neutral_threshold
     is_white = is_bright & is_neutral & border_mask
 
     blocks = []
@@ -443,53 +487,113 @@ def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = 
         for x in range(0, w - block_size, step):
             block = is_white[y:y+block_size, x:x+block_size]
             if np.sum(block) / (block_size * block_size) > 0.8:
-                pixels = image[y:y+block_size, x:x+block_size][block]
+                pixels = linear[y:y+block_size, x:x+block_size][block]
                 blocks.append({
                     "mean": pixels.mean(axis=0),
                     "var": pixels.var(axis=0).mean(),
                 })
 
     if not blocks:
-        return image, {"applied": False, "reason": "no_white_reference_blocks"}
+        return image, {"applied": False, "reason": "no_white_reference_blocks", "color_space": WHITE_BALANCE_COLOR_SPACE}
 
     blocks.sort(key=lambda b: b["var"])
     best = blocks[:10]
     ref_white = np.mean([b["mean"] for b in best], axis=0)
-    target = 240.0
+    target = srgb_channel_to_linear(240.0 / 255.0)
     gains = np.array([
-        target / max(ref_white[0], 1),
-        target / max(ref_white[1], 1),
-        target / max(ref_white[2], 1),
-    ])
-    balanced = np.clip(image.astype(np.float32) * gains, 0, 255).astype(np.uint8)
+        target / max(ref_white[0], 1e-6),
+        target / max(ref_white[1], 1e-6),
+        target / max(ref_white[2], 1e-6),
+    ], dtype=np.float32)
+    balanced = linear_rgb_to_srgb_u8(linear * gains)
     return balanced, {
         "applied": True,
+        "color_space": WHITE_BALANCE_COLOR_SPACE,
         "blocks": len(blocks),
         "used_blocks": len(best),
-        "ref_white": [round(float(v), 2) for v in ref_white],
+        "ref_white": [round(float(v), 5) for v in ref_white],
         "gains": [round(float(v), 4) for v in gains],
     }
 
 
 def denoise_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Reduce scan/print noise while preserving signatures and photo edges."""
+    """Reduce scan/print noise with conservative LAB-channel NLM."""
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
         return image, {"applied": False, "reason": "unsupported_image_shape"}
 
-    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    denoised = cv2.fastNlMeansDenoisingColored(
-        bgr,
+    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    denoised_l = cv2.fastNlMeansDenoising(
+        l_channel,
         None,
-        h=3,
-        hColor=3,
-        templateWindowSize=7,
-        searchWindowSize=21,
+        h=LAB_DENOISE_L_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
     )
-    rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
+    denoised_a = cv2.fastNlMeansDenoising(
+        a_channel,
+        None,
+        h=LAB_DENOISE_AB_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
+    )
+    denoised_b = cv2.fastNlMeansDenoising(
+        b_channel,
+        None,
+        h=LAB_DENOISE_AB_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
+    )
+    denoised_lab = cv2.merge([denoised_l, denoised_a, denoised_b])
+    rgb = cv2.cvtColor(denoised_lab, cv2.COLOR_LAB2RGB)
+    return rgb, {
+        "applied": True,
+        "method": "lab_fastNlMeansDenoising",
+        "h": LAB_DENOISE_L_H,
+        "l_h": LAB_DENOISE_L_H,
+        "ab_h": LAB_DENOISE_AB_H,
+        "templateWindowSize": LAB_DENOISE_TEMPLATE_WINDOW,
+        "searchWindowSize": LAB_DENOISE_SEARCH_WINDOW,
+    }
 
-    # Blend back a little original detail so marker strokes and facial edges do not get waxy.
-    blended = cv2.addWeighted(rgb, 0.65, image, 0.35, 0)
-    return blended, {"applied": True, "method": "fastNlMeansDenoisingColored", "h": 3, "hColor": 3}
+
+def sharpen_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Apply reduced USM low sharpen on the LAB L channel only."""
+    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+        return image, {"applied": False, "reason": "unsupported_image_shape"}
+
+    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    l_float = l_channel.astype(np.float32)
+    blurred = cv2.GaussianBlur(l_float, (0, 0), sigmaX=LAB_SHARPEN_SIGMA, sigmaY=LAB_SHARPEN_SIGMA)
+    detail = l_float - blurred
+    sharpened_l = l_float.copy()
+    edge_mask = np.abs(detail) >= LAB_SHARPEN_THRESHOLD
+    sharpened_l[edge_mask] = l_float[edge_mask] + LAB_SHARPEN_AMOUNT * detail[edge_mask]
+    sharpened_l = np.clip(np.rint(sharpened_l), 0, 255).astype(np.uint8)
+    sharpened_lab = cv2.merge([sharpened_l, a_channel, b_channel])
+    rgb = cv2.cvtColor(sharpened_lab, cv2.COLOR_LAB2RGB)
+    return rgb, {
+        "applied": True,
+        "method": "lab_l_channel_usm",
+        "sigma": LAB_SHARPEN_SIGMA,
+        "amount": LAB_SHARPEN_AMOUNT,
+        "threshold": LAB_SHARPEN_THRESHOLD,
+    }
+
+
+def apply_postprocess_mode(image: np.ndarray, mode: str) -> tuple[np.ndarray, dict]:
+    if mode == POSTPROCESS_MODE_OFF:
+        return image, {"mode": POSTPROCESS_MODE_OFF, "applied": False, "steps": []}
+
+    denoised, denoise_info = denoise_extracted_polaroid(image)
+    steps = [{"name": POSTPROCESS_MODE_DENOISE, **denoise_info}]
+    if mode == POSTPROCESS_MODE_SHARPEN and denoise_info.get("applied"):
+        sharpened, sharpen_info = sharpen_extracted_polaroid(denoised)
+        steps.append({"name": POSTPROCESS_MODE_SHARPEN, **sharpen_info})
+        return sharpened, {"mode": POSTPROCESS_MODE_SHARPEN, "applied": bool(sharpen_info.get("applied")), "steps": steps}
+
+    return denoised, {"mode": POSTPROCESS_MODE_DENOISE, "applied": bool(denoise_info.get("applied")), "steps": steps}
 
 
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
@@ -624,7 +728,11 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         return
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
-        denoise_enabled = bool(task_store.get(task_id, {}).get("denoise", True))
+        postprocess_mode = parse_postprocess_mode(
+            task_store.get(task_id, {}).get("postprocess_mode"),
+            bool(task_store.get(task_id, {}).get("denoise", True)),
+        )
+        denoise_enabled = postprocess_mode != POSTPROCESS_MODE_OFF
         requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
         rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
         requested_polaroid_size = parse_polaroid_size(task_store.get(task_id, {}).get("polaroid_size"))
@@ -757,6 +865,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
                 print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
         if cancel_if_requested(task_id):
             return
+        if postprocess_mode == POSTPROCESS_MODE_SHARPEN:
+            rectified, sharpen_info = sharpen_extracted_polaroid(rectified)
+            if sharpen_info["applied"]:
+                print(f"   sharpen #{pidx+1}: {sharpen_info['method']} amount={sharpen_info['amount']}", flush=True)
+            else:
+                print(f"   sharpen #{pidx+1}: {sharpen_info['reason']}", flush=True)
         add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
                          f"拍立得 #{pidx+1}")
         print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
@@ -985,7 +1099,9 @@ def submit_task():
         return jsonify({"error": err}), 400
 
     white_balance = parse_bool(request.form.get("wb"), default=True)
-    denoise = parse_bool(request.form.get("denoise"), default=True)
+    legacy_denoise = parse_bool(request.form.get("denoise"), default=True)
+    postprocess_mode = parse_postprocess_mode(request.form.get("postprocess_mode"), legacy_denoise)
+    denoise = postprocess_mode != POSTPROCESS_MODE_OFF
     requested_polaroids = parse_positive_int(
         request.form.get("expected_polaroids"),
         request.form.get("polaroid_count"),
@@ -1000,6 +1116,8 @@ def submit_task():
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance, "denoise": denoise,
+            "postprocess_mode": postprocess_mode,
+            "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
             "upload_attempt_id": upload_attempt_id,
             "requested_polaroids": requested_polaroids,
             "polaroid_size": polaroid_size,
@@ -1020,12 +1138,14 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, denoise={denoise}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",
         "white_balance": white_balance,
         "denoise": denoise,
+        "postprocess_mode": postprocess_mode,
+        "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
         "requested_polaroids": requested_polaroids,
         "rotation_degrees": rotation_degrees,
         "expected_polaroids": requested_polaroids,
@@ -1051,6 +1171,9 @@ def task_status(task_id):
         requested_polaroids = t.get("requested_polaroids", 0)
         rotation_degrees = t.get("rotation_degrees", 0)
         denoise = bool(t.get("denoise", True))
+        postprocess_mode = parse_postprocess_mode(t.get("postprocess_mode"), denoise)
+        white_balance = bool(t.get("white_balance", True))
+        white_balance_color_space = t.get("white_balance_color_space", WHITE_BALANCE_COLOR_SPACE if white_balance else "")
         detected_polaroids = t.get("detected_polaroids", 0)
         detection_threshold = t.get("detection_threshold", 0)
         warning = t.get("warning", "")
@@ -1080,6 +1203,9 @@ def task_status(task_id):
         "requested_polaroids": requested_polaroids,
         "rotation_degrees": rotation_degrees,
         "denoise": denoise,
+        "postprocess_mode": postprocess_mode,
+        "white_balance": white_balance,
+        "white_balance_color_space": white_balance_color_space,
         "detected_polaroids": detected_polaroids,
         "detection_threshold": detection_threshold,
         "warning": warning,

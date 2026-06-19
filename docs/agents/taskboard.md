@@ -2,13 +2,14 @@
 
 ## Current Objective
 
-Fix batch completion and upload-error regressions found during mini-program testing after mini/wide/auto size support. The fixes must aggregate all insufficient-count images in the final status bar, keep extraction results intact when navigating after completion, handle transient `wx.uploadFile` socket/TLS failures through the bounded upload failure path, and rename the completed clear action to `新任务`.
+Add conservative postprocessing modes and a small token-page easter-egg route. Backend must implement the two-step postprocessing described in `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`; Frontend must replace the existing denoise switch with `关闭 / 降噪 / 锐化`, adjust the count-input layout, and route token input `izaya7` to a new blank page titled `izaya7's map`.
 
 Scope constraints:
 
 - Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
 - Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
 - Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
+- Preserve white-balance behavior as a separate switch; postprocessing mode controls only denoise/sharpen after perspective warp and optional white balance.
 - Batch result order must be: selected image order, then detected polaroid order inside each image.
 - Continue processing later images if one image fails; report partial failures clearly.
 - Maximum selected images: 9.
@@ -56,6 +57,7 @@ Frontend polaroid size commit: 86ddbe2
 Backend polaroid size commit: ff9851a
 Reviewer polaroid size approval commit: 85a7ed4
 User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client network socket disconnected before secure TLS connection was established`
+Postprocessing spec: C:\Users\20888\Desktop\cheki\POSTPROCESSING.md
 ```
 
 ## Worktree Assignments
@@ -63,9 +65,9 @@ User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `BATCH-FE-012`: batch completion status/navigation/action copy and upload socket/TLS failure handling |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `BATCH-BE-004`: verify backend compatibility for upload socket/TLS failure and existing cancel/status contracts |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `BATCH-REV-009`: review Frontend fix and Backend compatibility handoff |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `POST-FE-001`: postprocessing selector, count-input layout, and `izaya7` map page |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `POST-BE-001`: LAB denoise and LAB L-channel sharpen postprocessing modes |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `POST-REV-001`: review Frontend/Backend postprocessing and easter-egg changes |
 
 ## Current Tasks
 
@@ -101,6 +103,9 @@ User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client
 | BATCH-FE-012 | Frontend | done | Fix batch completion status, post-completion navigation, completed action copy, and upload socket/TLS failure handling. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `docs/agents/handoffs/2026-06-18-frontend-completion-upload-regressions.md` | Frontend commit `38a5cf6` lists all insufficient-count images in final batch status, preserves extracted results/status/actions during completed preview navigation, routes socket/TLS `wx.uploadFile` failures through bounded retry/cancel/sanitized failure handling, and renames the completed reset action to `新任务` while preserving failed source images. Reviewer mocks confirmed all four reported regressions and all-download/per-image size regressions. |
 | BATCH-BE-004 | Backend | done | Verify backend compatibility for upload socket/TLS failures and current batch status/cancel contracts. | `docs/agents/handoffs/2026-06-18-backend-upload-failure-compat.md` | Backend commit `ef48414` documents that the TLS/socket upload failure can occur before Flask receives a request, so no Backend code change is required. Reviewer smoke confirmed `/api/upload-cancel/<upload_attempt_id>`, late canceled `/api/process` 409, normal `/api/process`, active-task status fields, result routes, and `/api/cancel/<task_id>` remain compatible. |
 | BATCH-REV-009 | Reviewer | done | Review `BATCH-FE-012` and `BATCH-BE-004` after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-18-reviewer-completion-upload-regressions.md` | Reviewer verdict: approved. Required frontend and backend checks passed: multiple shortage aggregation, post-completion navigation preserving results, socket/TLS upload failure retry/cancel/sanitization, `新任务` label/failed-source preservation, all-download, per-image `polaroid_size`, active-task/cancel/upload-cancel/result/contact/auth compatibility, `node --check`, `python -m py_compile`, and `git diff --check`. |
+| POST-FE-001 | Frontend | done | Replace the existing denoise switch with a three-option postprocessing selector, adjust count-input layout, and add the `izaya7` map page route. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, token/auth page files, new map page files, `wechat-miniprogram/app.json`, `docs/agents/handoffs/2026-06-19-frontend-postprocessing-map.md` | Frontend commit `cf36d6c` replaces the denoise switch with `关闭 / 降噪 / 锐化`, defaults to `降噪`, submits `postprocess_mode` plus legacy `denoise` for single and batch `/api/process`, preserves `wb`, rotation, per-image `polaroid_size`, upload retry/cancel, ordering, completed navigation, and failed-source behavior, narrows the count input, and adds exact `izaya7` navigation to a blank page titled `izaya7's map` without storing the value or calling backend auth. Reviewer mock verified selector state, payload fields, route behavior, and normal auth. |
+| POST-BE-001 | Backend | done | Implement conservative postprocessing modes from `POSTPROCESSING.md`. | `backend/app.py`, optional focused scripts/tests, `docs/agents/handoffs/2026-06-19-backend-postprocessing-modes.md` | Backend commit `c3bc24f` accepts `postprocess_mode=off|denoise|sharpen`, preserves absent-field legacy `denoise=0/1`, falls back to `denoise` for missing/invalid modes, performs fixed-border white balance in `linear_rgb`, runs LAB-channel NLM denoise with L `h=3.5` and A/B `h=6.0`, runs sharpen as denoise plus LAB L-channel USM `sigma=1.0`, `amount=0.45`, `threshold=3.0`, and exposes `postprocess_mode` and `white_balance_color_space` metadata without changing RunPod startup, auth, queue/cancel, result routes, mini/wide/auto geometry, contact route, or SAM detection. Reviewer backend scripts passed. |
+| POST-REV-001 | Reviewer | done | Review `POST-FE-001` and `POST-BE-001` after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-19-reviewer-postprocessing-map.md` | Reviewer verdict: approved. Required checks passed: Frontend `node --check`, Backend `python -m py_compile`, `git diff --check`, targeted Frontend payload/auth/map mocks, `scripts/check_postprocessing_modes.py`, and `scripts/check_polaroid_size.py`. Reviewer confirmed selector labels/default/placement, single/batch `postprocess_mode`, count input layout, exact `izaya7` map route, normal auth unchanged, linear-RGB white balance, LAB denoise/sharpen order and parameters, `off` behavior, legacy compatibility, status metadata, mini/wide/auto preservation, and no reviewed diff touching RunPod startup, contact, result, task cancel, or upload-cancel contracts. |
 
 Status values:
 
@@ -124,7 +129,8 @@ Frontend request flow:
 - Include existing form fields per image:
   - `token`
   - `wb`
-  - `denoise`
+  - legacy `denoise` if needed for compatibility
+  - `postprocess_mode` (`off`, `denoise`, or `sharpen`; default `denoise`)
   - `rotation_degrees`
   - `polaroid_size` (`auto`, `mini`, or `wide`; default `mini`)
   - optional `expected_polaroids`
@@ -152,6 +158,30 @@ Polaroid size contract:
 - If `polaroid_size=wide`, Backend warps every detected quadrilateral to wide output.
 - If `polaroid_size=auto`, Backend classifies each detected quadrilateral independently using `avg(horizontal edge lengths) / avg(vertical edge lengths)`: ratio `> 1` means wide, ratio `<= 1` means mini.
 - The user confirmed the mini/wide mask geometry on 2026-06-18 before task publication.
+
+Postprocessing contract:
+
+- Postprocessing runs after perspective warp and optional white balance.
+- White balance remains controlled only by `wb`; `postprocess_mode=off` does not disable white balance.
+- When `wb` is enabled, Backend must perform white balance in linear RGB space: convert sRGB to linear RGB before computing/applying white-reference gains, then convert the result back to sRGB.
+- The existing fixed-border reference-block strategy and mini/wide geometry masks should remain the basis for selecting white reference pixels.
+- Frontend exposes exactly three postprocessing options: `关闭`, `降噪`, `锐化`.
+- Frontend sends `postprocess_mode=off|denoise|sharpen` for each `/api/process` upload.
+- Backend accepts `postprocess_mode=off|denoise|sharpen`.
+- Missing or invalid `postprocess_mode` must preserve current default behavior as `denoise`.
+- Legacy `denoise` boolean remains compatible when `postprocess_mode` is absent: false means `off`, true means `denoise`.
+- `off` means no denoise or sharpen after warp/white balance.
+- `denoise` means LAB-channel NLM denoise only, following `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`.
+- `sharpen` means LAB-channel NLM denoise first, then reduced USM low sharpen on LAB `L` only, following `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`.
+- LAB denoise parameters: OpenCV `fastNlMeansDenoising`, L channel `h=3.5`, A/B channels `h=6.0`, `templateWindowSize=7`, `searchWindowSize=21`.
+- Sharpen parameters: `sigma=1.0`, `amount=0.45`, `threshold=3.0`; color channels remain unchanged.
+
+Frontend auth/map contract:
+
+- The normal token authentication flow must remain unchanged for real backend tokens.
+- Exact token-page input `izaya7` routes to a new blank mini-program page.
+- The new page navigation title must be `izaya7's map`.
+- `izaya7` must not be stored or treated as a valid backend API token.
 
 Ordering contract:
 
@@ -252,10 +282,14 @@ Contact email contract:
 | 2026-06-18 | Publish post-size batch completion/upload regression tasks in Frontend, Backend, Reviewer order. | User testing found multiple shortage-status aggregation, completed navigation result loss, upload socket/TLS failure, and completed action copy issues. |
 | 2026-06-18 | Keep the main fix Frontend-owned unless Backend audit finds a real contract gap. | The reported symptoms are mini-program status/action/navigation/upload-error handling, while existing Backend cancel/status/upload-cancel APIs should be sufficient if confirmed. |
 | 2026-06-18 | Completed clear action text changes from `删除全部图片` to `新任务`. | User explicitly requested the completed-state button label change while preserving the completed reset behavior. |
+| 2026-06-19 | Add explicit postprocessing modes `off`, `denoise`, and `sharpen`. | User requested replacing the existing denoise switch with three options and using the two-step conservative postprocessing spec from `POSTPROCESSING.md`. |
+| 2026-06-19 | Keep `denoise` as the default postprocessing mode. | This preserves the current default behavior of the existing denoise switch while allowing users to opt out or choose sharpen. |
+| 2026-06-19 | Treat `izaya7` as a frontend-only route trigger, not a backend token. | User requested a small token-page navigation feature; normal authentication must not be loosened. |
+| 2026-06-19 | Perform white balance in linear RGB space. | User added this as a backend postprocessing requirement; white balance remains independently controlled by `wb`. |
 
 ## Open Questions
 
-- None. The user-reported regression set has concrete Frontend, Backend, and Reviewer owners; Backend work is a compatibility audit unless it discovers a real backend defect.
+- None. Postprocessing modes, UI placement, count-input layout, and the `izaya7` route have concrete Frontend, Backend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -292,3 +326,6 @@ Contact email contract:
 - Reviewer approved `SIZE-REV-001` in `85a7ed4`; PM marks polaroid size support ready for integration.
 - User testing after size support found four regressions: final status must list every insufficient-count image, post-completion navigation must not delete extracted results, `wx.uploadFile` socket/TLS failures must not leave the UI stuck in upload state, and the completed clear action should read `新任务`.
 - PM assigned `BATCH-FE-012`, `BATCH-BE-004`, and `BATCH-REV-009` in Frontend, Backend, Reviewer order.
+- User requested postprocessing modes based on `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`, count-input layout adjustment, and an `izaya7` token-page route.
+- PM assigned `POST-FE-001`, `POST-BE-001`, and `POST-REV-001` in Frontend, Backend, Reviewer order.
+- User added that fixed-border white balance should be performed in linear RGB space; PM folded this into `POST-BE-001` and `POST-REV-001`.

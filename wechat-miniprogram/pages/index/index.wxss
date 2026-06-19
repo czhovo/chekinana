@@ -82,6 +82,37 @@
   transform-origin: center;
 }
 
+.postprocess-control {
+  display: flex;
+  height: 48rpx;
+  border: 2rpx solid rgba(37, 99, 235, 0.35);
+  border-radius: 8rpx;
+  background: rgba(255, 255, 255, 0.94);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.postprocess-control.is-disabled {
+  opacity: 0.56;
+}
+
+.postprocess-option {
+  min-width: 70rpx;
+  height: 44rpx;
+  padding: 0 10rpx;
+  color: #4b5563;
+  font-size: 22rpx;
+  line-height: 44rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.postprocess-option.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .image-frame {
   position: relative;
   width: 100%;
@@ -404,6 +435,7 @@
   border: 2rpx solid #d9dde5;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16rpx;
   box-sizing: border-box;
 }
@@ -417,7 +449,8 @@
 }
 
 .count-input {
-  flex: 1 0 170rpx;
+  flex: 0 0 170rpx;
+  width: 170rpx;
   min-width: 170rpx;
   height: 58rpx;
   padding: 0 16rpx;

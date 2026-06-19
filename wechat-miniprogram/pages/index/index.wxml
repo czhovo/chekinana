@@ -9,12 +9,13 @@
       </view>
       <view class="header-actions">
         <view class="wb-control">
-          <text>降噪</text>
-          <switch class="mini-switch" checked="{{denoiseEnabled}}" bindchange="onDenoiseChange" disabled="{{processing}}" color="#2563eb"></switch>
-        </view>
-        <view class="wb-control">
           <text>白平衡</text>
           <switch class="mini-switch" checked="{{wbEnabled}}" bindchange="onWhiteBalanceChange" disabled="{{processing}}" color="#2563eb"></switch>
+        </view>
+        <view class="postprocess-control {{processing ? 'is-disabled' : ''}}">
+          <view class="postprocess-option {{postprocessMode === 'off' ? 'active' : ''}}" data-mode="off" catchtap="onPostprocessModeChange">关闭</view>
+          <view class="postprocess-option {{postprocessMode === 'denoise' ? 'active' : ''}}" data-mode="denoise" catchtap="onPostprocessModeChange">降噪</view>
+          <view class="postprocess-option {{postprocessMode === 'sharpen' ? 'active' : ''}}" data-mode="sharpen" catchtap="onPostprocessModeChange">锐化</view>
         </view>
       </view>
     </view>
