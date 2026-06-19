@@ -109,6 +109,10 @@ Page({
   touchStartX: 0,
   touchStartY: 0,
 
+  onShow() {
+    this.setTabBarSelected(1);
+  },
+
   onLoad() {
     const today = new Date();
     this.setData(createCalendarState(
@@ -118,6 +122,12 @@ Page({
       today.getMonth(),
       today.getDate()
     ));
+  },
+
+  setTabBarSelected(selected) {
+    if (typeof this.getTabBar !== "function") return;
+    const tabBar = this.getTabBar();
+    if (tabBar) tabBar.setData({ selected });
   },
 
   showPreviousMonth() {

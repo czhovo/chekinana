@@ -1,3 +1,6 @@
 {
-  "navigationBarTitleText": "izaya7的巡回百切计划"
+  "navigationBarTitleText": "Chekinana",
+  "usingComponents": {
+    "bottom-nav": "../../components/bottom-nav/bottom-nav"
+  }
 }

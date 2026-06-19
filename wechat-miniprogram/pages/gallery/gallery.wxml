@@ -1,0 +1,7 @@
+<view class="placeholder-page with-bottom-nav">
+  <view class="placeholder-panel">
+    <view class="placeholder-kicker">Chekinana</view>
+    <view class="placeholder-title">Gallery</view>
+    <view class="placeholder-text">这里会展示图片和记录。</view>
+  </view>
+</view>

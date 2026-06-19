@@ -1,4 +1,4 @@
-<view class="izaya7-map-page">
+<view class="izaya7-map-page with-bottom-nav">
   <view class="map-stage">
     <canvas
       id="china-map-canvas"
@@ -69,3 +69,4 @@
     </view>
   </view>
 </view>
+<bottom-nav active="scanner" scanner-variant="map" />

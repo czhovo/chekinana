@@ -78,7 +78,13 @@
 
 .error-text {
   margin-top: 22rpx;
+  min-height: 40rpx;
   color: #991b1b;
   font-size: 26rpx;
   line-height: 1.5;
+  opacity: 0;
+}
+
+.error-text.is-visible {
+  opacity: 1;
 }

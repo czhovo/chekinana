@@ -1,6 +1,6 @@
-<view class="auth-page">
+<view class="auth-page with-bottom-nav">
   <view class="auth-panel">
-    <view class="brand">Chekinana</view>
+    <view class="brand">Chekinana Scanner</view>
     <view class="title">输入访问 Token</view>
     <view class="subtitle">为了避免滥用，请向作者索要Token</view>
 
@@ -28,9 +28,10 @@
       disabled="{{!token || verifying}}"
       bindtap="verifyToken"
     >
-      {{verifying ? '验证中' : '进入小程序'}}
+      {{verifying ? '验证中' : '进入Scanner'}}
     </button>
 
-    <view wx:if="{{errorText}}" class="error-text">{{errorText}}</view>
+    <view class="error-text {{errorText ? 'is-visible' : ''}}">{{errorText || ' '}}</view>
   </view>
 </view>
+<bottom-nav active="scanner" />

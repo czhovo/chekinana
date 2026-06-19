@@ -1,4 +1,4 @@
-<view class="calendar-page">
+<view class="calendar-page with-bottom-nav">
   <view class="calendar-card">
     <view class="calendar-header">
       <view class="month-button" bindtap="showPreviousMonth" aria-label="上一个月">

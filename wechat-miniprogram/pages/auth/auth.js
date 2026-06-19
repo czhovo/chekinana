@@ -1,4 +1,4 @@
-const { AUTH_STORAGE_KEY, getApiBaseUrl, isLocalPreviewToken, normalizePodId } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, SCANNER_AUTH_PASSED_KEY, getApiBaseUrl, isLocalPreviewToken, normalizePodId } = require("../../utils/config");
 
 Page({
   data: {
@@ -10,7 +10,7 @@ Page({
 
   onLoad() {
     const token = wx.getStorageSync(AUTH_STORAGE_KEY) || "";
-    if (token) {
+    if (token && !isLocalPreviewToken(token)) {
       this.setData({ token });
     }
   },
@@ -35,7 +35,7 @@ Page({
       return;
     }
     if (rawToken === "calendar") {
-      wx.navigateTo({ url: "/pages/calendar/calendar" });
+      wx.switchTab({ url: "/pages/calendar/calendar" });
       return;
     }
 
@@ -45,7 +45,8 @@ Page({
 
     if (isLocalPreviewToken(token)) {
       wx.setStorageSync(AUTH_STORAGE_KEY, token);
-      wx.redirectTo({ url: "/pages/index/index" });
+      wx.setStorageSync(SCANNER_AUTH_PASSED_KEY, "1");
+      wx.switchTab({ url: "/pages/index/index" });
       return;
     }
 
@@ -82,7 +83,8 @@ Page({
         }
 
         wx.setStorageSync(AUTH_STORAGE_KEY, token);
-        wx.redirectTo({ url: "/pages/index/index" });
+        wx.setStorageSync(SCANNER_AUTH_PASSED_KEY, "1");
+        wx.switchTab({ url: "/pages/index/index" });
       },
       fail: (err) => {
         const errMsg = err && err.errMsg ? err.errMsg : "";

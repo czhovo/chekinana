@@ -1,4 +1,4 @@
-<view class="page">
+<view class="page with-bottom-nav">
   <view class="input-section">
     <view class="section-header">
       <view class="section-title-row">

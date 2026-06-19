@@ -3,8 +3,50 @@
     "pages/auth/auth",
     "pages/index/index",
     "pages/izaya7-map/izaya7-map",
-    "pages/calendar/calendar"
+    "pages/calendar/calendar",
+    "pages/idols/idols",
+    "pages/gallery/gallery",
+    "pages/settings/settings"
   ],
+  "tabBar": {
+    "custom": true,
+    "color": "#7a7f87",
+    "selectedColor": "#2563eb",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "Scanner",
+        "iconPath": "assets/nav/scanner.png",
+        "selectedIconPath": "assets/nav/scanner-active.png"
+      },
+      {
+        "pagePath": "pages/calendar/calendar",
+        "text": "Calendar",
+        "iconPath": "assets/nav/calendar.png",
+        "selectedIconPath": "assets/nav/calendar-active.png"
+      },
+      {
+        "pagePath": "pages/idols/idols",
+        "text": "Idols",
+        "iconPath": "assets/nav/idols.png",
+        "selectedIconPath": "assets/nav/idols-active.png"
+      },
+      {
+        "pagePath": "pages/gallery/gallery",
+        "text": "Gallery",
+        "iconPath": "assets/nav/gallery.png",
+        "selectedIconPath": "assets/nav/gallery-active.png"
+      },
+      {
+        "pagePath": "pages/settings/settings",
+        "text": "Settings",
+        "iconPath": "assets/nav/settings.png",
+        "selectedIconPath": "assets/nav/settings-active.png"
+      }
+    ]
+  },
   "window": {
     "navigationBarTitleText": "Chekinana",
     "navigationBarBackgroundColor": "#ffffff",

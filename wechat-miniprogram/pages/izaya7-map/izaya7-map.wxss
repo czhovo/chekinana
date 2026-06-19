@@ -11,7 +11,8 @@
 .map-stage {
   position: relative;
   width: 100%;
-  height: calc(100vh - 48rpx);
+  height: calc(100vh - 176rpx);
+  height: calc(100vh - 176rpx - env(safe-area-inset-bottom));
 }
 
 .china-map-canvas {
