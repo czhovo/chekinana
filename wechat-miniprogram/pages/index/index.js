@@ -9,6 +9,8 @@ const UPLOAD_MAX_RETRIES = 2;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
 const DEFAULT_POLAROID_SIZE = "mini";
+const POSTPROCESS_MODE_OPTIONS = ["off", "denoise", "sharpen"];
+const DEFAULT_POSTPROCESS_MODE = "denoise";
 
 Page({
   data: {
@@ -21,7 +23,7 @@ Page({
     extractedImages: [],
     processing: false,
     wbEnabled: true,
-    denoiseEnabled: true,
+    postprocessMode: DEFAULT_POSTPROCESS_MODE,
     expectedPolaroidCount: "",
     showCountInput: false,
     showContactDialog: false,
@@ -348,9 +350,11 @@ Page({
     });
   },
 
-  onDenoiseChange(event) {
+  onPostprocessModeChange(event) {
+    if (this.data.processing) return;
+
     this.setData({
-      denoiseEnabled: !!event.detail.value
+      postprocessMode: this.getValidPostprocessMode(event.currentTarget.dataset.mode)
     });
   },
 
@@ -541,7 +545,8 @@ Page({
     const formData = {
       token,
       wb: this.data.wbEnabled ? "1" : "0",
-      denoise: this.data.denoiseEnabled ? "1" : "0",
+      denoise: this.getDenoiseFormValue(this.data.postprocessMode),
+      postprocess_mode: this.getValidPostprocessMode(this.data.postprocessMode),
       rotation_degrees: String(image.rotationDegrees || 0),
       polaroid_size: this.getValidPolaroidSize(image.polaroidSize)
     };
@@ -612,7 +617,8 @@ Page({
     const formData = {
       token,
       wb: this.data.wbEnabled ? "1" : "0",
-      denoise: this.data.denoiseEnabled ? "1" : "0",
+      denoise: this.getDenoiseFormValue(this.data.postprocessMode),
+      postprocess_mode: this.getValidPostprocessMode(this.data.postprocessMode),
       rotation_degrees: String(image.rotationDegrees || 0),
       polaroid_size: this.getValidPolaroidSize(image.polaroidSize)
     };
@@ -1395,6 +1401,14 @@ Page({
 
   getValidPolaroidSize(size) {
     return POLAROID_SIZE_OPTIONS.indexOf(size) >= 0 ? size : DEFAULT_POLAROID_SIZE;
+  },
+
+  getValidPostprocessMode(mode) {
+    return POSTPROCESS_MODE_OPTIONS.indexOf(mode) >= 0 ? mode : DEFAULT_POSTPROCESS_MODE;
+  },
+
+  getDenoiseFormValue(mode) {
+    return this.getValidPostprocessMode(mode) === "off" ? "0" : "1";
   },
 
   getCurrentPreviewImages(selectedImages, currentImageIndex) {

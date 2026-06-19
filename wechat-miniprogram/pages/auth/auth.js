@@ -29,7 +29,13 @@ Page({
   },
 
   verifyToken() {
-    const token = normalizePodId(this.data.token);
+    const rawToken = this.data.token;
+    if (rawToken === "izaya7") {
+      wx.navigateTo({ url: "/pages/izaya-map/izaya-map" });
+      return;
+    }
+
+    const token = normalizePodId(rawToken);
     const apiBaseUrl = getApiBaseUrl(token);
     if (!token || this.data.verifying) return;
 
