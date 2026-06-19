@@ -1,0 +1,14 @@
+<view class="izaya7-map-page">
+  <view class="map-stage">
+    <canvas
+      id="china-map-canvas"
+      class="china-map-canvas"
+      type="2d"
+      bindtouchstart="onMapTouchStart"
+      catchtouchmove="onMapTouchMove"
+      bindtouchend="onMapTouchEnd"
+      bindtouchcancel="onMapTouchEnd"
+    ></canvas>
+    <view wx:if="{{statusText}}" class="map-status {{statusKind}}">{{statusText}}</view>
+  </view>
+</view>
