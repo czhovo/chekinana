@@ -2,7 +2,8 @@
   "pages": [
     "pages/auth/auth",
     "pages/index/index",
-    "pages/izaya7-map/izaya7-map"
+    "pages/izaya7-map/izaya7-map",
+    "pages/calendar/calendar"
   ],
   "window": {
     "navigationBarTitleText": "Chekinana",
