@@ -1336,6 +1336,7 @@ Page({
 
   enqueueResultDownload(image) {
     if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
+    if (image.downloadStatus === RESULT_DOWNLOAD_STATUS_FAILED) return;
     const key = this.getResultKey(image);
     if (this.downloadingImageUrls[key] || this.queuedResultDownloadKeys[key]) return;
 
