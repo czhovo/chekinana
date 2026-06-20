@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Reduce extracted-result output size while preserving immediate incremental delivery: Backend outputs smaller completed images, Frontend downloads and displays each result immediately, and high-count downloads/uploads remain usable.
+Fix failed-result download requeue after RESULTDL review: failed eager result downloads must not be retried forever by later status/prefetch passes.
 
 Scope constraints:
 
@@ -66,6 +66,7 @@ Frontend lifecycle/download state fix commit: 0808fbe
 Reviewer lifecycle/download state approval commit: f10daa1
 User-reported large-result download/upload exhaustion: 2026-06-21 after about 40 extracted results are downloaded, later result downloads fail and new image uploads also fail; the earlier image upload failure symptom may share this cause; restarting the mini program or WeChat does not restore the flow.
 User-directed RESULTDL implementation constraints: 2026-06-21 reject lazy/LRU/cleanup-based behavior changes that delay result display or discard completed images; reduce Backend mini output width from 1600 to 1200; Backend must return each extracted polaroid immediately after extraction; Frontend must download and display each returned result immediately; Frontend must keep completed-size downloaded images until the mini program exits or the user manually deletes the result through New Task or source-image deletion; upload timeout max retries becomes 3; index empty-preview helper adds `单次处理的拍立得数量不应超过50张`.
+Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend blocker is failed result downloads being requeued by later status/prefetch passes after `downloadStatus=failed`.
 ```
 
 ## Worktree Assignments
@@ -73,9 +74,9 @@ User-directed RESULTDL implementation constraints: 2026-06-21 reject lazy/LRU/cl
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `RESULTDL-FE-001`: immediate result download/display, retained completed images, retry/text updates |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `RESULTDL-BE-001`: 1200-width result output and immediate incremental result availability |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `RESULTDL-REV-001`: review exact RESULTDL constraints and high-count flow |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `RESULTDL-FE-002`: prevent failed eager result downloads from being requeued by status/prefetch |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No RESULTDL follow-up unless a later review finds a Backend regression |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `RESULTDL-REV-002`: re-review Frontend failed-download requeue fix |
 
 ## Current Tasks
 
@@ -122,6 +123,8 @@ User-directed RESULTDL implementation constraints: 2026-06-21 reject lazy/LRU/cl
 | RESULTDL-FE-001 | Frontend | pending | Preserve immediate result download/display while adapting to 1200-width outputs and upload retry/text changes. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-21-frontend-large-result-downloads.md` | Frontend commit `86ea23a` implements immediate display with `localPath || url`, eager bounded result downloads with 3 active downloads, retained `localPath`/download status across duplicate result merges, upload max retries of 3, and the `单次处理的拍立得数量不应超过50张` helper line. Reviewer found a P1 blocker: after a result exhausts its eager download retry budget and is marked `downloadStatus=failed`, later status/prefetch passes requeue that same failed result with a fresh retry budget, so a persistent high-index failure can retry on every poll and recreate the high-count resource exhaustion this task is meant to fix. |
 | RESULTDL-BE-001 | Backend | done | Reduce output size to 1200-width mini while preserving immediate incremental result availability. | `backend/app.py`, `scripts/check_polaroid_size.py` or focused equivalent, `docs/agents/handoffs/2026-06-21-backend-large-result-downloads.md` | Backend commit `6717034` reduces mini output to `1200x1908`, wide output to `2400x1908`, recomputes image-area vertices from the existing border proportions, preserves mini/wide/auto semantics, keeps per-polaroid `add_intermediate(...)` availability, and leaves result/status/process routes unchanged. Reviewer checks passed for geometry, explicit/auto size outputs, postprocessing compatibility, 60-result status metadata, result ids `0`, `39`, `40`, `59`, and a fresh `/api/process` upload after high-count result downloads. |
 | RESULTDL-REV-001 | Reviewer | done | Review exact RESULTDL behavior after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-large-result-downloads.md` | Reviewer verdict: changes requested. Backend passed the 1200/2400 geometry, immediate availability, high-count result route, fresh-upload, postprocessing, compile, and diff checks. Frontend passed positive checks for immediate display, bounded 3-active downloads, retained local paths, upload max retries of 3, late tap failure status, and helper text, but has a blocking failed-download requeue bug: a result marked `downloadStatus=failed` is queued again on later status/prefetch passes. |
+| RESULTDL-FE-002 | Frontend | pending | Stop failed eager result downloads from being requeued by later status/prefetch passes. | `wechat-miniprogram/pages/index/index.js`, focused mock/test if present, `docs/agents/handoffs/2026-06-21-frontend-result-download-requeue.md` | Fix the Reviewer P1 from `b774fb2`: once a result exhausts its eager download retry budget and is marked `downloadStatus=failed`, later duplicate status merges or `prefetchResultImages(...)` calls must not automatically enqueue that same result again with a fresh eager retry budget. Preserve explicit user intent: if the user taps that failed result or uses an explicit retry affordance that already exists, the implementation may perform a bounded manual retry, but passive polling/status refresh must not create infinite requeue loops. Keep immediate result display, 3 active eager downloads, retained completed-size `localPath` behavior, upload max retries of 3, helper copy, all-download/single-save state, `新任务` rules, source-image deletion, auth, picker, upload/process/status/cancel, `postprocess_mode`, `polaroid_size`, and main-sync routes unchanged. Add or update a targeted mock reproducing the Reviewer sequence: fail original plus retry, merge duplicate status result, call prefetch again, and assert no additional automatic downloads are scheduled. |
+| RESULTDL-REV-002 | Reviewer | pending | Re-review failed-download requeue fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-result-download-requeue.md` | Reviewer must verify the `b774fb2` P1 is fixed: a result with `downloadStatus=failed` after exhausted eager retries is not requeued by later status/prefetch passes. Re-run the failing mock from `b774fb2` and keep the positive RESULTDL checks: immediate display, bounded 3-active downloads, retained completed-size images, upload max retries of 3, helper text, 40+ immediate downloads followed by later result tap and fresh upload, no Backend regression, and no changes to RunPod/startup/auth/contact/postprocessing/size-selection routes. |
 
 Status values:
 
@@ -356,10 +359,11 @@ Contact email contract:
 | 2026-06-21 | Reopen large-result download reliability as Frontend plus Backend audit. | User testing found downloads fail around the 40th result; Frontend has unbounded prefetch risk, while Backend must confirm result routes/TTL do not impose a hidden high-count limit. |
 | 2026-06-21 | Clarify RESULTDL as a post-download exhaustion issue affecting downloads and uploads. | User clarified that after about 40 downloaded extraction results, later downloads fail and new image uploads also fail; the earlier upload failure may be the same issue, and restarting the mini program or WeChat does not recover. |
 | 2026-06-21 | Use output-size reduction and preserve immediate result delivery/retention for RESULTDL. | User rejected lazy/LRU/cleanup behavior changes and required Backend 1200-width output, immediate per-polaroid return, immediate Frontend download/display, active-session retention of completed-size images, upload retries capped at 3, and the 50-polaroid guidance copy. |
+| 2026-06-21 | Reopen RESULTDL Frontend for failed-download requeue after Reviewer changes requested. | Reviewer commit `b774fb2` found Backend passed, but Frontend can requeue a permanently failed eager result on later status/prefetch passes, recreating the resource-exhaustion risk. |
 
 ## Open Questions
 
-- None. The clarified output-size/immediate-delivery approach has concrete Frontend, Backend, and Reviewer owners.
+- None. The remaining RESULTDL blocker has concrete Frontend and Reviewer owners; Backend is done unless a later review finds a regression.
 
 ## Completed Work Summary
 
@@ -413,3 +417,5 @@ Contact email contract:
 - PM assigned `RESULTDL-FE-001`, `RESULTDL-BE-001`, and `RESULTDL-REV-001` in Frontend, Backend, Reviewer order.
 - User clarified the `RESULTDL` issue is broader: after about 40 downloaded extraction results, later downloads and new uploads fail, the previous upload failure may be caused by the same exhausted/stuck state, and restarting the mini program or WeChat does not recover.
 - User directed the RESULTDL implementation strategy: reduce Backend mini output width from 1600 to 1200, preserve immediate per-result Backend availability and Frontend immediate download/display, retain completed-size images during the active mini-program session until explicit deletion, cap upload retries at 3, and add the 50-polaroid guidance line under the empty-preview helper.
+- Reviewer completed `RESULTDL-REV-001` in `b774fb2` with verdict `changes requested`: Backend commit `6717034` passed, Frontend commit `86ea23a` has a P1 failed-download requeue blocker.
+- PM assigned `RESULTDL-FE-002` and `RESULTDL-REV-002` for the remaining failed-download requeue fix and re-review.
