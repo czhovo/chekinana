@@ -295,16 +295,16 @@ POLAROID_GEOMETRIES = {
     POLAROID_SIZE_MINI: {
         "base_width": 800,
         "base_height": 1272,
-        "width": 1600,
-        "height": 2544,
-        "image_area_vertices": np.array([[110,200],[1490,200],[1490,2044],[110,2044]], dtype=np.int32),
+        "base_image_area_vertices": np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32),
+        "width": 1200,
+        "height": 1908,
     },
     POLAROID_SIZE_WIDE: {
         "base_width": 1600,
         "base_height": 1272,
-        "width": 3200,
-        "height": 2544,
-        "image_area_vertices": np.array([[110,200],[3090,200],[3090,2044],[110,2044]], dtype=np.int32),
+        "base_image_area_vertices": np.array([[55,100],[1545,100],[1545,1022],[55,1022]], dtype=np.float32),
+        "width": 2400,
+        "height": 1908,
     },
 }
 for _geometry in POLAROID_GEOMETRIES.values():
@@ -312,6 +312,9 @@ for _geometry in POLAROID_GEOMETRIES.values():
         _geometry["width"] / _geometry["base_width"],
         _geometry["height"] / _geometry["base_height"],
     )
+    _geometry["image_area_vertices"] = np.rint(
+        _geometry["base_image_area_vertices"] * _geometry["scale"]
+    ).astype(np.int32)
 
 BASE_POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_width"]
 BASE_POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_height"]

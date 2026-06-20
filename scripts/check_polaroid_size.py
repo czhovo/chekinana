@@ -128,20 +128,20 @@ def main():
 
     mini_geometry = backend_app.get_polaroid_geometry(backend_app.POLAROID_SIZE_MINI)
     wide_geometry = backend_app.get_polaroid_geometry(backend_app.POLAROID_SIZE_WIDE)
-    assert (mini_geometry["width"], mini_geometry["height"]) == (1600, 2544)
-    assert mini_geometry["image_area_vertices"].tolist() == [[110, 200], [1490, 200], [1490, 2044], [110, 2044]]
-    assert (wide_geometry["width"], wide_geometry["height"]) == (3200, 2544)
-    assert wide_geometry["image_area_vertices"].tolist() == [[110, 200], [3090, 200], [3090, 2044], [110, 2044]]
+    assert (mini_geometry["width"], mini_geometry["height"]) == (1200, 1908)
+    assert mini_geometry["image_area_vertices"].tolist() == [[82, 150], [1118, 150], [1118, 1533], [82, 1533]]
+    assert (wide_geometry["width"], wide_geometry["height"]) == (2400, 1908)
+    assert wide_geometry["image_area_vertices"].tolist() == [[82, 150], [2318, 150], [2318, 1533], [82, 1533]]
 
     assert backend_app.resolve_polaroid_size("mini", WIDE_VERTS) == "mini"
     assert backend_app.resolve_polaroid_size("wide", MINI_VERTS) == "wide"
     assert backend_app.resolve_polaroid_size("auto", MINI_VERTS) == "mini"
     assert backend_app.resolve_polaroid_size("auto", WIDE_VERTS) == "wide"
 
-    assert run_extraction_case("mini", WIDE_VERTS) == (1600, 2544)
-    assert run_extraction_case("wide", MINI_VERTS) == (3200, 2544)
-    assert run_extraction_case("auto", MINI_VERTS) == (1600, 2544)
-    assert run_extraction_case("auto", WIDE_VERTS) == (3200, 2544)
+    assert run_extraction_case("mini", WIDE_VERTS) == (1200, 1908)
+    assert run_extraction_case("wide", MINI_VERTS) == (2400, 1908)
+    assert run_extraction_case("auto", MINI_VERTS) == (1200, 1908)
+    assert run_extraction_case("auto", WIDE_VERTS) == (2400, 1908)
 
     default_response = post_process()
     assert default_response.status_code == 200, default_response.get_data(as_text=True)
