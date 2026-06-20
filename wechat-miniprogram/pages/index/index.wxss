@@ -257,6 +257,13 @@
   line-height: 82rpx;
 }
 
+.placeholder-helper {
+  margin-top: 10rpx;
+  color: #a0a6b0;
+  font-size: 24rpx;
+  line-height: 1.35;
+}
+
 .selected-image-strip {
   width: 100%;
   margin-top: 18rpx;

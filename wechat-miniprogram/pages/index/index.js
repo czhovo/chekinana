@@ -5,7 +5,9 @@ const MAX_SELECTED_IMAGES = 9;
 const CONTACT_MESSAGE_MAX_LENGTH = 1000;
 const CONTACT_INFO_MAX_LENGTH = 200;
 const UPLOAD_TIMEOUT_MS = 15000;
-const UPLOAD_MAX_RETRIES = 2;
+const UPLOAD_MAX_RETRIES = 3;
+const RESULT_DOWNLOAD_MAX_CONCURRENCY = 3;
+const RESULT_DOWNLOAD_MAX_RETRIES = 1;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
 const DEFAULT_POLAROID_SIZE = "mini";
@@ -15,6 +17,11 @@ const RESULT_SAVE_STATUS_UNKNOWN = "unknown";
 const RESULT_SAVE_STATUS_SAVING = "saving";
 const RESULT_SAVE_STATUS_SAVED = "saved";
 const RESULT_SAVE_STATUS_FAILED = "failed";
+const RESULT_DOWNLOAD_STATUS_UNKNOWN = "unknown";
+const RESULT_DOWNLOAD_STATUS_PENDING = "pending";
+const RESULT_DOWNLOAD_STATUS_DOWNLOADING = "downloading";
+const RESULT_DOWNLOAD_STATUS_DOWNLOADED = "downloaded";
+const RESULT_DOWNLOAD_STATUS_FAILED = "failed";
 
 Page({
   data: {
@@ -50,6 +57,9 @@ Page({
   activeUploadAttemptId: "",
   activeUploadTimer: null,
   batchInterrupted: false,
+  resultDownloadQueue: [],
+  activeResultDownloadCount: 0,
+  queuedResultDownloadKeys: {},
 
   onUnload() {
     this.clearPollTimer();
@@ -1240,6 +1250,7 @@ Page({
               : `p${index + 1}`,
           url,
           title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`,
+          downloadStatus: RESULT_DOWNLOAD_STATUS_UNKNOWN,
           saveStatus: RESULT_SAVE_STATUS_UNKNOWN
         };
       })
@@ -1265,15 +1276,28 @@ Page({
       const key = String(image.id || image.url);
       if (imageMap[key]) {
         const previousSaveStatus = imageMap[key].saveStatus;
+        const previousDownloadStatus = imageMap[key].downloadStatus;
+        const previousLocalPath = imageMap[key].localPath;
         Object.assign(imageMap[key], image);
         if (previousSaveStatus
           && (!image.saveStatus || image.saveStatus === RESULT_SAVE_STATUS_UNKNOWN)
           && previousSaveStatus !== RESULT_SAVE_STATUS_UNKNOWN) {
           imageMap[key].saveStatus = previousSaveStatus;
         }
+        if (previousDownloadStatus
+          && (!image.downloadStatus || image.downloadStatus === RESULT_DOWNLOAD_STATUS_UNKNOWN)
+          && previousDownloadStatus !== RESULT_DOWNLOAD_STATUS_UNKNOWN) {
+          imageMap[key].downloadStatus = previousDownloadStatus;
+        }
+        if (previousLocalPath && !image.localPath) {
+          imageMap[key].localPath = previousLocalPath;
+        }
         return;
       }
-      const copy = Object.assign({ saveStatus: RESULT_SAVE_STATUS_UNKNOWN }, image);
+      const copy = Object.assign({
+        downloadStatus: RESULT_DOWNLOAD_STATUS_UNKNOWN,
+        saveStatus: RESULT_SAVE_STATUS_UNKNOWN
+      }, image);
       imageMap[key] = copy;
       merged.push(copy);
     });
@@ -1305,38 +1329,89 @@ Page({
 
   prefetchResultImages(images) {
     images.forEach((image) => {
-      if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
-      if (this.downloadingImageUrls[image.url]) return;
+      this.enqueueResultDownload(image);
+    });
+    this.processResultDownloadQueue();
+  },
 
-      this.downloadingImageUrls[image.url] = true;
+  enqueueResultDownload(image) {
+    if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
+    const key = this.getResultKey(image);
+    if (this.downloadingImageUrls[key] || this.queuedResultDownloadKeys[key]) return;
+
+    this.queuedResultDownloadKeys[key] = true;
+    this.resultDownloadQueue.push({ key, image: Object.assign({}, image), retryCount: 0 });
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+  },
+
+  processResultDownloadQueue() {
+    while (this.activeResultDownloadCount < RESULT_DOWNLOAD_MAX_CONCURRENCY && this.resultDownloadQueue.length) {
+      const item = this.resultDownloadQueue.shift();
+      delete this.queuedResultDownloadKeys[item.key];
+      const image = this.findExtractedImageByKey(item.key);
+      if (!image || image.localPath || image.url.startsWith("wxfile://")) continue;
+
+      this.activeResultDownloadCount += 1;
+      this.downloadingImageUrls[item.key] = true;
+      this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADING });
       wx.downloadFile({
         url: image.url,
         header: this.getAuthHeader(),
         success: (res) => {
           if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
             this.updateImageLocalPath(image, res.tempFilePath);
+            return;
           }
+          this.handleResultDownloadFailure(item, image, res);
+        },
+        fail: (err) => {
+          this.handleResultDownloadFailure(item, image, err);
         },
         complete: () => {
-          delete this.downloadingImageUrls[image.url];
+          delete this.downloadingImageUrls[item.key];
+          this.activeResultDownloadCount = Math.max(0, this.activeResultDownloadCount - 1);
+          this.processResultDownloadQueue();
         }
       });
-    });
+    }
+  },
+
+  handleResultDownloadFailure(item, image, err) {
+    console.error("result download failed", err);
+    if (item.retryCount < RESULT_DOWNLOAD_MAX_RETRIES) {
+      item.retryCount += 1;
+      this.queuedResultDownloadKeys[item.key] = true;
+      this.resultDownloadQueue.push(item);
+      this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+      return;
+    }
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_FAILED });
   },
 
   updateImageLocalPath(targetImage, localPath) {
-    this.updateResultSaveState(targetImage, { localPath });
+    this.updateResultSaveState(targetImage, {
+      localPath,
+      downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADED
+    });
   },
 
   updateResultSaveState(targetImage, patch) {
     if (!targetImage) return;
-    const targetKey = String(targetImage.id || targetImage.url);
+    const targetKey = this.getResultKey(targetImage);
     const extractedImages = this.data.extractedImages.map((image) => {
-      const key = String(image.id || image.url);
+      const key = this.getResultKey(image);
       if (key !== targetKey) return image;
       return Object.assign({}, image, patch);
     });
     this.setData({ extractedImages });
+  },
+
+  getResultKey(image) {
+    return String(image && (image.id || image.url) || "");
+  },
+
+  findExtractedImageByKey(key) {
+    return (this.data.extractedImages || []).find((image) => this.getResultKey(image) === key) || null;
   },
 
   getResultSourceIndex(image) {
@@ -1838,12 +1913,20 @@ Page({
         }
         wx.hideLoading();
         this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+        this.setData({
+          statusText: "结果下载失败，请重试",
+          statusKind: "error"
+        });
         wx.showToast({ title: "下载失败", icon: "none" });
       },
       fail: (err) => {
         console.error("downloadFile failed", err);
         wx.hideLoading();
         this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+        this.setData({
+          statusText: "结果下载失败，请重试",
+          statusKind: "error"
+        });
         wx.showToast({ title: "下载失败", icon: "none" });
       }
     });
@@ -1876,6 +1959,10 @@ Page({
           return;
         }
         this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+        this.setData({
+          statusText: "保存失败，请重试",
+          statusKind: "error"
+        });
         wx.showToast({ title: "保存失败", icon: "none" });
       }
     });

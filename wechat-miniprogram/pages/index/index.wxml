@@ -41,6 +41,7 @@
       <view wx:else class="placeholder">
         <view class="placeholder-icon">+</view>
         <view>选择或添加最多 9 张图片</view>
+        <view class="placeholder-helper">单次处理的拍立得数量不应超过50张</view>
       </view>
     </view>
 
@@ -104,7 +105,7 @@
         bindtap="saveResult"
         data-index="{{index}}"
       >
-        <image class="result-image" src="{{item.url}}" mode="aspectFit"></image>
+        <image class="result-image" src="{{item.localPath || item.url}}" mode="aspectFit"></image>
         <view class="result-caption">{{item.title}}</view>
       </view>
     </view>
