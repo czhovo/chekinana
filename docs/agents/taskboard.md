@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Add conservative postprocessing modes and a small token-page easter-egg route. Backend must implement the two-step postprocessing described in `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`; Frontend must replace the existing denoise switch with `关闭 / 降噪 / 锐化`, adjust the count-input layout, and route token input `izaya7` to a new blank page titled `izaya7's map`.
+Fix real-device WeChat image selection failures where tapping Add image, opening the album, and selecting an image can still fail before the image is added to the mini program.
 
 Scope constraints:
 
@@ -58,6 +58,7 @@ Backend polaroid size commit: ff9851a
 Reviewer polaroid size approval commit: 85a7ed4
 User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client network socket disconnected before secure TLS connection was established`
 Postprocessing spec: C:\Users\20888\Desktop\cheki\POSTPROCESSING.md
+Real-device image picker failure: 2026-06-21 selecting an album image in real WeChat can fail before the image is added to the mini program; retrying can fail again.
 ```
 
 ## Worktree Assignments
@@ -65,9 +66,9 @@ Postprocessing spec: C:\Users\20888\Desktop\cheki\POSTPROCESSING.md
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `POST-FE-001`: postprocessing selector, count-input layout, and `izaya7` map page |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `POST-BE-001`: LAB denoise and LAB L-channel sharpen postprocessing modes |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `POST-REV-001`: review Frontend/Backend postprocessing and easter-egg changes |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `PICK-FE-001`: real WeChat image picker compatibility fix |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `PICK-BE-001`: backend compatibility audit for picker fix |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `PICK-REV-001`: review picker fix and backend compatibility |
 
 ## Current Tasks
 
@@ -106,6 +107,9 @@ Postprocessing spec: C:\Users\20888\Desktop\cheki\POSTPROCESSING.md
 | POST-FE-001 | Frontend | done | Replace the existing denoise switch with a three-option postprocessing selector, adjust count-input layout, and add the `izaya7` map page route. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, token/auth page files, new map page files, `wechat-miniprogram/app.json`, `docs/agents/handoffs/2026-06-19-frontend-postprocessing-map.md` | Frontend commit `cf36d6c` replaces the denoise switch with `关闭 / 降噪 / 锐化`, defaults to `降噪`, submits `postprocess_mode` plus legacy `denoise` for single and batch `/api/process`, preserves `wb`, rotation, per-image `polaroid_size`, upload retry/cancel, ordering, completed navigation, and failed-source behavior, narrows the count input, and adds exact `izaya7` navigation to a blank page titled `izaya7's map` without storing the value or calling backend auth. Reviewer mock verified selector state, payload fields, route behavior, and normal auth. |
 | POST-BE-001 | Backend | done | Implement conservative postprocessing modes from `POSTPROCESSING.md`. | `backend/app.py`, optional focused scripts/tests, `docs/agents/handoffs/2026-06-19-backend-postprocessing-modes.md` | Backend commit `c3bc24f` accepts `postprocess_mode=off|denoise|sharpen`, preserves absent-field legacy `denoise=0/1`, falls back to `denoise` for missing/invalid modes, performs fixed-border white balance in `linear_rgb`, runs LAB-channel NLM denoise with L `h=3.5` and A/B `h=6.0`, runs sharpen as denoise plus LAB L-channel USM `sigma=1.0`, `amount=0.45`, `threshold=3.0`, and exposes `postprocess_mode` and `white_balance_color_space` metadata without changing RunPod startup, auth, queue/cancel, result routes, mini/wide/auto geometry, contact route, or SAM detection. Reviewer backend scripts passed. |
 | POST-REV-001 | Reviewer | done | Review `POST-FE-001` and `POST-BE-001` after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-19-reviewer-postprocessing-map.md` | Reviewer verdict: approved. Required checks passed: Frontend `node --check`, Backend `python -m py_compile`, `git diff --check`, targeted Frontend payload/auth/map mocks, `scripts/check_postprocessing_modes.py`, and `scripts/check_polaroid_size.py`. Reviewer confirmed selector labels/default/placement, single/batch `postprocess_mode`, count input layout, exact `izaya7` map route, normal auth unchanged, linear-RGB white balance, LAB denoise/sharpen order and parameters, `off` behavior, legacy compatibility, status metadata, mini/wide/auto preservation, and no reviewed diff touching RunPod startup, contact, result, task cancel, or upload-cancel contracts. |
+| PICK-FE-001 | Frontend | pending | Fix real WeChat image picker failures before upload starts. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml` if needed, `docs/agents/handoffs/2026-06-21-frontend-image-picker.md` | Replace or wrap the current image-only `wx.chooseMedia` selection path with the most reliable real-WeChat image picker path, preferably `wx.chooseImage` for image-only selection with a compatibility fallback only when needed. Preserve max 9 images, adding more images after an existing selection, camera/album support, per-image count/rotation/size/postprocess state defaults, completed-state reset behavior, and existing upload/process contracts. Normalize picker results from both APIs into the existing selected-image model. Log the real picker error in console, do not show failure on user cancel, and show a user-friendly failure message for non-cancel picker failures. |
+| PICK-BE-001 | Backend | pending | Confirm the picker fix requires no backend API change. | `docs/agents/handoffs/2026-06-21-backend-image-picker-compat.md` | Backend should audit the current upload/process contract and confirm that image-picker failures happen before `/api/process` and require no backend code changes unless Frontend discovers a concrete upload contract blocker. Handoff must state whether `/api/process`, upload cancellation, task cancellation, RunPod startup, auth, result routes, and postprocessing/size fields remain unchanged. |
+| PICK-REV-001 | Reviewer | pending | Review the image-picker fix after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-image-picker.md` | Reviewer must inspect the Frontend diff and Backend handoff, verify the picker path handles real-WeChat-compatible image selection, cancel vs failure messaging, adding up to 9 images, adding more after existing images, and preservation of batch upload/status/cancel/result behavior. Reviewer should run `node --check` and targeted mocks for `wx.chooseImage`, compatibility fallback, cancel handling, and selected-image state normalization. |
 
 Status values:
 
@@ -121,6 +125,16 @@ paused
 ## API / Configuration Contract
 
 V1 keeps the existing single-image task API.
+
+Image picker contract:
+
+- The failing path occurs before `/api/process`; the mini program has not yet uploaded an image or received a backend `task_id`.
+- Frontend should use the most stable real-WeChat image-only picker path and normalize returned local temp paths into the existing selected-image list.
+- `wx.chooseImage` is acceptable and preferred for this image-only use case if it avoids the real-device `wx.chooseMedia` failure; keep a compatibility fallback only when it improves coverage.
+- User cancel must not be treated as an error toast.
+- Non-cancel picker failures should be logged with the raw error for debugging and shown as a concise user-facing image selection failure.
+- The picker fix must preserve camera and album source support, selecting multiple images up to the remaining 9-image limit, adding images after an existing selection, and all per-image state defaults.
+- No Backend API change is expected unless Frontend discovers a concrete blocker after replacing/wrapping the picker.
 
 Frontend request flow:
 
@@ -286,10 +300,12 @@ Contact email contract:
 | 2026-06-19 | Keep `denoise` as the default postprocessing mode. | This preserves the current default behavior of the existing denoise switch while allowing users to opt out or choose sharpen. |
 | 2026-06-19 | Treat `izaya7` as a frontend-only route trigger, not a backend token. | User requested a small token-page navigation feature; normal authentication must not be loosened. |
 | 2026-06-19 | Perform white balance in linear RGB space. | User added this as a backend postprocessing requirement; white balance remains independently controlled by `wb`. |
+| 2026-06-21 | Prefer a real-WeChat-compatible image-only picker path for Add image. | User testing found `wx.chooseMedia` can fail after album selection before any upload starts; `wx.chooseImage` is older and better aligned with the image-only requirement. |
+| 2026-06-21 | Keep the picker fix Frontend-owned with a Backend compatibility audit. | The failure happens before `/api/process`, so Backend should not change unless Frontend discovers a concrete upload contract blocker. |
 
 ## Open Questions
 
-- None. Postprocessing modes, UI placement, count-input layout, and the `izaya7` route have concrete Frontend, Backend, and Reviewer owners.
+- None. Real-device image picker compatibility has concrete Frontend, Backend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -329,3 +345,5 @@ Contact email contract:
 - User requested postprocessing modes based on `C:\Users\20888\Desktop\cheki\POSTPROCESSING.md`, count-input layout adjustment, and an `izaya7` token-page route.
 - PM assigned `POST-FE-001`, `POST-BE-001`, and `POST-REV-001` in Frontend, Backend, Reviewer order.
 - User added that fixed-border white balance should be performed in linear RGB space; PM folded this into `POST-BE-001` and `POST-REV-001`.
+- User testing in real WeChat found that Add image can open the album and then fail after selecting an image before the mini program adds it.
+- PM assigned `PICK-FE-001`, `PICK-BE-001`, and `PICK-REV-001` in Frontend, Backend, Reviewer order.
