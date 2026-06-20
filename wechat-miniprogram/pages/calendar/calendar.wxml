@@ -1,0 +1,67 @@
+<view class="calendar-page with-bottom-nav">
+  <view class="calendar-card">
+    <view class="calendar-header">
+      <view class="month-button" bindtap="showPreviousMonth" aria-label="上一个月">
+        <text class="month-arrow">‹</text>
+      </view>
+
+      <picker
+        mode="date"
+        fields="month"
+        value="{{pickerValue}}"
+        start="{{minPickerMonth}}"
+        end="{{maxPickerMonth}}"
+        bindchange="onMonthPickerChange"
+      >
+        <view class="month-picker">
+          <text class="month-title">{{monthTitle}}</text>
+          <text class="month-caret">▾</text>
+        </view>
+      </picker>
+
+      <view class="month-button" bindtap="showNextMonth" aria-label="下一个月">
+        <text class="month-arrow">›</text>
+      </view>
+    </view>
+
+    <view class="calendar-divider"></view>
+
+    <view class="weekday-row">
+      <view wx:for="{{weekdays}}" wx:key="*this" class="weekday-cell">{{item}}</view>
+    </view>
+
+    <view
+      class="calendar-grid rows-{{weeks.length}}"
+      bindtouchstart="onCalendarTouchStart"
+      bindtouchend="onCalendarTouchEnd"
+    >
+      <view wx:for="{{weeks}}" wx:for-item="week" wx:key="index" class="calendar-week">
+        <view
+          wx:for="{{week}}"
+          wx:for-item="day"
+          wx:key="dateKey"
+          class="date-cell {{day.isCurrentMonth ? '' : 'is-muted'}} {{day.isSelected ? 'is-selected' : ''}}"
+          data-year="{{day.year}}"
+          data-month="{{day.month}}"
+          data-day="{{day.day}}"
+          bindtap="onDateTap"
+        >
+          <view class="date-number">{{day.day}}</view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="selected-date-panel">
+    <view class="selected-date-header">
+      <view class="selected-date-title">{{selectedDateText}}</view>
+      <view class="selected-date-actions">
+        <view class="date-action-hitbox">
+          <view class="date-action add-action">+</view>
+        </view>
+      </view>
+    </view>
+
+    <view class="selected-records"></view>
+  </view>
+</view>

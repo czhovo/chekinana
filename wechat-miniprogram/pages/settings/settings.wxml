@@ -1,0 +1,8 @@
+<view class="placeholder-page with-bottom-nav">
+  <view class="placeholder-panel">
+    <view class="placeholder-kicker">Chekinana</view>
+    <view class="placeholder-title">Settings</view>
+    <view class="placeholder-text">这里会放偏好设置和账号选项。</view>
+    <button class="settings-action" bindtap="returnToAuth">重新验证 Scanner</button>
+  </view>
+</view>

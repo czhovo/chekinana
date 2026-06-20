@@ -1,0 +1,16 @@
+<view class="bottom-nav" catchtouchmove="noop">
+  <view
+    wx:for="{{items}}"
+    wx:key="id"
+    class="nav-item {{selected === index ? 'is-active' : ''}}"
+    data-index="{{index}}"
+    bindtap="onNavTap"
+  >
+    <image
+      class="nav-icon"
+      src="{{'/assets/nav/' + item.icon + (selected === index ? '-active' : '') + '.png'}}"
+      mode="aspectFit"
+    ></image>
+    <view class="nav-label">{{item.label}}</view>
+  </view>
+</view>

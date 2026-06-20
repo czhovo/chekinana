@@ -1,4 +1,4 @@
-const { AUTH_STORAGE_KEY, getApiBaseUrl, isLocalPreviewToken } = require("../../utils/config");
+const { AUTH_STORAGE_KEY, SCANNER_AUTH_PASSED_KEY, getApiBaseUrl, isLocalPreviewToken } = require("../../utils/config");
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_COUNT = 180;
 const MAX_SELECTED_IMAGES = 9;
@@ -53,12 +53,20 @@ Page({
   },
 
   onShow() {
+    this.setTabBarSelected(0);
     const token = this.getAuthToken();
     if (!token) {
+      wx.removeStorageSync(SCANNER_AUTH_PASSED_KEY);
       wx.redirectTo({ url: "/pages/auth/auth" });
       return;
     }
     this.verifyCachedToken(token);
+  },
+
+  setTabBarSelected(selected) {
+    if (typeof this.getTabBar !== "function") return;
+    const tabBar = this.getTabBar();
+    if (tabBar) tabBar.setData({ selected });
   },
 
   getAuthToken() {
@@ -168,6 +176,7 @@ Page({
 
   clearAuthAndRedirect() {
     wx.removeStorageSync(AUTH_STORAGE_KEY);
+    wx.removeStorageSync(SCANNER_AUTH_PASSED_KEY);
     this.clearPollTimer();
     this.downloadingImageUrls = {};
     this.setData({
@@ -421,6 +430,7 @@ Page({
 
     const token = this.getAuthToken();
     if (!token) {
+      wx.removeStorageSync(SCANNER_AUTH_PASSED_KEY);
       wx.redirectTo({ url: "/pages/auth/auth" });
       return;
     }
