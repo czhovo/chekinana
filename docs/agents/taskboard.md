@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Fix real-device WeChat image selection failures before upload starts, and make all agents read the main-sync briefing before touching recently updated mini-program navigation/map/calendar code.
+Fix mini-program lifecycle and download state loss: returning from background must not wipe selected/extracted content through auth-page redirects, interrupted downloads must surface partial failures, and New Task must preserve any source image whose extracted polaroids were not fully saved.
 
 Scope constraints:
 
@@ -59,6 +59,9 @@ Reviewer polaroid size approval commit: 85a7ed4
 User-reported upload error screenshot: 2026-06-18 `uploadFile:fail Error: Client network socket disconnected before secure TLS connection was established`
 Postprocessing spec: C:\Users\20888\Desktop\cheki\POSTPROCESSING.md
 Real-device image picker failure: 2026-06-21 selecting an album image in real WeChat can fail before the image is added to the mini program; retrying can fail again.
+Frontend image picker fix commit: 506cf46
+Reviewer image picker approval commit: fabafd7
+User-reported lifecycle/download issue: 2026-06-21 switching WeChat or the mini program to background can return to auth and lose extraction content; switching during download can silently lose some images.
 ```
 
 ## Worktree Assignments
@@ -66,9 +69,9 @@ Real-device image picker failure: 2026-06-21 selecting an album image in real We
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `PICK-FE-001`: real WeChat image picker compatibility fix |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No picker implementation task; read the main-sync briefing before any future backend-adjacent review |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `PICK-REV-001`: review picker fix and main-sync regression risk |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `STATE-FE-001`: lifecycle state preservation and download failure tracking |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No lifecycle/download implementation task unless PM reopens backend scope |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `STATE-REV-001`: review lifecycle/download state fix |
 
 ## Current Tasks
 
@@ -108,8 +111,10 @@ Real-device image picker failure: 2026-06-21 selecting an album image in real We
 | POST-BE-001 | Backend | done | Implement conservative postprocessing modes from `POSTPROCESSING.md`. | `backend/app.py`, optional focused scripts/tests, `docs/agents/handoffs/2026-06-19-backend-postprocessing-modes.md` | Backend commit `c3bc24f` accepts `postprocess_mode=off|denoise|sharpen`, preserves absent-field legacy `denoise=0/1`, falls back to `denoise` for missing/invalid modes, performs fixed-border white balance in `linear_rgb`, runs LAB-channel NLM denoise with L `h=3.5` and A/B `h=6.0`, runs sharpen as denoise plus LAB L-channel USM `sigma=1.0`, `amount=0.45`, `threshold=3.0`, and exposes `postprocess_mode` and `white_balance_color_space` metadata without changing RunPod startup, auth, queue/cancel, result routes, mini/wide/auto geometry, contact route, or SAM detection. Reviewer backend scripts passed. |
 | POST-REV-001 | Reviewer | done | Review `POST-FE-001` and `POST-BE-001` after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-19-reviewer-postprocessing-map.md` | Reviewer verdict: approved. Required checks passed: Frontend `node --check`, Backend `python -m py_compile`, `git diff --check`, targeted Frontend payload/auth/map mocks, `scripts/check_postprocessing_modes.py`, and `scripts/check_polaroid_size.py`. Reviewer confirmed selector labels/default/placement, single/batch `postprocess_mode`, count input layout, exact `izaya7` map route, normal auth unchanged, linear-RGB white balance, LAB denoise/sharpen order and parameters, `off` behavior, legacy compatibility, status metadata, mini/wide/auto preservation, and no reviewed diff touching RunPod startup, contact, result, task cancel, or upload-cancel contracts. |
 | MAIN-SYNC-001 | PM | done | Summarize the large `origin/main` update that was merged into every agent worktree. | `docs/agents/handoffs/2026-06-21-main-sync-briefing.md` | PM documented the six commits from `5e17549` to `d914343`, the new navigation/calendar/izaya7-map/page-placeholder structure, per-agent impact notes, and risks for future Frontend/Backend/Reviewer work. All agents must read this briefing before working in files touched by the main sync. |
-| PICK-FE-001 | Frontend | pending | Fix real WeChat image picker failures before upload starts. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml` if needed, `docs/agents/handoffs/2026-06-21-frontend-image-picker.md` | Replace or wrap the current image-only `wx.chooseMedia` selection path with the most reliable real-WeChat image picker path, preferably `wx.chooseImage` for image-only selection with a compatibility fallback only when needed. Preserve max 9 images, adding more images after an existing selection, camera/album support, per-image count/rotation/size/postprocess state defaults, completed-state reset behavior, and existing upload/process contracts. Normalize picker results from both APIs into the existing selected-image model. Log the real picker error in console, do not show failure on user cancel, and show a user-friendly failure message for non-cancel picker failures. |
-| PICK-REV-001 | Reviewer | pending | Review the image-picker fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-image-picker.md` | Reviewer must inspect the Frontend diff and handoff, verify the picker path handles real-WeChat-compatible image selection, cancel vs failure messaging, adding up to 9 images, adding more after existing images, and preservation of batch upload/status/cancel/result behavior. Reviewer should run `node --check` and targeted mocks for `wx.chooseImage`, compatibility fallback if present, cancel handling, and selected-image state normalization. Reviewer should also read `docs/agents/handoffs/2026-06-21-main-sync-briefing.md` before reviewing files affected by the main sync. |
+| PICK-FE-001 | Frontend | done | Fix real WeChat image picker failures before upload starts. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-21-frontend-image-picker.md` | Frontend commit `506cf46` hardens the picker path by preferring `wx.chooseImage`, retaining `wx.chooseMedia` only as a compatibility fallback, normalizing returned temp paths, treating user cancel as a no-op, logging non-cancel picker failures, preserving add-more behavior and max 9 images, and leaving upload/backend/status contracts unchanged. |
+| PICK-REV-001 | Reviewer | done | Review the image-picker fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-image-picker.md` | Reviewer commit `fabafd7` verdict: approved. Reviewer confirmed the `wx.chooseImage` path, fallback behavior, cancel/failure handling, result normalization, add-more and 9-image limit behavior, per-image defaults, main-sync route preservation, and no changes to `/api/process`, upload/cancel/status/result, `postprocess_mode`, `polaroid_size`, or rotation contracts. |
+| STATE-FE-001 | Frontend | pending | Preserve extraction state across background/auth lifecycle and track download/save failures. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml` if UI state is needed, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-21-frontend-lifecycle-download-state.md` | Prevent transient app/background return or token verification request failures from clearing selected images, extracted results, failed-image markers, completed status/actions, or current preview. If auth redirection is truly required, preserve restorable scanner state and restore it after successful auth. Track per-result album-save success/failure for both single-result save and all-download flows; if switching apps interrupts download/save, show a visible partial-failure result instead of silently losing images. `新任务` must keep any source image and all extracted results from that source when none of its polaroids were saved or when any save/download failed or remains unknown; it may clear only source-image groups whose extracted results all saved successfully and that are not failed source images. Preserve batch ordering, source-image indexes, existing upload/process/status/cancel contracts, picker behavior, `postprocess_mode`, `polaroid_size`, rotation, and main-sync tab/calendar/map routes. |
+| STATE-REV-001 | Reviewer | pending | Review `STATE-FE-001` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-lifecycle-download-state.md` | Reviewer must inspect the Frontend diff and handoff, confirm no Backend/API scope was added, and verify lifecycle/auth state preservation, background-return behavior, visible download/save partial failures, per-result save tracking, `新任务` preservation for unsaved/failed/unknown source-image groups, and no regressions to image picker, batch processing, result display, upload cancel/task cancel, all-download success path, auth token flow, custom tab bar, calendar, and `izaya7-map`. Reviewer should run `node --check`, `git diff --check`, and targeted mocks for auth verify failure on return, successful auth restore, interrupted all-download, partial save failure, and New Task cleanup rules. |
 
 Status values:
 
@@ -135,6 +140,19 @@ Image picker contract:
 - Non-cancel picker failures should be logged with the raw error for debugging and shown as a concise user-facing image selection failure.
 - The picker fix must preserve camera and album source support, selecting multiple images up to the remaining 9-image limit, adding images after an existing selection, and all per-image state defaults.
 - No Backend API change is expected; do not involve Backend for this picker fix unless Frontend later finds a concrete upload contract blocker and PM reassigns scope.
+
+Lifecycle and download-state contract:
+
+- Returning from background, switching apps, or resuming the mini program must not clear scanner state merely because cached-token verification is in flight or a verify request fails transiently.
+- Scanner state includes selected source images, current image index, rotated preview state when available, extracted result list, failed source image indexes, completed/partial status text, completed actions, and download/save status for each result.
+- A confirmed invalid token may still require auth, but the frontend should preserve restorable scanner state and restore it after successful auth where practical.
+- Network failures during cached-token verification should be treated as recoverable and must not immediately wipe extraction content.
+- Download/save flows must track per-result status at least as `pending/unknown`, `saved`, and `failed` or equivalent internal states.
+- All-download must show a visible completion/partial-failure message when one or more results fail to download or save, including failures caused by backgrounding or app switching.
+- Single-result save failures should update the same per-result tracking used by all-download, so the later New Task decision is consistent.
+- `新任务` after processing must preserve a source image and all extracted results from that source if that source has no saved results, any failed result, or any unknown/unsaved result.
+- `新任务` may clear only source-image groups whose extracted polaroids all saved successfully and whose source image is not otherwise marked failed.
+- This task does not change Backend result URLs or add a new result bundle/zip API.
 
 Frontend request flow:
 
@@ -303,10 +321,13 @@ Contact email contract:
 | 2026-06-21 | Prefer a real-WeChat-compatible image-only picker path for Add image. | User testing found `wx.chooseMedia` can fail after album selection before any upload starts; `wx.chooseImage` is older and better aligned with the image-only requirement. |
 | 2026-06-21 | Keep the picker fix Frontend-only with Reviewer verification. | The failure happens before `/api/process`, so Backend should not be assigned unless Frontend later finds a concrete upload contract blocker and PM reopens scope. |
 | 2026-06-21 | Provide a shared main-sync briefing for all agents. | Every worktree absorbed a large `origin/main` update with navigation, calendar, and map changes; agents need the same context before editing touched files. |
+| 2026-06-21 | Keep lifecycle/download state fixes Frontend-only. | The reported issues are mini-program lifecycle, cached-auth verification handling, download/save callbacks, and New Task cleanup logic; existing Backend result APIs should remain sufficient. |
+| 2026-06-21 | Treat downloaded-to-temp-file and saved-to-album as different states. | A result with `localPath` may still not be saved to the user's album, so New Task preservation must be based on album-save success, not merely download success. |
+| 2026-06-21 | Preserve source-image groups unless all extracted results for that source saved successfully. | User explicitly requires images to remain when all polaroids were not downloaded or any download/save failed. |
 
 ## Open Questions
 
-- None. Real-device image picker compatibility has concrete Frontend, Backend, and Reviewer owners.
+- None. Lifecycle state preservation and download failure handling have concrete Frontend and Reviewer owners; Backend is out of scope unless a concrete API blocker appears.
 
 ## Completed Work Summary
 
@@ -349,3 +370,7 @@ Contact email contract:
 - User testing in real WeChat found that Add image can open the album and then fail after selecting an image before the mini program adds it.
 - PM assigned `PICK-FE-001` and `PICK-REV-001`; Backend has no picker task because the failure occurs before upload/backend APIs.
 - PM wrote `docs/agents/handoffs/2026-06-21-main-sync-briefing.md` so Frontend, Backend, and Reviewer understand the large `origin/main` navigation/calendar/map update now present in every worktree.
+- Reviewer approved `PICK-REV-001` in `fabafd7`; Frontend picker fix commit is `506cf46`.
+- User testing found two lifecycle/download issues: returning from background can redirect to auth and lose extraction content, and backgrounding during download can silently lose some saved images.
+- User added a New Task preservation rule: if a source image's extracted polaroids were all not downloaded/saved or any failed, keep that source image and its extracted results.
+- PM assigned `STATE-FE-001` and `STATE-REV-001`; Backend has no lifecycle/download task unless PM reopens API scope.
