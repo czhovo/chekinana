@@ -82,7 +82,39 @@
   transform-origin: center;
 }
 
+.postprocess-control {
+  display: flex;
+  height: 48rpx;
+  border: 2rpx solid rgba(37, 99, 235, 0.35);
+  border-radius: 8rpx;
+  background: rgba(255, 255, 255, 0.94);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.postprocess-control.is-disabled {
+  opacity: 0.56;
+}
+
+.postprocess-option {
+  min-width: 70rpx;
+  height: 44rpx;
+  padding: 0 10rpx;
+  color: #4b5563;
+  font-size: 22rpx;
+  line-height: 44rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.postprocess-option.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .image-frame {
+  position: relative;
   width: 100%;
   height: 520rpx;
   border: 2rpx dashed #d6d9df;
@@ -105,6 +137,108 @@
   height: 100%;
 }
 
+.preview-image,
+.selected-image-thumb {
+  transform-origin: center center;
+}
+
+.preview-image.rotation-90,
+.preview-image.rotation-270 {
+  width: 520rpx;
+  height: calc(100vw - 56rpx);
+}
+
+.preview-image.rotation-90,
+.selected-image-thumb.rotation-90 {
+  transform: rotate(-90deg);
+}
+
+.preview-image.rotation-180,
+.selected-image-thumb.rotation-180 {
+  transform: rotate(-180deg);
+}
+
+.preview-image.rotation-270,
+.selected-image-thumb.rotation-270 {
+  transform: rotate(-270deg);
+}
+
+.preview-nav {
+  position: absolute;
+  top: 50%;
+  width: 58rpx;
+  height: 88rpx;
+  margin-top: -44rpx;
+  border-radius: 8rpx;
+  background: rgba(17, 24, 39, 0.54);
+  color: #ffffff;
+  font-size: 48rpx;
+  line-height: 84rpx;
+  text-align: center;
+  z-index: 2;
+  box-sizing: border-box;
+}
+
+.preview-nav.left {
+  left: 16rpx;
+}
+
+.preview-nav.right {
+  right: 16rpx;
+}
+
+.preview-index-badge {
+  position: absolute;
+  right: 18rpx;
+  bottom: 18rpx;
+  min-width: 72rpx;
+  height: 40rpx;
+  padding: 0 14rpx;
+  border-radius: 999rpx;
+  background: rgba(17, 24, 39, 0.64);
+  color: #ffffff;
+  font-size: 22rpx;
+  line-height: 40rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.size-selector {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  z-index: 3;
+  display: flex;
+  height: 48rpx;
+  border: 2rpx solid rgba(37, 99, 235, 0.35);
+  border-radius: 8rpx;
+  background: rgba(255, 255, 255, 0.94);
+  overflow: hidden;
+  box-sizing: border-box;
+  box-shadow: 0 4rpx 12rpx rgba(17, 24, 39, 0.12);
+}
+
+.size-selector.is-disabled {
+  opacity: 0.56;
+}
+
+.size-option {
+  min-width: 78rpx;
+  height: 44rpx;
+  padding: 0 12rpx;
+  color: #4b5563;
+  font-size: 22rpx;
+  line-height: 44rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.size-option.active {
+  background: #2563eb;
+  color: #ffffff;
+  font-weight: 600;
+}
+
 .placeholder,
 .empty-results {
   color: #8a9099;
@@ -123,6 +257,57 @@
   line-height: 82rpx;
 }
 
+.selected-image-strip {
+  width: 100%;
+  margin-top: 18rpx;
+  white-space: normal;
+}
+
+.selected-image-list {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  align-items: center;
+  gap: 8rpx;
+  width: 100%;
+}
+
+.selected-image-item {
+  position: relative;
+  width: 100%;
+  height: 70rpx;
+  min-width: 0;
+  border-radius: 8rpx;
+  border: 2rpx solid #e5e7eb;
+  overflow: hidden;
+  background: #f3f4f6;
+  box-sizing: border-box;
+}
+
+.selected-image-item.active {
+  border-color: #2563eb;
+}
+
+.selected-image-thumb {
+  width: 100%;
+  height: 100%;
+}
+
+.selected-image-index {
+  position: absolute;
+  left: 6rpx;
+  top: 6rpx;
+  min-width: 28rpx;
+  height: 28rpx;
+  padding: 0 6rpx;
+  border-radius: 999rpx;
+  background: rgba(17, 24, 39, 0.72);
+  color: #ffffff;
+  font-size: 20rpx;
+  line-height: 28rpx;
+  text-align: center;
+  box-sizing: border-box;
+}
+
 .toolbar {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -130,26 +315,58 @@
   margin: 22rpx 0 18rpx;
 }
 
-.tool-button {
+.toolbar .tool-button,
+.toolbar button.tool-button {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: 92rpx;
+  margin: 0;
+  padding: 0 12rpx;
   border-radius: 12rpx;
   background: #ffffff;
   color: #1f2937;
   border: 2rpx solid #d9dde5;
   font-size: 30rpx;
   font-weight: 600;
+  line-height: 1.2;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-sizing: border-box;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.tool-button.primary {
+.toolbar .tool-button::after,
+.toolbar button.tool-button::after {
+  display: none;
+  border: 0;
+}
+
+.toolbar .tool-button.primary,
+.toolbar button.tool-button.primary {
   background: #2563eb;
   color: #ffffff;
   border-color: #2563eb;
 }
 
-.tool-button[disabled] {
+.toolbar .tool-button.interrupt,
+.toolbar button.tool-button.interrupt {
+  background: #fff7ed;
+  color: #c2410c;
+  border-color: #fed7aa;
+}
+
+.toolbar .tool-button.danger,
+.toolbar button.tool-button.danger {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fecaca;
+}
+
+.toolbar .tool-button[disabled],
+.toolbar button.tool-button[disabled] {
   color: #a5abb5;
   background: #eef0f4;
   border-color: #eef0f4;
@@ -218,6 +435,7 @@
   border: 2rpx solid #d9dde5;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16rpx;
   box-sizing: border-box;
 }
@@ -231,7 +449,8 @@
 }
 
 .count-input {
-  flex: 1 0 170rpx;
+  flex: 0 0 170rpx;
+  width: 170rpx;
   min-width: 170rpx;
   height: 58rpx;
   padding: 0 16rpx;
@@ -300,4 +519,152 @@
   font-size: 26rpx;
   text-align: center;
   text-decoration: underline;
+}
+
+.contact-dialog-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  padding: 40rpx 28rpx;
+  background: rgba(17, 24, 39, 0.48);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.contact-dialog {
+  width: 100%;
+  max-width: 680rpx;
+  padding: 28rpx;
+  border-radius: 12rpx;
+  background: #ffffff;
+  border: 2rpx solid #e5e7eb;
+  box-sizing: border-box;
+}
+
+.contact-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20rpx;
+  margin-bottom: 24rpx;
+}
+
+.contact-dialog-title {
+  color: #202124;
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.contact-dialog-subtitle {
+  margin-top: 6rpx;
+  color: #6b7280;
+  font-size: 24rpx;
+  line-height: 1.4;
+}
+
+.contact-dialog-close {
+  width: 52rpx;
+  height: 52rpx;
+  min-width: 52rpx;
+  color: #6b7280;
+  font-size: 44rpx;
+  line-height: 46rpx;
+  text-align: center;
+}
+
+.contact-field {
+  margin-bottom: 20rpx;
+}
+
+.contact-label {
+  margin-bottom: 10rpx;
+  color: #374151;
+  font-size: 26rpx;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.contact-label.optional {
+  color: #4b5563;
+  font-weight: 500;
+}
+
+.contact-message-input,
+.contact-info-input {
+  width: 100%;
+  padding: 18rpx 20rpx;
+  border: 2rpx solid #d9dde5;
+  border-radius: 12rpx;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 28rpx;
+  line-height: 1.45;
+  box-sizing: border-box;
+}
+
+.contact-message-input {
+  height: 220rpx;
+}
+
+.contact-info-input {
+  height: 76rpx;
+}
+
+.contact-dialog-actions {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 18rpx;
+  margin-top: 26rpx;
+  box-sizing: border-box;
+}
+
+.contact-dialog-actions .contact-dialog-button,
+.contact-dialog-actions button.contact-dialog-button {
+  flex: 1 1 0%;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 82rpx;
+  margin: 0;
+  padding: 0;
+  border-radius: 12rpx;
+  background: #ffffff;
+  color: #1f2937;
+  border: 2rpx solid #d9dde5;
+  font-size: 28rpx;
+  font-weight: 600;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.contact-dialog-actions .contact-dialog-button::after,
+.contact-dialog-actions button.contact-dialog-button::after {
+  display: none;
+  border: 0;
+}
+
+.contact-dialog-actions .contact-dialog-button.primary,
+.contact-dialog-actions button.contact-dialog-button.primary {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.contact-dialog-actions .contact-dialog-button[disabled],
+.contact-dialog-actions button.contact-dialog-button[disabled] {
+  color: #a5abb5;
+  background: #eef0f4;
+  border-color: #eef0f4;
 }

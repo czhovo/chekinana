@@ -30,6 +30,8 @@ MAX_DIMENSIONS = CONFIG.get("max_dimensions", 4096)
 MAX_IMAGE_PIXELS = MAX_DIMENSIONS * MAX_DIMENSIONS
 RATE_LIMIT = CONFIG.get("rate_limit_per_minute", 10)
 TASK_TTL = CONFIG.get("task_result_ttl_seconds", 600)
+MAX_CONTACT_MESSAGE_CHARS = 1000
+MAX_CONTACT_INFO_CHARS = 200
 RUNPOD_POD_ID = os.environ.get("RUNPOD_POD_ID", "").strip()
 ACCESS_TOKEN = os.environ.get("CHEKINANA_ACCESS_TOKEN") or RUNPOD_POD_ID or secrets.token_urlsafe(24)
 if os.environ.get("CHEKINANA_ACCESS_TOKEN"):
@@ -193,7 +195,7 @@ def is_token_valid(token: str) -> bool:
     return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
 
 
-def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
+def send_contact_email(message_text: str, contact_info: str, client_ip: str) -> tuple[bool, str]:
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
     try:
         smtp_port = int(os.environ.get("SMTP_PORT", "587"))
@@ -212,10 +214,12 @@ def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
     msg["Subject"] = "Chekinana 联系作者"
     msg["From"] = smtp_from
     msg["To"] = CONTACT_EMAIL_TO
+    contact_line = f"Contact: {contact_info}\n" if contact_info else ""
     msg.set_content(
         "用户在 Chekinana 小程序提交了联系内容。\n\n"
         f"IP: {client_ip}\n"
-        f"Time: {datetime.now().isoformat()}\n\n"
+        f"Time: {datetime.now().isoformat()}\n"
+        f"{contact_line}\n"
         f"{message_text}"
     )
 
@@ -224,6 +228,11 @@ def send_contact_email(message_text: str, client_ip: str) -> tuple[bool, str]:
             server.starttls()
             server.login(smtp_username, smtp_password)
             server.send_message(msg)
+        print(
+            f"[contact] email sent time={datetime.now().isoformat()} "
+            f"to={CONTACT_EMAIL_TO} ip={client_ip} has_contact={bool(contact_info)}",
+            flush=True,
+        )
         return True, ""
     except Exception as exc:
         print(f"💥 contact email failed: {type(exc).__name__}: {exc}", flush=True)
@@ -271,14 +280,60 @@ task_lock = threading.Lock()
 task_queue: list[str] = []
 queue_lock = threading.Lock()
 queue_event = threading.Event()
+CANCELED_STATUS = "canceled"
+active_task_id = ""
+active_task_lock = threading.Lock()
+canceled_upload_attempts: dict[str, float] = {}
+canceled_upload_lock = threading.Lock()
+MAX_UPLOAD_ATTEMPT_ID_CHARS = 128
 
-BASE_POLAROID_W, BASE_POLAROID_H = 800, 1272
-POLAROID_W, POLAROID_H = 1600, 2544
-POLAROID_SCALE = min(POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H)
+POLAROID_SIZE_AUTO = "auto"
+POLAROID_SIZE_MINI = "mini"
+POLAROID_SIZE_WIDE = "wide"
+POLAROID_SIZE_VALUES = {POLAROID_SIZE_AUTO, POLAROID_SIZE_MINI, POLAROID_SIZE_WIDE}
+POLAROID_GEOMETRIES = {
+    POLAROID_SIZE_MINI: {
+        "base_width": 800,
+        "base_height": 1272,
+        "width": 1600,
+        "height": 2544,
+        "image_area_vertices": np.array([[110,200],[1490,200],[1490,2044],[110,2044]], dtype=np.int32),
+    },
+    POLAROID_SIZE_WIDE: {
+        "base_width": 1600,
+        "base_height": 1272,
+        "width": 3200,
+        "height": 2544,
+        "image_area_vertices": np.array([[110,200],[3090,200],[3090,2044],[110,2044]], dtype=np.int32),
+    },
+}
+for _geometry in POLAROID_GEOMETRIES.values():
+    _geometry["scale"] = min(
+        _geometry["width"] / _geometry["base_width"],
+        _geometry["height"] / _geometry["base_height"],
+    )
+
+BASE_POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_width"]
+BASE_POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_height"]
+POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["width"]
+POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["height"]
+POLAROID_SCALE = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["scale"]
 BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32)
-IMAGE_AREA_VERTICES = np.rint(BASE_IMAGE_AREA_VERTICES * [POLAROID_W / BASE_POLAROID_W, POLAROID_H / BASE_POLAROID_H]).astype(np.int32)
+IMAGE_AREA_VERTICES = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["image_area_vertices"]
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
+POSTPROCESS_MODE_OFF = "off"
+POSTPROCESS_MODE_DENOISE = "denoise"
+POSTPROCESS_MODE_SHARPEN = "sharpen"
+POSTPROCESS_MODE_VALUES = {POSTPROCESS_MODE_OFF, POSTPROCESS_MODE_DENOISE, POSTPROCESS_MODE_SHARPEN}
+WHITE_BALANCE_COLOR_SPACE = "linear_rgb"
+LAB_DENOISE_L_H = 3.5
+LAB_DENOISE_AB_H = 6.0
+LAB_DENOISE_TEMPLATE_WINDOW = 7
+LAB_DENOISE_SEARCH_WINDOW = 21
+LAB_SHARPEN_SIGMA = 1.0
+LAB_SHARPEN_AMOUNT = 0.45
+LAB_SHARPEN_THRESHOLD = 3.0
 
 
 def img_to_png_bytes(img_np: np.ndarray) -> bytes:
@@ -319,6 +374,54 @@ def parse_rotation_degrees(value) -> int:
     return degrees % 360
 
 
+def parse_polaroid_size(value) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in POLAROID_SIZE_VALUES:
+        return normalized
+    return POLAROID_SIZE_MINI
+
+
+def parse_postprocess_mode(value, legacy_denoise=True) -> str:
+    if value is not None:
+        normalized = str(value).strip().lower()
+        if normalized in POSTPROCESS_MODE_VALUES:
+            return normalized
+        return POSTPROCESS_MODE_DENOISE
+    return POSTPROCESS_MODE_DENOISE if legacy_denoise else POSTPROCESS_MODE_OFF
+
+
+def get_polaroid_geometry(polaroid_size: str) -> dict:
+    return POLAROID_GEOMETRIES.get(polaroid_size, POLAROID_GEOMETRIES[POLAROID_SIZE_MINI])
+
+
+def quad_horizontal_vertical_ratio(vertices: np.ndarray) -> float:
+    verts = np.asarray(vertices, dtype=np.float32).reshape(4, 2)
+    horizontal_lengths = [
+        float(np.linalg.norm(verts[1] - verts[0])),
+        float(np.linalg.norm(verts[2] - verts[3])),
+    ]
+    vertical_lengths = [
+        float(np.linalg.norm(verts[2] - verts[1])),
+        float(np.linalg.norm(verts[3] - verts[0])),
+    ]
+    vertical_avg = float(np.mean(vertical_lengths))
+    if vertical_avg <= 0:
+        return float("inf")
+    return float(np.mean(horizontal_lengths) / vertical_avg)
+
+
+def resolve_polaroid_size(requested_size: str, vertices: np.ndarray) -> str:
+    if requested_size == POLAROID_SIZE_AUTO:
+        return (
+            POLAROID_SIZE_WIDE
+            if quad_horizontal_vertical_ratio(vertices) > 1
+            else POLAROID_SIZE_MINI
+        )
+    if requested_size == POLAROID_SIZE_WIDE:
+        return POLAROID_SIZE_WIDE
+    return POLAROID_SIZE_MINI
+
+
 def quad_area(vertices: np.ndarray) -> float:
     return float(abs(cv2.contourArea(np.asarray(vertices, dtype=np.float32))))
 
@@ -342,71 +445,155 @@ def build_detection_candidates(masks: list[np.ndarray]) -> list[dict]:
     return candidates
 
 
-def apply_fixed_border_white_balance(image: np.ndarray) -> tuple[np.ndarray, dict]:
+def srgb_u8_to_linear_rgb(image: np.ndarray) -> np.ndarray:
+    srgb = image.astype(np.float32) / 255.0
+    return np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+
+
+def srgb_channel_to_linear(value: float) -> float:
+    value = float(np.clip(value, 0.0, 1.0))
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
+def linear_rgb_to_srgb_u8(linear: np.ndarray) -> np.ndarray:
+    linear = np.clip(linear, 0.0, 1.0)
+    srgb = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * (linear ** (1.0 / 2.4)) - 0.055)
+    return np.clip(np.rint(srgb * 255.0), 0, 255).astype(np.uint8)
+
+
+def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = None) -> tuple[np.ndarray, dict]:
     """White-balance a rectified polaroid using its fixed border area."""
+    geometry = geometry or get_polaroid_geometry(POLAROID_SIZE_MINI)
+    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+        return image, {"applied": False, "reason": "unsupported_image_shape", "color_space": WHITE_BALANCE_COLOR_SPACE}
     h, w = image.shape[:2]
     border_mask = np.ones((h, w), dtype=np.uint8)
-    cv2.fillPoly(border_mask, [IMAGE_AREA_VERTICES], 0)
+    cv2.fillPoly(border_mask, [geometry["image_area_vertices"]], 0)
     border_mask = border_mask.astype(bool)
 
-    is_bright = np.all(image > 170, axis=2)
-    is_neutral = np.std(image.astype(np.float32), axis=2) < 25
+    linear = srgb_u8_to_linear_rgb(image)
+    bright_threshold = srgb_channel_to_linear(170.0 / 255.0)
+    neutral_threshold = 25.0 / 255.0
+    is_bright = np.all(linear > bright_threshold, axis=2)
+    is_neutral = np.std(linear, axis=2) < neutral_threshold
     is_white = is_bright & is_neutral & border_mask
 
     blocks = []
-    block_size = max(1, int(round(32 * POLAROID_SCALE)))
-    step = max(1, int(round(16 * POLAROID_SCALE)))
+    block_size = max(1, int(round(32 * geometry["scale"])))
+    step = max(1, int(round(16 * geometry["scale"])))
     for y in range(0, h - block_size, step):
         for x in range(0, w - block_size, step):
             block = is_white[y:y+block_size, x:x+block_size]
             if np.sum(block) / (block_size * block_size) > 0.8:
-                pixels = image[y:y+block_size, x:x+block_size][block]
+                pixels = linear[y:y+block_size, x:x+block_size][block]
                 blocks.append({
                     "mean": pixels.mean(axis=0),
                     "var": pixels.var(axis=0).mean(),
                 })
 
     if not blocks:
-        return image, {"applied": False, "reason": "no_white_reference_blocks"}
+        return image, {"applied": False, "reason": "no_white_reference_blocks", "color_space": WHITE_BALANCE_COLOR_SPACE}
 
     blocks.sort(key=lambda b: b["var"])
     best = blocks[:10]
     ref_white = np.mean([b["mean"] for b in best], axis=0)
-    target = 240.0
+    target = srgb_channel_to_linear(240.0 / 255.0)
     gains = np.array([
-        target / max(ref_white[0], 1),
-        target / max(ref_white[1], 1),
-        target / max(ref_white[2], 1),
-    ])
-    balanced = np.clip(image.astype(np.float32) * gains, 0, 255).astype(np.uint8)
+        target / max(ref_white[0], 1e-6),
+        target / max(ref_white[1], 1e-6),
+        target / max(ref_white[2], 1e-6),
+    ], dtype=np.float32)
+    balanced = linear_rgb_to_srgb_u8(linear * gains)
     return balanced, {
         "applied": True,
+        "color_space": WHITE_BALANCE_COLOR_SPACE,
         "blocks": len(blocks),
         "used_blocks": len(best),
-        "ref_white": [round(float(v), 2) for v in ref_white],
+        "ref_white": [round(float(v), 5) for v in ref_white],
         "gains": [round(float(v), 4) for v in gains],
     }
 
 
 def denoise_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Reduce scan/print noise while preserving signatures and photo edges."""
+    """Reduce scan/print noise with conservative LAB-channel NLM."""
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
         return image, {"applied": False, "reason": "unsupported_image_shape"}
 
-    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    denoised = cv2.fastNlMeansDenoisingColored(
-        bgr,
+    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    denoised_l = cv2.fastNlMeansDenoising(
+        l_channel,
         None,
-        h=3,
-        hColor=3,
-        templateWindowSize=7,
-        searchWindowSize=21,
+        h=LAB_DENOISE_L_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
     )
-    rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
+    denoised_a = cv2.fastNlMeansDenoising(
+        a_channel,
+        None,
+        h=LAB_DENOISE_AB_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
+    )
+    denoised_b = cv2.fastNlMeansDenoising(
+        b_channel,
+        None,
+        h=LAB_DENOISE_AB_H,
+        templateWindowSize=LAB_DENOISE_TEMPLATE_WINDOW,
+        searchWindowSize=LAB_DENOISE_SEARCH_WINDOW,
+    )
+    denoised_lab = cv2.merge([denoised_l, denoised_a, denoised_b])
+    rgb = cv2.cvtColor(denoised_lab, cv2.COLOR_LAB2RGB)
+    return rgb, {
+        "applied": True,
+        "method": "lab_fastNlMeansDenoising",
+        "h": LAB_DENOISE_L_H,
+        "l_h": LAB_DENOISE_L_H,
+        "ab_h": LAB_DENOISE_AB_H,
+        "templateWindowSize": LAB_DENOISE_TEMPLATE_WINDOW,
+        "searchWindowSize": LAB_DENOISE_SEARCH_WINDOW,
+    }
 
-    # Blend back a little original detail so marker strokes and facial edges do not get waxy.
-    blended = cv2.addWeighted(rgb, 0.65, image, 0.35, 0)
-    return blended, {"applied": True, "method": "fastNlMeansDenoisingColored", "h": 3, "hColor": 3}
+
+def sharpen_extracted_polaroid(image: np.ndarray) -> tuple[np.ndarray, dict]:
+    """Apply reduced USM low sharpen on the LAB L channel only."""
+    if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+        return image, {"applied": False, "reason": "unsupported_image_shape"}
+
+    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    l_float = l_channel.astype(np.float32)
+    blurred = cv2.GaussianBlur(l_float, (0, 0), sigmaX=LAB_SHARPEN_SIGMA, sigmaY=LAB_SHARPEN_SIGMA)
+    detail = l_float - blurred
+    sharpened_l = l_float.copy()
+    edge_mask = np.abs(detail) >= LAB_SHARPEN_THRESHOLD
+    sharpened_l[edge_mask] = l_float[edge_mask] + LAB_SHARPEN_AMOUNT * detail[edge_mask]
+    sharpened_l = np.clip(np.rint(sharpened_l), 0, 255).astype(np.uint8)
+    sharpened_lab = cv2.merge([sharpened_l, a_channel, b_channel])
+    rgb = cv2.cvtColor(sharpened_lab, cv2.COLOR_LAB2RGB)
+    return rgb, {
+        "applied": True,
+        "method": "lab_l_channel_usm",
+        "sigma": LAB_SHARPEN_SIGMA,
+        "amount": LAB_SHARPEN_AMOUNT,
+        "threshold": LAB_SHARPEN_THRESHOLD,
+    }
+
+
+def apply_postprocess_mode(image: np.ndarray, mode: str) -> tuple[np.ndarray, dict]:
+    if mode == POSTPROCESS_MODE_OFF:
+        return image, {"mode": POSTPROCESS_MODE_OFF, "applied": False, "steps": []}
+
+    denoised, denoise_info = denoise_extracted_polaroid(image)
+    steps = [{"name": POSTPROCESS_MODE_DENOISE, **denoise_info}]
+    if mode == POSTPROCESS_MODE_SHARPEN and denoise_info.get("applied"):
+        sharpened, sharpen_info = sharpen_extracted_polaroid(denoised)
+        steps.append({"name": POSTPROCESS_MODE_SHARPEN, **sharpen_info})
+        return sharpened, {"mode": POSTPROCESS_MODE_SHARPEN, "applied": bool(sharpen_info.get("applied")), "steps": steps}
+
+    return denoised, {"mode": POSTPROCESS_MODE_DENOISE, "applied": bool(denoise_info.get("applied")), "steps": steps}
 
 
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
@@ -414,6 +601,8 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
     with task_lock:
         t = task_store.get(task_id)
         if not t: return
+        if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
+            return
         if "results" not in t:
             t["results"] = []
         rid = len(t["results"])
@@ -423,16 +612,134 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
         })
 
 
+def mark_task_canceled(task_id: str, *, drop_raw_data: bool = False) -> bool:
+    now = time.time()
+    with task_lock:
+        t = task_store.get(task_id)
+        if not t:
+            return False
+        t["cancel_requested"] = True
+        t["status"] = CANCELED_STATUS
+        t["phase"] = CANCELED_STATUS
+        t["error"] = "Task canceled"
+        t["extraction_complete"] = True
+        t["finished_at"] = now
+        if t.get("started_at") and "elapsed" not in t:
+            t["elapsed"] = now - t["started_at"]
+        if drop_raw_data:
+            t.pop("raw_data", None)
+        return True
+
+
+def is_task_cancel_requested(task_id: str) -> bool:
+    with task_lock:
+        t = task_store.get(task_id)
+        return bool(t and (t.get("cancel_requested") or t.get("status") == CANCELED_STATUS))
+
+
+def cancel_if_requested(task_id: str) -> bool:
+    if not is_task_cancel_requested(task_id):
+        return False
+    mark_task_canceled(task_id)
+    return True
+
+
+def set_active_task(task_id: str):
+    global active_task_id
+    with active_task_lock:
+        active_task_id = task_id
+
+
+def clear_active_task(task_id: str):
+    global active_task_id
+    with active_task_lock:
+        if active_task_id == task_id:
+            active_task_id = ""
+
+
+def get_active_task_id() -> str:
+    with active_task_lock:
+        return active_task_id
+
+
+def normalize_upload_attempt_id(value) -> str:
+    if value is None:
+        return ""
+    attempt_id = str(value).strip()
+    if len(attempt_id) > MAX_UPLOAD_ATTEMPT_ID_CHARS:
+        return ""
+    return attempt_id
+
+
+def get_upload_attempt_id() -> str:
+    attempt_id = normalize_upload_attempt_id(request.form.get("upload_attempt_id"))
+    if attempt_id:
+        return attempt_id
+    attempt_id = normalize_upload_attempt_id(request.form.get("uploadAttemptId"))
+    if attempt_id:
+        return attempt_id
+    attempt_id = normalize_upload_attempt_id(request.args.get("upload_attempt_id"))
+    if attempt_id:
+        return attempt_id
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        attempt_id = normalize_upload_attempt_id(data.get("upload_attempt_id"))
+        if attempt_id:
+            return attempt_id
+        attempt_id = normalize_upload_attempt_id(data.get("uploadAttemptId"))
+        if attempt_id:
+            return attempt_id
+    return ""
+
+
+def cleanup_canceled_upload_attempts(now: float | None = None):
+    now = now or time.time()
+    with canceled_upload_lock:
+        for attempt_id, canceled_at in list(canceled_upload_attempts.items()):
+            if now - canceled_at > TASK_TTL:
+                del canceled_upload_attempts[attempt_id]
+
+
+def mark_upload_attempt_canceled(upload_attempt_id: str) -> bool:
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id)
+    if not attempt_id:
+        return False
+    cleanup_canceled_upload_attempts()
+    with canceled_upload_lock:
+        canceled_upload_attempts[attempt_id] = time.time()
+    return True
+
+
+def is_upload_attempt_canceled(upload_attempt_id: str) -> bool:
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id)
+    if not attempt_id:
+        return False
+    cleanup_canceled_upload_attempts()
+    with canceled_upload_lock:
+        return attempt_id in canceled_upload_attempts
+
+
 def do_process_extraction(raw_data: bytes, task_id: str):
     """主处理流程：SAM3 检测 → 四边形拟合 → 逐个提取"""
+    if cancel_if_requested(task_id):
+        return
     model, processor, device = get_sam3()
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         white_balance_enabled = bool(task_store.get(task_id, {}).get("white_balance", True))
-        denoise_enabled = bool(task_store.get(task_id, {}).get("denoise", True))
+        postprocess_mode = parse_postprocess_mode(
+            task_store.get(task_id, {}).get("postprocess_mode"),
+            bool(task_store.get(task_id, {}).get("denoise", True)),
+        )
+        denoise_enabled = postprocess_mode != POSTPROCESS_MODE_OFF
         requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
         rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
+        requested_polaroid_size = parse_polaroid_size(task_store.get(task_id, {}).get("polaroid_size"))
 
     # --- 步骤 0: 加载图片 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "loading"
     image = Image.open(io.BytesIO(raw_data)).convert("RGB")
@@ -443,6 +750,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     print(f"🖼️  图片: {image.size[0]}x{image.size[1]} (rotation={rotation_degrees})", flush=True)
 
     # --- 步骤 1: SAM3 检测纸框 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "detecting"
     print(f"🔍 SAM3 检测拍立得纸框... (目标: {requested_polaroids or '自动'})", flush=True)
@@ -474,6 +783,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
 
     del inputs, outputs
     torch.cuda.empty_cache() if device == "cuda" else None
+    if cancel_if_requested(task_id):
+        return
     detected_count = len(candidates)
     detection_warning = ""
     print(f"   检测到 {detected_count} 张拍立得 (阈值 {threshold_used:.1f}, 耗时 {time.time()-t0:.1f}s)", flush=True)
@@ -491,6 +802,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         print(f"   检测到 {detected_count} 张，高于目标 {requested_polaroids} 张，已按四边形面积丢弃最小 {drop_count} 张: {smallest_dropped}", flush=True)
 
     if not candidates:
+        if cancel_if_requested(task_id):
+            return
         with task_lock:
             task_store[task_id]["status"] = "done" if requested_polaroids else "failed"
             task_store[task_id]["phase"] = "complete"
@@ -509,6 +822,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     all_vertices.sort(key=lambda verts: float(verts[:, 0].mean()))
 
     # --- 步骤 2: 逐个提取 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["phase"] = "extracting"
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
@@ -518,19 +833,26 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["warning"] = detection_warning
         task_store[task_id]["extraction_complete"] = False
     for pidx, verts in enumerate(all_vertices):
+        if cancel_if_requested(task_id):
+            return
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
+        output_polaroid_size = resolve_polaroid_size(requested_polaroid_size, verts)
+        geometry = get_polaroid_geometry(output_polaroid_size)
+        output_width = geometry["width"]
+        output_height = geometry["height"]
+        print(f"   size={output_polaroid_size}", flush=True)
         src = verts.astype(np.float32)
-        dst = np.array([[0,0],[POLAROID_W,0],[POLAROID_W,POLAROID_H],
-                        [0,POLAROID_H]], dtype=np.float32)
+        dst = np.array([[0,0],[output_width,0],[output_width,output_height],
+                        [0,output_height]], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src, dst)
         rectified = cv2.warpPerspective(
             img_np,
             M,
-            (POLAROID_W, POLAROID_H),
+            (output_width, output_height),
             flags=cv2.INTER_CUBIC,
         )
         if white_balance_enabled:
-            rectified, wb_info = apply_fixed_border_white_balance(rectified)
+            rectified, wb_info = apply_fixed_border_white_balance(rectified, geometry)
             if wb_info["applied"]:
                 print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
             else:
@@ -541,11 +863,21 @@ def do_process_extraction(raw_data: bytes, task_id: str):
                 print(f"   ✓ 降噪 #{pidx+1}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
             else:
                 print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
+        if cancel_if_requested(task_id):
+            return
+        if postprocess_mode == POSTPROCESS_MODE_SHARPEN:
+            rectified, sharpen_info = sharpen_extracted_polaroid(rectified)
+            if sharpen_info["applied"]:
+                print(f"   sharpen #{pidx+1}: {sharpen_info['method']} amount={sharpen_info['amount']}", flush=True)
+            else:
+                print(f"   sharpen #{pidx+1}: {sharpen_info['reason']}", flush=True)
         add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
                          f"拍立得 #{pidx+1}")
         print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
 
     # --- 完成 ---
+    if cancel_if_requested(task_id):
+        return
     with task_lock:
         task_store[task_id]["status"] = "done"
         task_store[task_id]["phase"] = "complete"
@@ -579,6 +911,9 @@ def worker_loop():
         with task_lock:
             t = task_store.get(task_id)
             if not t: continue
+            if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
+                continue
+            set_active_task(task_id)
             t["status"] = "processing"
             t["started_at"] = time.time()
 
@@ -586,7 +921,7 @@ def worker_loop():
         try:
             do_process_extraction(t["raw_data"], task_id)
             with task_lock:
-                if task_id in task_store:
+                if task_id in task_store and task_store[task_id].get("status") != CANCELED_STATUS:
                     task_store[task_id]["elapsed"] = time.time() - task_store[task_id]["started_at"]
                     task_store[task_id]["finished_at"] = time.time()
         except Exception as e:
@@ -594,13 +929,15 @@ def worker_loop():
             traceback.print_exc()
             with task_lock:
                 if task_id in task_store:
-                    task_store[task_id]["status"] = "failed"
-                    task_store[task_id]["error"] = str(e)[:200]
+                    if task_store[task_id].get("status") != CANCELED_STATUS:
+                        task_store[task_id]["status"] = "failed"
+                        task_store[task_id]["error"] = str(e)[:200]
 
         # 清理 raw_data 释放内存
         with task_lock:
             if task_id in task_store:
                 task_store[task_id].pop("raw_data", None)
+        clear_active_task(task_id)
         gc.collect()
         global _device
         if _device == "cuda":
@@ -669,16 +1006,69 @@ def verify_token():
     return jsonify({"ok": True, "status": "ok"})
 
 
+@app.route("/api/cancel/<task_id>", methods=["POST"])
+def cancel_task(task_id):
+    queue_removed = False
+    with queue_lock:
+        while task_id in task_queue:
+            task_queue.remove(task_id)
+            queue_removed = True
+
+    with task_lock:
+        t = task_store.get(task_id)
+        if not t:
+            return jsonify({"ok": False, "error": "Task not found"}), 404
+        previous_status = t.get("status", "")
+
+    if previous_status in ("done", "failed"):
+        return jsonify({
+            "ok": False,
+            "status": previous_status,
+            "error": "Task already finished",
+        }), 409
+
+    mark_task_canceled(task_id, drop_raw_data=queue_removed or previous_status == "queued")
+    print(f"[cancel] task={task_id[:8]} canceled (previous={previous_status}, queue_removed={queue_removed})", flush=True)
+    return jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "status": CANCELED_STATUS,
+        "previous_status": previous_status,
+        "queue_removed": queue_removed,
+    })
+
+
+@app.route("/api/upload-cancel", methods=["POST"])
+@app.route("/api/upload-cancel/<upload_attempt_id>", methods=["POST"])
+def cancel_upload_attempt(upload_attempt_id=""):
+    attempt_id = normalize_upload_attempt_id(upload_attempt_id) or get_upload_attempt_id()
+    if not attempt_id:
+        return jsonify({"ok": False, "error": "upload_attempt_id is required"}), 400
+    mark_upload_attempt_canceled(attempt_id)
+    print(f"[upload-cancel] attempt={attempt_id} canceled", flush=True)
+    return jsonify({
+        "ok": True,
+        "status": CANCELED_STATUS,
+        "upload_attempt_id": attempt_id,
+    })
+
+
 @app.route("/api/contact", methods=["POST"])
 def contact_author():
     data = request.get_json(silent=True) or {}
-    message_text = str(data.get("message", "")).strip()
+    message_value = data.get("message", "")
+    contact_value = data.get("contact", "")
+    message_text = "" if message_value is None else str(message_value).strip()
+    contact_info = "" if contact_value is None else str(contact_value).strip()
     if not message_text:
         return jsonify({"ok": False, "error": "请输入内容"}), 400
-    if len(message_text) > 1000:
+    if len(message_text) > MAX_CONTACT_MESSAGE_CHARS:
         return jsonify({"ok": False, "error": "内容过长，请控制在1000字以内"}), 400
 
-    ok, error = send_contact_email(message_text, get_client_ip())
+    if len(contact_info) > MAX_CONTACT_INFO_CHARS:
+        return jsonify({"ok": False, "error": "Contact info is too long (max 200 characters)"}), 400
+
+    ok, error = send_contact_email(message_text, contact_info, get_client_ip())
     if not ok:
         return jsonify({"ok": False, "error": error}), 503
     return jsonify({"ok": True, "status": "sent"})
@@ -688,6 +1078,15 @@ def contact_author():
 def submit_task():
     ip = get_client_ip()
     print(f"🟢 提交 | IP: {ip}", flush=True)
+    upload_attempt_id = get_upload_attempt_id()
+    if upload_attempt_id and is_upload_attempt_canceled(upload_attempt_id):
+        print(f"[upload-cancel] rejected late upload attempt={upload_attempt_id} ip={ip}", flush=True)
+        return jsonify({
+            "ok": False,
+            "status": CANCELED_STATUS,
+            "error": "Upload attempt canceled",
+            "upload_attempt_id": upload_attempt_id,
+        }), 409
     if "image" not in request.files:
         return jsonify({"error": "请上传图片"}), 400
     file = request.files["image"]
@@ -700,20 +1099,28 @@ def submit_task():
         return jsonify({"error": err}), 400
 
     white_balance = parse_bool(request.form.get("wb"), default=True)
-    denoise = parse_bool(request.form.get("denoise"), default=True)
+    legacy_denoise = parse_bool(request.form.get("denoise"), default=True)
+    postprocess_mode = parse_postprocess_mode(request.form.get("postprocess_mode"), legacy_denoise)
+    denoise = postprocess_mode != POSTPROCESS_MODE_OFF
     requested_polaroids = parse_positive_int(
         request.form.get("expected_polaroids"),
         request.form.get("polaroid_count"),
     )
     rotation_degrees = parse_rotation_degrees(request.form.get("rotation_degrees"))
+    polaroid_size = parse_polaroid_size(request.form.get("polaroid_size"))
     tid = uuid.uuid4().hex
     now = time.time()
+    cleanup_canceled_upload_attempts(now)
     with task_lock:
         task_store[tid] = {
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance, "denoise": denoise,
+            "postprocess_mode": postprocess_mode,
+            "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
+            "upload_attempt_id": upload_attempt_id,
             "requested_polaroids": requested_polaroids,
+            "polaroid_size": polaroid_size,
             "rotation_degrees": rotation_degrees,
             "expected_polaroids": requested_polaroids,
             "total_polaroids": 0,
@@ -725,21 +1132,24 @@ def submit_task():
         # 清理过期
         for k in list(task_store.keys()):
             t = task_store[k]
-            if t["status"] in ("done","failed") and now - t.get("finished_at", t["created_at"]) > TASK_TTL:
+            if t["status"] in ("done", "failed", CANCELED_STATUS) and now - t.get("finished_at", t["created_at"]) > TASK_TTL:
                 del task_store[k]
 
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, denoise={denoise}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees})", flush=True)
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",
         "white_balance": white_balance,
         "denoise": denoise,
+        "postprocess_mode": postprocess_mode,
+        "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
         "requested_polaroids": requested_polaroids,
         "rotation_degrees": rotation_degrees,
         "expected_polaroids": requested_polaroids,
+        "upload_attempt_id": upload_attempt_id,
     })
 
 # ---- 查询状态（含中间结果列表） ----
@@ -761,12 +1171,17 @@ def task_status(task_id):
         requested_polaroids = t.get("requested_polaroids", 0)
         rotation_degrees = t.get("rotation_degrees", 0)
         denoise = bool(t.get("denoise", True))
+        postprocess_mode = parse_postprocess_mode(t.get("postprocess_mode"), denoise)
+        white_balance = bool(t.get("white_balance", True))
+        white_balance_color_space = t.get("white_balance_color_space", WHITE_BALANCE_COLOR_SPACE if white_balance else "")
         detected_polaroids = t.get("detected_polaroids", 0)
         detection_threshold = t.get("detection_threshold", 0)
         warning = t.get("warning", "")
         extraction_complete = bool(t.get("extraction_complete", False))
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
+        upload_attempt_id = t.get("upload_attempt_id", "")
+        current_active_task_id = get_active_task_id()
 
     pos = 0
     if status == "queued":
@@ -778,6 +1193,8 @@ def task_status(task_id):
         "task_id": task_id,
         "status": status,
         "phase": phase,
+        "active_task_id": current_active_task_id,
+        "processing_task_id": current_active_task_id,
         "queue_position": pos,
         "results_count": len(results_meta),
         "results": results_meta,
@@ -786,12 +1203,16 @@ def task_status(task_id):
         "requested_polaroids": requested_polaroids,
         "rotation_degrees": rotation_degrees,
         "denoise": denoise,
+        "postprocess_mode": postprocess_mode,
+        "white_balance": white_balance,
+        "white_balance_color_space": white_balance_color_space,
         "detected_polaroids": detected_polaroids,
         "detection_threshold": detection_threshold,
         "warning": warning,
         "extraction_complete": extraction_complete,
         "elapsed": elapsed,
         "error": error,
+        "upload_attempt_id": upload_attempt_id,
     })
 
 # ---- 获取某一步的结果图片 ----

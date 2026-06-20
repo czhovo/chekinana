@@ -1,4 +1,5 @@
 const AUTH_STORAGE_KEY = "cheki_auth_token";
+const SCANNER_AUTH_PASSED_KEY = "cheki_scanner_auth_passed";
 const API_GATEWAY_BASE_URL = "https://api.chekinana.top";
 const LOCAL_PREVIEW_TOKEN = "chekinana-preview";
 
@@ -23,6 +24,7 @@ function isLocalPreviewToken(value) {
 
 module.exports = {
   AUTH_STORAGE_KEY,
+  SCANNER_AUTH_PASSED_KEY,
   API_GATEWAY_BASE_URL,
   LOCAL_PREVIEW_TOKEN,
   normalizePodId,
