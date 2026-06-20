@@ -11,6 +11,10 @@ const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
 const DEFAULT_POLAROID_SIZE = "mini";
 const POSTPROCESS_MODE_OPTIONS = ["off", "denoise", "sharpen"];
 const DEFAULT_POSTPROCESS_MODE = "denoise";
+const RESULT_SAVE_STATUS_UNKNOWN = "unknown";
+const RESULT_SAVE_STATUS_SAVING = "saving";
+const RESULT_SAVE_STATUS_SAVED = "saved";
+const RESULT_SAVE_STATUS_FAILED = "failed";
 
 Page({
   data: {
@@ -58,9 +62,7 @@ Page({
     if (!token) {
       wx.removeStorageSync(SCANNER_AUTH_PASSED_KEY);
       wx.redirectTo({ url: "/pages/auth/auth" });
-      return;
     }
-    this.verifyCachedToken(token);
   },
 
   setTabBarSelected(selected) {
@@ -357,6 +359,10 @@ Page({
 
   deleteCurrentImage() {
     if (!this.data.selectedImages.length || this.data.processing) return;
+    if (this.hasCompletedActionState()) {
+      this.deleteCompletedCurrentImage();
+      return;
+    }
 
     this.clearPollTimer();
     this.downloadingImageUrls = {};
@@ -394,6 +400,50 @@ Page({
         ? `当前图片 ${currentImageIndex + 1}/${selectedImages.length}，点击开始提取`
         : "图片已选择，点击开始提取",
       statusKind: "ready"
+    });
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
+  },
+
+  deleteCompletedCurrentImage() {
+    this.clearPollTimer();
+    this.downloadingImageUrls = {};
+    const deletedIndex = this.data.currentImageIndex;
+    const selectedImages = this.data.selectedImages.filter((image, index) => index !== deletedIndex);
+    if (!selectedImages.length) {
+      this.resetAllImagesState();
+      return;
+    }
+
+    const oldToNewIndex = {};
+    selectedImages.forEach((image, index) => {
+      const oldIndex = index >= deletedIndex ? index + 1 : index;
+      oldToNewIndex[oldIndex] = index;
+    });
+    const extractedImages = (this.data.extractedImages || [])
+      .filter((image) => this.getResultSourceIndex(image) !== deletedIndex)
+      .map((image) => Object.assign({}, image, {
+        sourceImageIndex: oldToNewIndex[this.getResultSourceIndex(image)]
+      }));
+    const failedImageIndexes = (this.data.failedImageIndexes || [])
+      .filter((index) => index !== deletedIndex)
+      .map((index) => oldToNewIndex[index])
+      .filter((index) => Number.isInteger(index));
+    const currentImageIndex = Math.min(deletedIndex, selectedImages.length - 1);
+    const hasCompletedArtifacts = extractedImages.length > 0 || failedImageIndexes.length > 0;
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+      selectedImages,
+      currentImageIndex,
+      extractedImages,
+      failedImageIndexes,
+      processing: false,
+      showCountInput: !hasCompletedArtifacts,
+      statusText: hasCompletedArtifacts
+        ? this.data.statusText
+        : selectedImages.length > 1
+          ? `当前图片 ${currentImageIndex + 1}/${selectedImages.length}，点击开始提取`
+          : "图片已选择，点击开始提取",
+      statusKind: hasCompletedArtifacts ? this.data.statusKind : "ready"
     });
     this.pendingAuthRestoreState = nextState;
     this.setData(nextState);
@@ -1189,7 +1239,8 @@ Page({
               ? item.name
               : `p${index + 1}`,
           url,
-          title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`
+          title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`,
+          saveStatus: RESULT_SAVE_STATUS_UNKNOWN
         };
       })
       .filter(Boolean);
@@ -1213,10 +1264,16 @@ Page({
       if (!image || !image.url) return;
       const key = String(image.id || image.url);
       if (imageMap[key]) {
+        const previousSaveStatus = imageMap[key].saveStatus;
         Object.assign(imageMap[key], image);
+        if (previousSaveStatus
+          && (!image.saveStatus || image.saveStatus === RESULT_SAVE_STATUS_UNKNOWN)
+          && previousSaveStatus !== RESULT_SAVE_STATUS_UNKNOWN) {
+          imageMap[key].saveStatus = previousSaveStatus;
+        }
         return;
       }
-      const copy = Object.assign({}, image);
+      const copy = Object.assign({ saveStatus: RESULT_SAVE_STATUS_UNKNOWN }, image);
       imageMap[key] = copy;
       merged.push(copy);
     });
@@ -1268,13 +1325,24 @@ Page({
   },
 
   updateImageLocalPath(targetImage, localPath) {
+    this.updateResultSaveState(targetImage, { localPath });
+  },
+
+  updateResultSaveState(targetImage, patch) {
+    if (!targetImage) return;
     const targetKey = String(targetImage.id || targetImage.url);
     const extractedImages = this.data.extractedImages.map((image) => {
       const key = String(image.id || image.url);
       if (key !== targetKey) return image;
-      return Object.assign({}, image, { localPath });
+      return Object.assign({}, image, patch);
     });
     this.setData({ extractedImages });
+  },
+
+  getResultSourceIndex(image) {
+    if (image && Number.isInteger(image.sourceImageIndex)) return image.sourceImageIndex;
+    if ((this.data.selectedImages || []).length === 1) return 0;
+    return Number.isInteger(this.data.currentImageIndex) ? this.data.currentImageIndex : 0;
   },
 
   getUploadStatusText(imageIndex, totalImages) {
@@ -1578,9 +1646,20 @@ Page({
             : `已保存 ${savedCount} 张`,
           icon: failedCount ? "none" : "success"
         });
+        this.setData({
+          statusText: failedCount
+            ? `保存完成，成功 ${savedCount} 张，失败 ${failedCount} 张`
+            : `保存完成，已保存 ${savedCount} 张`,
+          statusKind: failedCount ? "error" : "done"
+        });
         return;
       }
-      this.saveResultImageForBatch(images[index], (ok) => {
+      const image = images[index];
+      this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+      this.saveResultImageForBatch(image, (ok) => {
+        this.updateResultSaveState(image, {
+          saveStatus: ok ? RESULT_SAVE_STATUS_SAVED : RESULT_SAVE_STATUS_FAILED
+        });
         if (ok) {
           savedCount += 1;
         } else {
@@ -1654,22 +1733,56 @@ Page({
     (this.data.failedImageIndexes || []).forEach((index) => {
       failedIndexSet[index] = true;
     });
-    const remainingImages = selectedImages.filter((image, index) => failedIndexSet[index]);
+    const extractedImages = this.data.extractedImages || [];
+    const resultsBySourceIndex = {};
+    extractedImages.forEach((image) => {
+      const sourceIndex = this.getResultSourceIndex(image);
+      if (!resultsBySourceIndex[sourceIndex]) resultsBySourceIndex[sourceIndex] = [];
+      resultsBySourceIndex[sourceIndex].push(image);
+    });
+
+    const preserveSourceIndexSet = {};
+    selectedImages.forEach((image, index) => {
+      const sourceResults = resultsBySourceIndex[index] || [];
+      const hasUnsavedResult = sourceResults.some((result) => result.saveStatus !== RESULT_SAVE_STATUS_SAVED);
+      if (failedIndexSet[index] || hasUnsavedResult) {
+        preserveSourceIndexSet[index] = true;
+      }
+    });
+
+    const oldToNewIndex = {};
+    const remainingImages = selectedImages.filter((image, index) => {
+      if (!preserveSourceIndexSet[index]) return false;
+      oldToNewIndex[index] = Object.keys(oldToNewIndex).length;
+      return true;
+    });
 
     if (!remainingImages.length) {
       this.resetAllImagesState();
       return;
     }
 
+    const remainingExtractedImages = extractedImages
+      .filter((image) => preserveSourceIndexSet[this.getResultSourceIndex(image)])
+      .map((image) => Object.assign({}, image, {
+        sourceImageIndex: oldToNewIndex[this.getResultSourceIndex(image)]
+      }));
+    const remainingFailedImageIndexes = Object.keys(preserveSourceIndexSet)
+      .map((index) => Number(index))
+      .filter((index) => failedIndexSet[index])
+      .map((index) => oldToNewIndex[index]);
+
     const nextState = Object.assign(this.getCurrentImageState(remainingImages, 0), {
       selectedImages: remainingImages,
       currentImageIndex: 0,
-      extractedImages: [],
-      failedImageIndexes: [],
+      extractedImages: remainingExtractedImages,
+      failedImageIndexes: remainingFailedImageIndexes,
       processing: false,
-      showCountInput: true,
-      statusText: `已删除成功图片，保留 ${remainingImages.length} 张失败图片`,
-      statusKind: "ready"
+      showCountInput: remainingExtractedImages.length === 0,
+      statusText: remainingExtractedImages.length
+        ? `已清除已保存图片，保留 ${remainingImages.length} 张未完全保存的图片`
+        : `已删除成功图片，保留 ${remainingImages.length} 张失败图片`,
+      statusKind: remainingExtractedImages.length ? "error" : "ready"
     });
     this.pendingAuthRestoreState = nextState;
     this.setData(nextState);
@@ -1702,6 +1815,7 @@ Page({
     if (!image || !image.url) return;
 
     wx.showLoading({ title: "保存中..." });
+    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
 
     const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
     if (localPath) {
@@ -1723,11 +1837,13 @@ Page({
           return;
         }
         wx.hideLoading();
+        this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
         wx.showToast({ title: "下载失败", icon: "none" });
       },
       fail: (err) => {
         console.error("downloadFile failed", err);
         wx.hideLoading();
+        this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
         wx.showToast({ title: "下载失败", icon: "none" });
       }
     });
@@ -1737,6 +1853,7 @@ Page({
     wx.saveImageToPhotosAlbum({
       filePath,
       success: () => {
+        this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
         wx.hideLoading();
         wx.showToast({ title: "已保存", icon: "success" });
       },
@@ -1751,12 +1868,14 @@ Page({
               if (res.confirm) wx.openSetting();
             }
           });
+          this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
           return;
         }
         if (allowFallback && fallbackImage && fallbackImage.url && fallbackImage.url !== filePath) {
           this.downloadAndSaveImage(fallbackImage);
           return;
         }
+        this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
         wx.showToast({ title: "保存失败", icon: "none" });
       }
     });
