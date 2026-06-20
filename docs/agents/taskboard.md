@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Fix mini-program lifecycle and download state loss: returning from background must not re-verify token or wipe selected/extracted content, interrupted downloads must surface partial failures, and New Task must preserve any source image whose extracted polaroids were not fully saved.
+Fix large-result download reliability: after roughly 40 extracted polaroids, later results must still be downloadable from the mini program.
 
 Scope constraints:
 
@@ -62,6 +62,9 @@ Real-device image picker failure: 2026-06-21 selecting an album image in real We
 Frontend image picker fix commit: 506cf46
 Reviewer image picker approval commit: fabafd7
 User-reported lifecycle/download issue: 2026-06-21 switching WeChat or the mini program to background can return to auth and lose extraction content; switching during download can silently lose some images.
+Frontend lifecycle/download state fix commit: 0808fbe
+Reviewer lifecycle/download state approval commit: f10daa1
+User-reported large-result download issue: 2026-06-21 after about 40 extracted polaroids, later extraction results show download failed when tapped.
 ```
 
 ## Worktree Assignments
@@ -69,9 +72,9 @@ User-reported lifecycle/download issue: 2026-06-21 switching WeChat or the mini 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `STATE-FE-001`: lifecycle state preservation and download failure tracking |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No lifecycle/download implementation task unless PM reopens backend scope |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `STATE-REV-001`: review lifecycle/download state fix |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `RESULTDL-FE-001`: large-result mini-program download reliability |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `RESULTDL-BE-001`: result-route and TTL compatibility audit/fix |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `RESULTDL-REV-001`: review large-result download reliability |
 
 ## Current Tasks
 
@@ -113,8 +116,11 @@ User-reported lifecycle/download issue: 2026-06-21 switching WeChat or the mini 
 | MAIN-SYNC-001 | PM | done | Summarize the large `origin/main` update that was merged into every agent worktree. | `docs/agents/handoffs/2026-06-21-main-sync-briefing.md` | PM documented the six commits from `5e17549` to `d914343`, the new navigation/calendar/izaya7-map/page-placeholder structure, per-agent impact notes, and risks for future Frontend/Backend/Reviewer work. All agents must read this briefing before working in files touched by the main sync. |
 | PICK-FE-001 | Frontend | done | Fix real WeChat image picker failures before upload starts. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-21-frontend-image-picker.md` | Frontend commit `506cf46` hardens the picker path by preferring `wx.chooseImage`, retaining `wx.chooseMedia` only as a compatibility fallback, normalizing returned temp paths, treating user cancel as a no-op, logging non-cancel picker failures, preserving add-more behavior and max 9 images, and leaving upload/backend/status contracts unchanged. |
 | PICK-REV-001 | Reviewer | done | Review the image-picker fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-image-picker.md` | Reviewer commit `fabafd7` verdict: approved. Reviewer confirmed the `wx.chooseImage` path, fallback behavior, cancel/failure handling, result normalization, add-more and 9-image limit behavior, per-image defaults, main-sync route preservation, and no changes to `/api/process`, upload/cancel/status/result, `postprocess_mode`, `polaroid_size`, or rotation contracts. |
-| STATE-FE-001 | Frontend | pending | Preserve extraction state across background/auth lifecycle and track download/save failures. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml` if UI state is needed, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-21-frontend-lifecycle-download-state.md` | After token verification succeeds on the auth page and enters index, index must not re-verify the token on `onShow`, foreground return, tab switch, or normal page lifecycle. The app should only leave the authenticated scanner flow when no token exists or the user manually clears token in settings. Therefore background return must not clear selected images, extracted results, failed-image markers, completed status/actions, or current preview. Track per-result album-save success/failure for both single-result save and all-download flows; if switching apps interrupts download/save, show a visible partial-failure result instead of silently losing images. `新任务` must keep any source image and all extracted results from that source when none of its polaroids were saved or when any save/download failed or remains unknown; it may clear only source-image groups whose extracted results all saved successfully and that are not failed source images. After processing is complete, manually deleting a single selected source image is an explicit delete action and must delete only that source image plus extracted results from that source, without checking whether those results were downloaded/saved; all other source images, extracted results, download/save state, completed status/actions, and failed-source markers must remain consistent, including reindexing source-image references if index-based fields are still used. Preserve batch ordering, existing upload/process/status/cancel contracts, picker behavior, `postprocess_mode`, `polaroid_size`, rotation, settings manual-token-clear behavior, and main-sync tab/calendar/map routes. |
-| STATE-REV-001 | Reviewer | pending | Review `STATE-FE-001` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-lifecycle-download-state.md` | Reviewer must inspect the Frontend diff and handoff, confirm no Backend/API scope was added, and verify index does not call token verification on `onShow`/foreground return after auth-page success, missing token still routes to auth, settings manual token clear still exits authenticated flow, background return preserves scanner state, download/save partial failures are visible, per-result save tracking works, `新任务` preserves unsaved/failed/unknown source-image groups, and completed-state single-image delete removes only that source image and its extracted results without checking download/save status while preserving and reindexing remaining groups correctly. Also verify no regressions to image picker, batch processing, result display, upload cancel/task cancel, all-download success path, custom tab bar, calendar, and `izaya7-map`. Reviewer should run `node --check`, `git diff --check`, and targeted mocks for foreground return without reverify, missing token redirect, settings clear-token behavior if present, interrupted all-download, partial save failure, New Task cleanup rules, and completed-state single-image delete. |
+| STATE-FE-001 | Frontend | done | Preserve extraction state across background/auth lifecycle and track download/save failures. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-21-frontend-lifecycle-download-state.md` | Frontend commit `0808fbe` removes index-side token reverify after auth success, preserves scanner state across foreground return, tracks per-result save state, surfaces all-download partial failures, preserves unsaved/failed/unknown groups for `新任务`, and makes completed-state single-image delete remove only that source and its results. |
+| STATE-REV-001 | Reviewer | done | Review `STATE-FE-001` after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-lifecycle-download-state.md` | Reviewer commit `f10daa1` verdict: approved. Reviewer confirmed no index-side token reverify, missing-token/settings-clear behavior, lifecycle state preservation, per-result save-state tracking, visible download/save partial failures, `新任务` preservation/remapping, completed-state single-image delete behavior, picker compatibility, and no changes to Backend routes or RunPod behavior. |
+| RESULTDL-FE-001 | Frontend | pending | Fix high-count result download failures in the mini program. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml` if status UI changes are needed, `wechat-miniprogram/pages/index/index.wxss` if needed, `docs/agents/handoffs/2026-06-21-frontend-large-result-downloads.md` | Investigate and fix the mini-program download path for 40+ extracted results. Avoid unbounded eager `wx.downloadFile` prefetch across all results; use a bounded queue, lazy/on-demand download, retry/fallback, or another conservative approach that respects WeChat download concurrency and temporary-file limits. Tapping result 0, 39, 40, and later results must download/save or surface a specific actionable failure rather than a generic unexplained `下载失败`. Preserve per-result save state, `新任务` preservation rules, completed-state single-image delete behavior, batch ordering, source-image grouping, picker behavior, auth policy, upload/process/status/cancel contracts, `postprocess_mode`, `polaroid_size`, and main-sync routes. |
+| RESULTDL-BE-001 | Backend | pending | Audit/fix backend result-route availability for large result sets. | `backend/app.py`, optional focused script/test under `scripts/`, `docs/agents/handoffs/2026-06-21-backend-large-result-downloads.md` | Verify that `/api/status/<task_id>` and `/api/result/<task_id>/<result_id>` remain valid for large result sets beyond 40 results, including result ids 0, 39, 40, and 59 or a similar high-count smoke. Check whether `TASK_TTL`, task cleanup timing, memory storage, auth handling, or result-id indexing can cause later result downloads to fail. If Backend finds a concrete server-side blocker, fix it without changing RunPod startup, SAM extraction, frontend field names, postprocessing, mini/wide/auto geometry, upload cancel, task cancel, or contact routes. If no Backend change is needed, commit a handoff with the smoke evidence. |
+| RESULTDL-REV-001 | Reviewer | pending | Review large-result download reliability after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-large-result-downloads.md` | Reviewer must inspect Frontend and Backend diffs/handoffs, verify the user-reported 40+ result failure is addressed on the actual download path, and confirm no regressions to lifecycle state preservation, per-result save tracking, `新任务` preservation, completed-state single-image delete, picker, auth policy, batch processing, upload/status/cancel, postprocessing, size selection, custom tab bar, calendar, and `izaya7-map`. Reviewer should run `node --check`, Backend compile/focused smoke if Backend changed, `git diff --check`, frontend mocks for high-count result downloads/prefetch throttling, and backend result-route smoke for high result ids. |
 
 Status values:
 
@@ -156,6 +162,16 @@ Lifecycle and download-state contract:
 - Manual single-source-image deletion after processing is different from `新任务`: it is an explicit delete action and should delete the selected source image and that source's extracted results regardless of download/save status.
 - Manual single-source-image deletion must preserve all other source images and extracted results; if the implementation uses index-based fields such as `sourceImageIndex` or `failedImageIndexes`, remaining groups must be reindexed consistently after deletion.
 - This task does not change Backend result URLs or add a new result bundle/zip API.
+
+Large-result download contract:
+
+- The mini program must support downloading/saving result sets larger than 40 polaroids.
+- Frontend must not start unbounded `wx.downloadFile` prefetches for every visible/extracted result if that can exceed WeChat concurrency or temporary-file limits.
+- Frontend should treat remote result URL download and album save as separate steps, preserving the per-result save state introduced by `STATE-FE-001`.
+- Clicking a late result such as result 40+ must use a valid result URL and token, retry or fall back when safe, and show a specific visible error if the download truly fails.
+- Backend must keep `/api/status/<task_id>` result ids and `/api/result/<task_id>/<result_id>` downloads stable for high result counts; result ids 0, 39, 40, and a later id such as 59 should be covered by focused smoke where feasible.
+- Backend task cleanup or TTL must not delete completed task results before a normal user can download a large result set after processing completes.
+- This task does not require a new zip/bulk-download API unless Backend/Frontend find the existing per-result route cannot be made reliable.
 
 Frontend request flow:
 
@@ -329,10 +345,11 @@ Contact email contract:
 | 2026-06-21 | Treat downloaded-to-temp-file and saved-to-album as different states. | A result with `localPath` may still not be saved to the user's album, so New Task preservation must be based on album-save success, not merely download success. |
 | 2026-06-21 | Preserve source-image groups unless all extracted results for that source saved successfully. | User explicitly requires images to remain when all polaroids were not downloaded or any download/save failed. |
 | 2026-06-21 | Manual completed-state single-image deletion ignores download status. | User clarified that clicking one selected image and deleting it after processing should delete exactly that source image and its extracted results, even if not downloaded, while preserving other groups. |
+| 2026-06-21 | Reopen large-result download reliability as Frontend plus Backend audit. | User testing found downloads fail around the 40th result; Frontend has unbounded prefetch risk, while Backend must confirm result routes/TTL do not impose a hidden high-count limit. |
 
 ## Open Questions
 
-- None. Lifecycle state preservation and download failure handling have concrete Frontend and Reviewer owners; Backend is out of scope unless a concrete API blocker appears.
+- None. Large-result download reliability has concrete Frontend, Backend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -381,3 +398,6 @@ Contact email contract:
 - PM assigned `STATE-FE-001` and `STATE-REV-001`; Backend has no lifecycle/download task unless PM reopens API scope.
 - User clarified token policy for `STATE-FE-001`: once auth-page verification succeeds and enters index, index must not re-verify token; only settings manual token clear should end the authenticated scanner flow.
 - User clarified completed-state single-image delete behavior for `STATE-FE-001`: deleting a selected source image should remove only that image and its extracted results, without checking download/save status.
+- Reviewer approved `STATE-REV-001` in `f10daa1`; Frontend lifecycle/download fix commit is `0808fbe`.
+- User testing found a new high-count result download issue: after about 40 extracted polaroids, later result taps show download failed.
+- PM assigned `RESULTDL-FE-001`, `RESULTDL-BE-001`, and `RESULTDL-REV-001` in Frontend, Backend, Reviewer order.
