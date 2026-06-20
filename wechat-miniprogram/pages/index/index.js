@@ -206,43 +206,89 @@ Page({
       return;
     }
 
+    if (typeof wx.chooseImage === "function") {
+      wx.chooseImage({
+        count: remainingCount,
+        sourceType: ["album", "camera"],
+        sizeType: ["original"],
+        success: (res) => {
+          this.handleImagePickerSuccess(this.normalizeImagePickerPaths(res), remainingCount);
+        },
+        fail: (err) => {
+          this.handleImagePickerFailure(err, "chooseImage");
+        }
+      });
+      return;
+    }
+
+    this.chooseImageWithMediaFallback(remainingCount);
+  },
+
+  chooseImageWithMediaFallback(remainingCount) {
     wx.chooseMedia({
       count: remainingCount,
       mediaType: ["image"],
       sourceType: ["album", "camera"],
       sizeType: ["original"],
       success: (res) => {
-        const files = (res.tempFiles || []).filter((file) => file && file.tempFilePath);
-        if (!files.length) {
-          wx.showToast({ title: "未选择图片", icon: "none" });
-          return;
-        }
-
-        this.clearPollTimer();
-        this.downloadingImageUrls = {};
-        const selectedImages = this.data.selectedImages.concat(
-          files.slice(0, remainingCount).map((file) => this.createSelectedImage(file.tempFilePath))
-        );
-        const currentImageIndex = this.data.selectedImages.length ? this.data.currentImageIndex : 0;
-        const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
-          selectedImages,
-          currentImageIndex,
-          extractedImages: [],
-          failedImageIndexes: [],
-          processing: false,
-          showCountInput: true,
-          statusText: selectedImages.length > 1
-            ? `已添加 ${selectedImages.length} 张图片，当前仍按单张流程处理`
-            : "图片已选择，点击开始提取",
-          statusKind: "ready"
-        });
-        this.pendingAuthRestoreState = nextState;
-        this.setData(nextState);
+        this.handleImagePickerSuccess(this.normalizeImagePickerPaths(res), remainingCount);
       },
-      fail: () => {
-        wx.showToast({ title: "选择图片失败", icon: "none" });
+      fail: (err) => {
+        this.handleImagePickerFailure(err, "chooseMedia");
       }
     });
+  },
+
+  normalizeImagePickerPaths(res) {
+    const paths = [];
+    (res && res.tempFilePaths || []).forEach((path) => {
+      if (path) paths.push(path);
+    });
+    (res && res.tempFiles || []).forEach((file) => {
+      const path = file && (file.tempFilePath || file.path);
+      if (path) paths.push(path);
+    });
+    return paths.filter((path, index) => paths.indexOf(path) === index);
+  },
+
+  handleImagePickerSuccess(paths, remainingCount) {
+    const selectedPaths = (paths || []).filter(Boolean).slice(0, remainingCount);
+    if (!selectedPaths.length) {
+      wx.showToast({ title: "未选择图片", icon: "none" });
+      return;
+    }
+
+    this.clearPollTimer();
+    this.downloadingImageUrls = {};
+    const selectedImages = this.data.selectedImages.concat(
+      selectedPaths.map((path) => this.createSelectedImage(path))
+    );
+    const currentImageIndex = this.data.selectedImages.length ? this.data.currentImageIndex : 0;
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+      selectedImages,
+      currentImageIndex,
+      extractedImages: [],
+      failedImageIndexes: [],
+      processing: false,
+      showCountInput: true,
+      statusText: selectedImages.length > 1
+        ? `已添加 ${selectedImages.length} 张图片，当前仍按单张流程处理`
+        : "图片已选择，点击开始提取",
+      statusKind: "ready"
+    });
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
+  },
+
+  handleImagePickerFailure(err, pickerName) {
+    if (this.isImagePickerCancel(err)) return;
+    console.error(`${pickerName || "image picker"} failed`, err);
+    wx.showToast({ title: "选择图片失败，请重试", icon: "none" });
+  },
+
+  isImagePickerCancel(err) {
+    const errMsg = err && err.errMsg ? String(err.errMsg).toLowerCase() : "";
+    return errMsg.includes("cancel");
   },
 
   onInputFrameTap() {
