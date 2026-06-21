@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Fix failed-result download requeue after RESULTDL review: failed eager result downloads must not be retried forever by later status/prefetch passes.
+Free mini-program local file cache immediately when source images are removed: tapping `新任务` or manually deleting a source image must delete that source image file and every extracted polaroid file that belongs to it from the mini-program file cache.
 
 Scope constraints:
 
@@ -13,6 +13,8 @@ Scope constraints:
 - Batch result order must be: selected image order, then detected polaroid order inside each image.
 - Continue processing later images if one image fails; report partial failures clearly.
 - Maximum selected images: 9.
+- Do not delete photos already saved to the user's system album; only delete mini-program local files created or referenced by the scanner flow.
+- Keep immediate result download/display behavior; cache cleanup is tied to explicit source-image removal through `新任务` or manual source-image delete.
 
 ## Current Workspace State
 
@@ -67,6 +69,7 @@ Reviewer lifecycle/download state approval commit: f10daa1
 User-reported large-result download/upload exhaustion: 2026-06-21 after about 40 extracted results are downloaded, later result downloads fail and new image uploads also fail; the earlier image upload failure symptom may share this cause; restarting the mini program or WeChat does not restore the flow.
 User-directed RESULTDL implementation constraints: 2026-06-21 reject lazy/LRU/cleanup-based behavior changes that delay result display or discard completed images; reduce Backend mini output width from 1600 to 1200; Backend must return each extracted polaroid immediately after extraction; Frontend must download and display each returned result immediately; Frontend must keep completed-size downloaded images until the mini program exits or the user manually deletes the result through New Task or source-image deletion; upload timeout max retries becomes 3; index empty-preview helper adds `单次处理的拍立得数量不应超过50张`.
 Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend blocker is failed result downloads being requeued by later status/prefetch passes after `downloadStatus=failed`.
+User-directed local-cache cleanup constraint: 2026-06-21 WeChat mini-program local files are limited to about 200 MB, which is not enough for a normal high-count task if deleted images/results remain cached; when a source image is removed by `新任务` cleanup or manual source-image deletion, Frontend must immediately delete the source image file and that source's extracted result files from mini-program local storage.
 ```
 
 ## Worktree Assignments
@@ -74,9 +77,9 @@ Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend bl
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `RESULTDL-FE-002`: prevent failed eager result downloads from being requeued by status/prefetch |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No RESULTDL follow-up unless a later review finds a Backend regression |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `RESULTDL-REV-002`: re-review Frontend failed-download requeue fix |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `CACHE-FE-001`: delete source/result local files immediately when source images are removed |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No cache-cleanup task unless Frontend finds a concrete backend contract blocker |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `CACHE-REV-001`: review local file cleanup behavior after Frontend handoff |
 
 ## Current Tasks
 
@@ -125,6 +128,8 @@ Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend bl
 | RESULTDL-REV-001 | Reviewer | done | Review exact RESULTDL behavior after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-large-result-downloads.md` | Reviewer verdict: changes requested. Backend passed the 1200/2400 geometry, immediate availability, high-count result route, fresh-upload, postprocessing, compile, and diff checks. Frontend passed positive checks for immediate display, bounded 3-active downloads, retained local paths, upload max retries of 3, late tap failure status, and helper text, but has a blocking failed-download requeue bug: a result marked `downloadStatus=failed` is queued again on later status/prefetch passes. |
 | RESULTDL-FE-002 | Frontend | done | Stop failed eager result downloads from being requeued by later status/prefetch passes. | `wechat-miniprogram/pages/index/index.js`, focused mock/test if present, `docs/agents/handoffs/2026-06-21-frontend-result-download-requeue.md` | Frontend commit `b46f215` fixes the Reviewer P1 from `b774fb2`: passive eager result prefetch now skips results already marked `downloadStatus=failed`, so later duplicate status merges or `prefetchResultImages(...)` calls do not enqueue the same result again with a fresh eager retry budget. Explicit user intent remains preserved because tapping the failed result still starts the manual save/download path. |
 | RESULTDL-REV-002 | Reviewer | done | Re-review failed-download requeue fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-result-download-requeue.md` | Reviewer verdict: approved. Reviewer polling confirmed Frontend completed `b46f215` and Backend had no follow-up task. Checks passed for the fixed failed-download requeue mock, positive 45-result immediate-display/3-active-download regression mock, upload max retries of 3, helper text, backend 60-result route/fresh-upload smoke, 1200/2400 size geometry, postprocessing compatibility, `node --check`, `python -m py_compile`, and `git diff --check`. |
+| CACHE-FE-001 | Frontend | pending | Delete mini-program local files for removed source-image groups. | `wechat-miniprogram/pages/index/index.js`, focused mock/test if present, `docs/agents/handoffs/2026-06-21-frontend-local-cache-cleanup.md` | When `新任务` clears a source-image group, Frontend immediately attempts to delete that source image path and every `localPath`/`wxfile://` extracted result belonging to that source from mini-program local files; when completed-state manual source-image deletion removes one source group, Frontend deletes only that source file and its result files and preserves/reindexes all other groups; deleting before processing clears the selected source file path; cleanup must be best-effort and must not block UI reset on individual deletion failures; cleanup must remove queued/download-tracking references for deleted results so no stale download can recreate deleted state; files already saved to the user's album are not deleted; auth, picker, upload/process/status/result, immediate display, `新任务` preservation rules for unsaved/failed groups, and `RESULTDL-FE-002` failed-download non-requeue behavior remain unchanged. |
+| CACHE-REV-001 | Reviewer | pending | Review local file cleanup after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-local-cache-cleanup.md` | Reviewer must verify actual diff and handoff for `CACHE-FE-001`, including cleanup calls for source image paths and result `localPath`/`wxfile://` paths, `新任务` clearing only groups allowed by existing save-state rules while deleting those cleared groups' files, manual completed-state single-image delete deleting exactly that source group and reindexing remaining groups, pre-processing source delete cleanup, best-effort failure handling, no deletion of system album photos, no Backend/API contract changes, no regression to immediate result display/download concurrency/failed-download non-requeue, and `node --check wechat-miniprogram/pages/index/index.js` plus `git diff --check`. |
 
 Status values:
 
@@ -176,6 +181,7 @@ Large-result output-size and immediate-delivery contract:
 - Backend must expose each extracted polaroid immediately after extraction through the existing status/result flow.
 - Frontend must download each result immediately after receiving it and display it immediately in the extraction result area.
 - Frontend must retain completed-size downloaded result images until the mini program exits or the user explicitly deletes the corresponding result through `新任务` cleanup or source-image deletion.
+- When a source image is explicitly removed by `新任务` cleanup or manual source-image deletion, Frontend must immediately delete mini-program local files for that source image and every extracted result that belongs to that source. This is required because the mini-program local file budget is about 200 MB and normal high-count tasks can exceed it if deleted groups remain cached.
 - Frontend should treat remote result URL download and album save as separate steps, preserving the per-result save state introduced by `STATE-FE-001`.
 - Clicking a late result such as result 40+ must use a valid result URL and token, retry or fall back when safe, and show a specific visible error if the download truly fails.
 - Downloading many results must not poison later upload/process attempts; after high-count result downloads, adding a new source image and starting a new upload must still work.
@@ -183,6 +189,20 @@ Large-result output-size and immediate-delivery contract:
 - Backend must also show that a new `/api/process` upload is accepted after many result downloads, or identify and fix the server-side resource/connection issue that prevents it.
 - Backend task cleanup or TTL must not delete completed task results before a normal user can download a large result set after processing completes.
 - This task does not require a new zip/bulk-download API unless Backend/Frontend find the existing per-result route cannot be made reliable.
+
+Local file cleanup contract:
+
+- Deleting a source image before processing must remove the selected source image path from mini-program local files when the path is a deletable local/temp file.
+- Manual completed-state source-image deletion must delete exactly that source image file and its extracted result files, regardless of result download/save status, while preserving all other source-image groups and reindexing their result metadata consistently.
+- `新任务` keeps the existing save-state preservation rule: preserve source-image groups with failed source state or any unsaved/failed/unknown result; delete only the groups that the current `新任务` behavior is allowed to clear.
+- For every source-image group that `新任务` clears, Frontend must also delete the source image local file and every downloaded extracted result local file belonging to that group.
+- Result cleanup covers `localPath` values created by `wx.downloadFile` and result URLs that are already `wxfile://` local paths. Remote backend result URLs are not files and must not be treated as local cleanup targets.
+- Source cleanup covers selected image `path` / `previewPath` values that are local temp files when they point at the same selected source; avoid double-deleting duplicate path references.
+- Cleanup is best-effort: individual file deletion errors should be logged for debugging but must not block the visible delete/reset action.
+- Cleanup must remove or ignore pending queued-download and active-download bookkeeping for deleted results so later callbacks/status merges do not restore deleted result state or enqueue deleted result downloads.
+- Cleanup must not call any Backend API, change `/api/process`, `/api/status`, `/api/result`, auth, RunPod startup, postprocessing, `polaroid_size`, picker, or upload/cancel contracts.
+- Cleanup must not delete photos already saved to the user's system album through `wx.saveImageToPhotosAlbum`.
+- Exiting the mini program may still rely on WeChat/system cleanup; this task is only about immediate cleanup when the user explicitly removes source-image groups.
 
 Frontend request flow:
 
@@ -360,10 +380,12 @@ Contact email contract:
 | 2026-06-21 | Clarify RESULTDL as a post-download exhaustion issue affecting downloads and uploads. | User clarified that after about 40 downloaded extraction results, later downloads fail and new image uploads also fail; the earlier upload failure may be the same issue, and restarting the mini program or WeChat does not recover. |
 | 2026-06-21 | Use output-size reduction and preserve immediate result delivery/retention for RESULTDL. | User rejected lazy/LRU/cleanup behavior changes and required Backend 1200-width output, immediate per-polaroid return, immediate Frontend download/display, active-session retention of completed-size images, upload retries capped at 3, and the 50-polaroid guidance copy. |
 | 2026-06-21 | Reopen RESULTDL Frontend for failed-download requeue after Reviewer changes requested. | Reviewer commit `b774fb2` found Backend passed, but Frontend can requeue a permanently failed eager result on later status/prefetch passes, recreating the resource-exhaustion risk. |
+| 2026-06-21 | Deleted source-image groups must immediately release mini-program local files. | User clarified the WeChat mini-program local file budget is about 200 MB, which is not enough for a normal task if removed source images and extracted result files remain cached. |
+| 2026-06-21 | Keep local-cache cleanup Frontend-only with Reviewer verification. | The files to delete are mini-program-selected source paths and `wx.downloadFile` result paths tracked in Frontend state; Backend result routes and processing contracts do not need to change. |
 
 ## Open Questions
 
-- None. The remaining RESULTDL blocker has concrete Frontend and Reviewer owners; Backend is done unless a later review finds a regression.
+- None. The local-cache cleanup requirement has concrete Frontend and Reviewer owners; Backend is out of scope unless Frontend finds a real API blocker.
 
 ## Completed Work Summary
 
@@ -419,3 +441,5 @@ Contact email contract:
 - User directed the RESULTDL implementation strategy: reduce Backend mini output width from 1600 to 1200, preserve immediate per-result Backend availability and Frontend immediate download/display, retain completed-size images during the active mini-program session until explicit deletion, cap upload retries at 3, and add the 50-polaroid guidance line under the empty-preview helper.
 - Reviewer completed `RESULTDL-REV-001` in `b774fb2` with verdict `changes requested`: Backend commit `6717034` passed, Frontend commit `86ea23a` has a P1 failed-download requeue blocker.
 - PM assigned `RESULTDL-FE-002` and `RESULTDL-REV-002` for the remaining failed-download requeue fix and re-review.
+- User clarified that the mini-program local file budget is about 200 MB and normal tasks can exceed it if deleted files remain cached.
+- PM assigned `CACHE-FE-001` and `CACHE-REV-001`: when `新任务` or manual source-image deletion removes a source-image group, Frontend must immediately delete that source image file and its extracted result local files from mini-program local storage.
