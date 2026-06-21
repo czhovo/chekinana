@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Free mini-program local file cache immediately when source images are removed: tapping `新任务` or manually deleting a source image must delete that source image file and every extracted polaroid file that belongs to it from the mini-program file cache.
+Local-cache cleanup for removed source images is approved and integrated. No active implementation task is open.
 
 Scope constraints:
 
@@ -70,6 +70,9 @@ User-reported large-result download/upload exhaustion: 2026-06-21 after about 40
 User-directed RESULTDL implementation constraints: 2026-06-21 reject lazy/LRU/cleanup-based behavior changes that delay result display or discard completed images; reduce Backend mini output width from 1600 to 1200; Backend must return each extracted polaroid immediately after extraction; Frontend must download and display each returned result immediately; Frontend must keep completed-size downloaded images until the mini program exits or the user manually deletes the result through New Task or source-image deletion; upload timeout max retries becomes 3; index empty-preview helper adds `单次处理的拍立得数量不应超过50张`.
 Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend blocker is failed result downloads being requeued by later status/prefetch passes after `downloadStatus=failed`.
 User-directed local-cache cleanup constraint: 2026-06-21 WeChat mini-program local files are limited to about 200 MB, which is not enough for a normal high-count task if deleted images/results remain cached; when a source image is removed by `新任务` cleanup or manual source-image deletion, Frontend must immediately delete the source image file and that source's extracted result files from mini-program local storage.
+Frontend local-cache cleanup commit: 7a9b81f
+Reviewer local-cache cleanup approval commit: 403cf53
+Integration push: 403cf53 main includes approved local-cache cleanup work
 ```
 
 ## Worktree Assignments
@@ -77,9 +80,9 @@ User-directed local-cache cleanup constraint: 2026-06-21 WeChat mini-program loc
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `CACHE-FE-001`: delete source/result local files immediately when source images are removed |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No cache-cleanup task unless Frontend finds a concrete backend contract blocker |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `CACHE-REV-001`: review local file cleanup behavior after Frontend handoff |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No active task |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No active task |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | No active task |
 
 ## Current Tasks
 
@@ -128,8 +131,8 @@ User-directed local-cache cleanup constraint: 2026-06-21 WeChat mini-program loc
 | RESULTDL-REV-001 | Reviewer | done | Review exact RESULTDL behavior after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-large-result-downloads.md` | Reviewer verdict: changes requested. Backend passed the 1200/2400 geometry, immediate availability, high-count result route, fresh-upload, postprocessing, compile, and diff checks. Frontend passed positive checks for immediate display, bounded 3-active downloads, retained local paths, upload max retries of 3, late tap failure status, and helper text, but has a blocking failed-download requeue bug: a result marked `downloadStatus=failed` is queued again on later status/prefetch passes. |
 | RESULTDL-FE-002 | Frontend | done | Stop failed eager result downloads from being requeued by later status/prefetch passes. | `wechat-miniprogram/pages/index/index.js`, focused mock/test if present, `docs/agents/handoffs/2026-06-21-frontend-result-download-requeue.md` | Frontend commit `b46f215` fixes the Reviewer P1 from `b774fb2`: passive eager result prefetch now skips results already marked `downloadStatus=failed`, so later duplicate status merges or `prefetchResultImages(...)` calls do not enqueue the same result again with a fresh eager retry budget. Explicit user intent remains preserved because tapping the failed result still starts the manual save/download path. |
 | RESULTDL-REV-002 | Reviewer | done | Re-review failed-download requeue fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-result-download-requeue.md` | Reviewer verdict: approved. Reviewer polling confirmed Frontend completed `b46f215` and Backend had no follow-up task. Checks passed for the fixed failed-download requeue mock, positive 45-result immediate-display/3-active-download regression mock, upload max retries of 3, helper text, backend 60-result route/fresh-upload smoke, 1200/2400 size geometry, postprocessing compatibility, `node --check`, `python -m py_compile`, and `git diff --check`. |
-| CACHE-FE-001 | Frontend | pending | Delete mini-program local files for removed source-image groups. | `wechat-miniprogram/pages/index/index.js`, focused mock/test if present, `docs/agents/handoffs/2026-06-21-frontend-local-cache-cleanup.md` | When `新任务` clears a source-image group, Frontend immediately attempts to delete that source image path and every `localPath`/`wxfile://` extracted result belonging to that source from mini-program local files; when completed-state manual source-image deletion removes one source group, Frontend deletes only that source file and its result files and preserves/reindexes all other groups; deleting before processing clears the selected source file path; cleanup must be best-effort and must not block UI reset on individual deletion failures; cleanup must remove queued/download-tracking references for deleted results so no stale download can recreate deleted state; files already saved to the user's album are not deleted; auth, picker, upload/process/status/result, immediate display, `新任务` preservation rules for unsaved/failed groups, and `RESULTDL-FE-002` failed-download non-requeue behavior remain unchanged. |
-| CACHE-REV-001 | Reviewer | pending | Review local file cleanup after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-local-cache-cleanup.md` | Reviewer must verify actual diff and handoff for `CACHE-FE-001`, including cleanup calls for source image paths and result `localPath`/`wxfile://` paths, `新任务` clearing only groups allowed by existing save-state rules while deleting those cleared groups' files, manual completed-state single-image delete deleting exactly that source group and reindexing remaining groups, pre-processing source delete cleanup, best-effort failure handling, no deletion of system album photos, no Backend/API contract changes, no regression to immediate result display/download concurrency/failed-download non-requeue, and `node --check wechat-miniprogram/pages/index/index.js` plus `git diff --check`. |
+| CACHE-FE-001 | Frontend | done | Delete mini-program local files for removed source-image groups. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-21-frontend-local-cache-cleanup.md` | Frontend integration commit `7a9b81f` implements best-effort local file cleanup for removed source-image groups: `新任务` cleanup deletes files for groups it clears, completed-state manual source-image deletion deletes exactly that source group, pre-processing source delete cleans the selected file path, source/result path cleanup is de-duplicated, pending download bookkeeping for removed results is cleared, and album photos are not deleted. |
+| CACHE-REV-001 | Reviewer | done | Review local file cleanup after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-local-cache-cleanup.md` | Reviewer integration commit `403cf53` verdict: approved. Reviewer confirmed source and result local-file cleanup, `新任务` preservation rules, manual source-image delete reindexing, pre-processing source delete cleanup, best-effort failure handling, no system-album deletion, no Backend/API changes, no regression to immediate display/download concurrency/failed-download non-requeue, and required checks. |
 
 Status values:
 
@@ -385,7 +388,7 @@ Contact email contract:
 
 ## Open Questions
 
-- None. The local-cache cleanup requirement has concrete Frontend and Reviewer owners; Backend is out of scope unless Frontend finds a real API blocker.
+- None. Local-cache cleanup is approved and integrated; no active implementation or review tasks remain.
 
 ## Completed Work Summary
 
@@ -443,3 +446,6 @@ Contact email contract:
 - PM assigned `RESULTDL-FE-002` and `RESULTDL-REV-002` for the remaining failed-download requeue fix and re-review.
 - User clarified that the mini-program local file budget is about 200 MB and normal tasks can exceed it if deleted files remain cached.
 - PM assigned `CACHE-FE-001` and `CACHE-REV-001`: when `新任务` or manual source-image deletion removes a source-image group, Frontend must immediately delete that source image file and its extracted result local files from mini-program local storage.
+- Frontend completed local-cache cleanup in integration commit `7a9b81f`.
+- Reviewer approved local-cache cleanup in integration commit `403cf53`.
+- Integration `main` was pushed to GitHub at `403cf53` with the approved local-cache cleanup work.
