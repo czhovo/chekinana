@@ -376,6 +376,11 @@ Page({
 
     this.clearPollTimer();
     this.downloadingImageUrls = {};
+    const deletedImage = this.data.selectedImages[this.data.currentImageIndex];
+    this.cleanupRemovedSourceGroups([{
+      sourceImage: deletedImage,
+      results: []
+    }]);
     const selectedImages = this.data.selectedImages.filter((image, index) => index !== this.data.currentImageIndex);
     if (!selectedImages.length) {
       const nextState = {
@@ -419,11 +424,13 @@ Page({
     this.clearPollTimer();
     this.downloadingImageUrls = {};
     const deletedIndex = this.data.currentImageIndex;
+    const removedGroups = this.getSourceCleanupGroups([deletedIndex]);
     const selectedImages = this.data.selectedImages.filter((image, index) => index !== deletedIndex);
     if (!selectedImages.length) {
       this.resetAllImagesState();
       return;
     }
+    this.cleanupRemovedSourceGroups(removedGroups);
 
     const oldToNewIndex = {};
     selectedImages.forEach((image, index) => {
@@ -1359,14 +1366,18 @@ Page({
         url: image.url,
         header: this.getAuthHeader(),
         success: (res) => {
+          const currentImage = this.findCurrentResultForDownload(item);
+          if (!currentImage) return;
           if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-            this.updateImageLocalPath(image, res.tempFilePath);
+            this.updateImageLocalPath(currentImage, res.tempFilePath);
             return;
           }
-          this.handleResultDownloadFailure(item, image, res);
+          this.handleResultDownloadFailure(item, currentImage, res);
         },
         fail: (err) => {
-          this.handleResultDownloadFailure(item, image, err);
+          const currentImage = this.findCurrentResultForDownload(item);
+          if (!currentImage) return;
+          this.handleResultDownloadFailure(item, currentImage, err);
         },
         complete: () => {
           delete this.downloadingImageUrls[item.key];
@@ -1798,6 +1809,122 @@ Page({
     });
   },
 
+  getSourceCleanupGroups(sourceIndexes) {
+    const indexSet = {};
+    (sourceIndexes || []).forEach((index) => {
+      if (Number.isInteger(index)) indexSet[index] = true;
+    });
+    return Object.keys(indexSet).map((indexKey) => {
+      const sourceIndex = Number(indexKey);
+      return {
+        sourceImage: (this.data.selectedImages || [])[sourceIndex],
+        results: (this.data.extractedImages || [])
+          .filter((image) => this.getResultSourceIndex(image) === sourceIndex)
+      };
+    });
+  },
+
+  getAllSourceCleanupGroups() {
+    const selectedImages = this.data.selectedImages || [];
+    if (!selectedImages.length) {
+      return [{
+        sourceImage: null,
+        results: this.data.extractedImages || []
+      }];
+    }
+    return selectedImages.map((image, index) => ({
+      sourceImage: image,
+      results: (this.data.extractedImages || [])
+        .filter((result) => this.getResultSourceIndex(result) === index)
+    }));
+  },
+
+  cleanupRemovedSourceGroups(groups) {
+    const localPaths = {};
+    const removedResults = [];
+    (groups || []).forEach((group) => {
+      const sourceImage = group && group.sourceImage;
+      this.addLocalCleanupPath(localPaths, sourceImage && sourceImage.path);
+      this.addLocalCleanupPath(localPaths, sourceImage && sourceImage.previewPath);
+      (group && group.results || []).forEach((result) => {
+        removedResults.push(result);
+        this.addLocalCleanupPath(localPaths, result && result.localPath);
+        if (result && result.url && result.url.startsWith("wxfile://")) {
+          this.addLocalCleanupPath(localPaths, result.url);
+        }
+      });
+    });
+
+    this.dropResultDownloadReferences(removedResults);
+    Object.keys(localPaths).forEach((filePath) => {
+      this.deleteLocalFileBestEffort(filePath);
+    });
+  },
+
+  addLocalCleanupPath(localPaths, filePath) {
+    if (!filePath || !this.isLocalCleanupPath(filePath)) return;
+    localPaths[filePath] = true;
+  },
+
+  isLocalCleanupPath(filePath) {
+    if (!filePath || typeof filePath !== "string") return false;
+    return !filePath.startsWith("http://") && !filePath.startsWith("https://");
+  },
+
+  deleteLocalFileBestEffort(filePath) {
+    const fs = typeof wx.getFileSystemManager === "function" ? wx.getFileSystemManager() : null;
+    if (fs && typeof fs.unlink === "function") {
+      try {
+        fs.unlink({
+          filePath,
+          fail: (err) => {
+            this.removeSavedFileBestEffort(filePath, err);
+          }
+        });
+        return;
+      } catch (err) {
+        this.removeSavedFileBestEffort(filePath, err);
+        return;
+      }
+    }
+    this.removeSavedFileBestEffort(filePath);
+  },
+
+  removeSavedFileBestEffort(filePath, unlinkErr) {
+    if (typeof wx.removeSavedFile !== "function") {
+      if (unlinkErr) console.warn("delete local file failed", filePath, unlinkErr);
+      return;
+    }
+    wx.removeSavedFile({
+      filePath,
+      fail: (err) => {
+        console.warn("delete local file failed", filePath, unlinkErr || err);
+      }
+    });
+  },
+
+  dropResultDownloadReferences(results) {
+    const keySet = {};
+    (results || []).forEach((image) => {
+      const key = this.getResultKey(image);
+      if (key) keySet[key] = true;
+    });
+    if (!Object.keys(keySet).length) return;
+
+    this.resultDownloadQueue = (this.resultDownloadQueue || [])
+      .filter((item) => !keySet[item.key]);
+    Object.keys(keySet).forEach((key) => {
+      delete this.queuedResultDownloadKeys[key];
+      delete this.downloadingImageUrls[key];
+    });
+  },
+
+  findCurrentResultForDownload(item) {
+    const image = this.findExtractedImageByKey(item && item.key);
+    if (!image || !item || !item.image) return null;
+    return image.url === item.image.url ? image : null;
+  },
+
   clearProcessedImages() {
     const selectedImages = this.data.selectedImages || [];
     if (!selectedImages.length) {
@@ -1838,6 +1965,11 @@ Page({
       return;
     }
 
+    const removedSourceIndexes = selectedImages
+      .map((image, index) => index)
+      .filter((index) => !preserveSourceIndexSet[index]);
+    this.cleanupRemovedSourceGroups(this.getSourceCleanupGroups(removedSourceIndexes));
+
     const remainingExtractedImages = extractedImages
       .filter((image) => preserveSourceIndexSet[this.getResultSourceIndex(image)])
       .map((image) => Object.assign({}, image, {
@@ -1867,6 +1999,7 @@ Page({
   resetAllImagesState() {
     this.clearPollTimer();
     this.downloadingImageUrls = {};
+    this.cleanupRemovedSourceGroups(this.getAllSourceCleanupGroups());
     this.pendingAuthRestoreState = null;
     this.setData({
       inputPath: "",
