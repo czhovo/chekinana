@@ -106,6 +106,9 @@
         data-index="{{index}}"
       >
         <image class="result-image" src="{{item.localPath || item.url}}" mode="aspectFit"></image>
+        <view class="result-state-badge {{item.resultState}}">
+          <text wx:if="{{item.resultState === 'album'}}">✓</text>
+        </view>
         <view class="result-caption">{{item.title}}</view>
       </view>
     </view>

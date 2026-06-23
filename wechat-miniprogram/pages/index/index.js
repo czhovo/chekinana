@@ -8,6 +8,8 @@ const UPLOAD_TIMEOUT_MS = 15000;
 const UPLOAD_MAX_RETRIES = 3;
 const RESULT_DOWNLOAD_MAX_CONCURRENCY = 3;
 const RESULT_DOWNLOAD_MAX_RETRIES = 1;
+const RESULT_SAVE_MAX_RETRIES = 1;
+const RESULT_SAVE_OPERATION_TIMEOUT_MS = 15000;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
 const DEFAULT_POLAROID_SIZE = "mini";
@@ -1261,6 +1263,7 @@ Page({
           saveStatus: RESULT_SAVE_STATUS_UNKNOWN
         };
       })
+      .map((image) => this.decorateResultImage(image))
       .filter(Boolean);
   },
 
@@ -1286,7 +1289,9 @@ Page({
         const previousDownloadStatus = imageMap[key].downloadStatus;
         const previousLocalPath = imageMap[key].localPath;
         Object.assign(imageMap[key], image);
-        if (previousSaveStatus
+        if (previousSaveStatus === RESULT_SAVE_STATUS_SAVED) {
+          imageMap[key].saveStatus = RESULT_SAVE_STATUS_SAVED;
+        } else if (previousSaveStatus
           && (!image.saveStatus || image.saveStatus === RESULT_SAVE_STATUS_UNKNOWN)
           && previousSaveStatus !== RESULT_SAVE_STATUS_UNKNOWN) {
           imageMap[key].saveStatus = previousSaveStatus;
@@ -1299,12 +1304,13 @@ Page({
         if (previousLocalPath && !image.localPath) {
           imageMap[key].localPath = previousLocalPath;
         }
+        imageMap[key] = this.decorateResultImage(imageMap[key]);
         return;
       }
-      const copy = Object.assign({
+      const copy = this.decorateResultImage(Object.assign({
         downloadStatus: RESULT_DOWNLOAD_STATUS_UNKNOWN,
         saveStatus: RESULT_SAVE_STATUS_UNKNOWN
-      }, image);
+      }, image));
       imageMap[key] = copy;
       merged.push(copy);
     });
@@ -1413,9 +1419,31 @@ Page({
     const extractedImages = this.data.extractedImages.map((image) => {
       const key = this.getResultKey(image);
       if (key !== targetKey) return image;
-      return Object.assign({}, image, patch);
+      const nextImage = Object.assign({}, image, patch);
+      if (image.saveStatus === RESULT_SAVE_STATUS_SAVED
+        && patch.saveStatus
+        && patch.saveStatus !== RESULT_SAVE_STATUS_SAVED) {
+        nextImage.saveStatus = RESULT_SAVE_STATUS_SAVED;
+      }
+      return this.decorateResultImage(nextImage);
     });
     this.setData({ extractedImages });
+  },
+
+  decorateResultImage(image) {
+    if (!image) return image;
+    const resultState = image.saveStatus === RESULT_SAVE_STATUS_SAVED
+      ? "album"
+      : this.getResultLocalPath(image)
+        ? "downloaded"
+        : "remote";
+    return Object.assign({}, image, { resultState });
+  },
+
+  getResultLocalPath(image) {
+    if (!image) return "";
+    if (image.localPath) return image.localPath;
+    return image.url && image.url.startsWith("wxfile://") ? image.url : "";
   },
 
   getResultKey(image) {
@@ -1742,11 +1770,18 @@ Page({
         return;
       }
       const image = images[index];
-      this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
-      this.saveResultImageForBatch(image, (ok) => {
-        this.updateResultSaveState(image, {
-          saveStatus: ok ? RESULT_SAVE_STATUS_SAVED : RESULT_SAVE_STATUS_FAILED
-        });
+      const currentImage = this.findExtractedImageByKey(this.getResultKey(image)) || image;
+      if (currentImage.saveStatus === RESULT_SAVE_STATUS_SAVED) {
+        savedCount += 1;
+        saveNext(index + 1);
+        return;
+      }
+      this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+      this.setData({
+        statusText: `正在保存 ${index + 1}/${images.length}`,
+        statusKind: "processing"
+      });
+      this.saveResultToAlbum(currentImage, (ok) => {
         if (ok) {
           savedCount += 1;
         } else {
@@ -1759,52 +1794,165 @@ Page({
     saveNext(0);
   },
 
-  saveResultImageForBatch(image, done) {
+  saveResultToAlbum(image, done) {
     if (!image || !image.url) {
       done(false);
       return;
     }
 
-    const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
+    const localPath = this.getResultLocalPath(image);
     if (localPath) {
-      this.saveImagePathForBatch(localPath, done);
+      this.saveImagePathWithRetry(this.getResultKey(image), localPath, 0, done);
       return;
     }
 
-    wx.downloadFile({
-      url: image.url,
+    this.downloadResultForSaveWithRetry(this.getResultKey(image), image.url, 0, (downloadedPath) => {
+      if (!downloadedPath) {
+        done(false);
+        return;
+      }
+      this.saveImagePathWithRetry(this.getResultKey(image), downloadedPath, 0, done);
+    });
+  },
+
+  downloadResultForSaveWithRetry(key, url, retryCount, done) {
+    const image = this.findExtractedImageByKey(key);
+    if (!image || !url) {
+      done("");
+      return;
+    }
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADING });
+    this.downloadResultWithTimeout(url, (result) => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (!currentImage) {
+        done("");
+        return;
+      }
+      if (result.ok && result.filePath) {
+        this.updateImageLocalPath(currentImage, result.filePath);
+        done(result.filePath);
+        return;
+      }
+      console.error("save download failed", result.err || result.res || result.reason || result);
+      if (retryCount < RESULT_SAVE_MAX_RETRIES) {
+        this.updateResultSaveState(currentImage, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+        this.downloadResultForSaveWithRetry(key, url, retryCount + 1, done);
+        return;
+      }
+      this.updateResultSaveState(currentImage, {
+        downloadStatus: RESULT_DOWNLOAD_STATUS_FAILED,
+        saveStatus: RESULT_SAVE_STATUS_FAILED
+      });
+      done("");
+    });
+  },
+
+  downloadResultWithTimeout(url, done) {
+    let settled = false;
+    let task = null;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (task && typeof task.abort === "function") task.abort();
+      done({ ok: false, reason: "timeout" });
+    }, RESULT_SAVE_OPERATION_TIMEOUT_MS);
+    task = wx.downloadFile({
+      url,
       header: this.getAuthHeader(),
       success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-          this.updateImageLocalPath(image, res.tempFilePath);
-          this.saveImagePathForBatch(res.tempFilePath, done);
-          return;
-        }
-        done(false);
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const ok = res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath;
+        done({ ok: !!ok, filePath: ok ? res.tempFilePath : "", res });
       },
-      fail: () => {
-        done(false);
+      fail: (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        done({ ok: false, err });
       }
     });
   },
 
-  saveImagePathForBatch(filePath, done) {
+  saveImagePathWithRetry(key, filePath, retryCount, done) {
+    const image = this.findExtractedImageByKey(key);
+    if (!image || !filePath) {
+      done(false);
+      return;
+    }
+    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+    this.saveImagePathWithTimeout(filePath, (result) => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (!currentImage) {
+        done(false);
+        return;
+      }
+      if (result.ok) {
+        this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
+        done(true);
+        return;
+      }
+      if (this.isAlbumAuthDenied(result.err)) {
+        this.showAlbumAuthModal();
+        this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+        done(false);
+        return;
+      }
+      console.error("save image to album failed", result.err || result.reason || result);
+      if (retryCount < RESULT_SAVE_MAX_RETRIES) {
+        this.saveImagePathWithRetry(key, filePath, retryCount + 1, done);
+        return;
+      }
+      this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+      done(false);
+    }, () => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (currentImage) this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
+    });
+  },
+
+  saveImagePathWithTimeout(filePath, done, onLateSuccess) {
+    let doneCalled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      if (doneCalled) return;
+      doneCalled = true;
+      timedOut = true;
+      done({ ok: false, reason: "timeout" });
+    }, RESULT_SAVE_OPERATION_TIMEOUT_MS);
     wx.saveImageToPhotosAlbum({
       filePath,
-      success: () => done(true),
-      fail: (err) => {
-        if (err.errMsg && err.errMsg.includes("auth deny")) {
-          wx.hideLoading();
-          wx.showModal({
-            title: "需要相册权限",
-            content: "请在设置中允许保存到相册。",
-            confirmText: "去设置",
-            success: (res) => {
-              if (res.confirm) wx.openSetting();
-            }
-          });
+      success: () => {
+        if (timedOut) {
+          if (typeof onLateSuccess === "function") onLateSuccess();
+          return;
         }
-        done(false);
+        if (doneCalled) return;
+        doneCalled = true;
+        clearTimeout(timer);
+        done({ ok: true });
+      },
+      fail: (err) => {
+        if (doneCalled) return;
+        doneCalled = true;
+        clearTimeout(timer);
+        done({ ok: false, err });
+      }
+    });
+  },
+
+  isAlbumAuthDenied(err) {
+    return !!(err && err.errMsg && err.errMsg.includes("auth deny"));
+  },
+
+  showAlbumAuthModal() {
+    wx.showModal({
+      title: "需要相册权限",
+      content: "请在设置中允许保存到相册。",
+      confirmText: "去设置",
+      success: (res) => {
+        if (res.confirm) wx.openSetting();
       }
     });
   },
@@ -2023,82 +2171,24 @@ Page({
     const image = this.data.extractedImages[index];
     if (!image || !image.url) return;
 
-    wx.showLoading({ title: "保存中..." });
-    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
-
-    const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
-    if (localPath) {
-      this.saveToAlbum(localPath, image);
+    if (image.saveStatus === RESULT_SAVE_STATUS_SAVED) {
+      wx.showToast({ title: "已保存", icon: "success" });
       return;
     }
 
-    this.downloadAndSaveImage(image);
-  },
-
-  downloadAndSaveImage(image) {
-    wx.downloadFile({
-      url: image.url,
-      header: this.getAuthHeader(),
-      success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-          this.updateImageLocalPath(image, res.tempFilePath);
-          this.saveToAlbum(res.tempFilePath, image, false);
-          return;
-        }
-        wx.hideLoading();
-        this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
-        this.setData({
-          statusText: "结果下载失败，请重试",
-          statusKind: "error"
-        });
-        wx.showToast({ title: "下载失败", icon: "none" });
-      },
-      fail: (err) => {
-        console.error("downloadFile failed", err);
-        wx.hideLoading();
-        this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_FAILED });
-        this.setData({
-          statusText: "结果下载失败，请重试",
-          statusKind: "error"
-        });
-        wx.showToast({ title: "下载失败", icon: "none" });
-      }
-    });
-  },
-
-  saveToAlbum(filePath, fallbackImage, allowFallback = true) {
-    wx.saveImageToPhotosAlbum({
-      filePath,
-      success: () => {
-        this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
-        wx.hideLoading();
+    wx.showLoading({ title: "保存中..." });
+    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+    this.saveResultToAlbum(image, (ok) => {
+      wx.hideLoading();
+      if (ok) {
         wx.showToast({ title: "已保存", icon: "success" });
-      },
-      fail: (err) => {
-        wx.hideLoading();
-        if (err.errMsg && err.errMsg.includes("auth deny")) {
-          wx.showModal({
-            title: "需要相册权限",
-            content: "请在设置中允许保存到相册。",
-            confirmText: "去设置",
-            success: (res) => {
-              if (res.confirm) wx.openSetting();
-            }
-          });
-          this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
-          return;
-        }
-        if (allowFallback && fallbackImage && fallbackImage.url && fallbackImage.url !== filePath) {
-          this.downloadAndSaveImage(fallbackImage);
-          return;
-        }
-        this.updateResultSaveState(fallbackImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
-        this.setData({
-          statusText: "保存失败，请重试",
-          statusKind: "error"
-        });
-        wx.showToast({ title: "保存失败", icon: "none" });
+        return;
       }
+      this.setData({
+        statusText: "保存失败，请重试",
+        statusKind: "error"
+      });
+      wx.showToast({ title: "保存失败", icon: "none" });
     });
   },
 
