@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Make extracted-result download/save state explicit and reliable: every extracted result must show whether it is not downloaded to the mini program, downloaded to the mini program, or written to the user's album; all-download and single-result save must have timeout/retry/failure-skip behavior; `新任务` must judge cleanup only by whether results were written to the album.
+Make extracted-result download/save state explicit and reliable, and remove obsolete polaroid geometry base-size scaling from Backend. Frontend owns save-state UX/retry behavior; Backend owns direct current-size geometry coordinates and mini/wide visual confirmation artifacts.
 
 Scope constraints:
 
@@ -17,6 +17,7 @@ Scope constraints:
 - Keep immediate result download/display behavior; cache cleanup is tied to explicit source-image removal through `新任务` or manual source-image delete.
 - Preserve local-cache cleanup from `CACHE-FE-001`: removing a source-image group still deletes its source/result local files.
 - Do not add Backend API scope unless Frontend finds a concrete result URL/status contract blocker.
+- Backend geometry cleanup must preserve current output sizes and masks: mini `1200x1908` with image area `[[82,150],[1118,150],[1118,1533],[82,1533]]`; wide `2400x1908` with image area `[[82,150],[2318,150],[2318,1533],[82,1533]]`.
 
 ## Current Workspace State
 
@@ -77,6 +78,7 @@ Reviewer local-cache cleanup approval commit: 403cf53
 Integration push: 9a4b311 main includes approved local-cache cleanup work and taskboard completion status
 User-reported save-state issue: 2026-06-23 result thumbnails can display before local download is complete; about one third of manually tapped saves still need seconds of remote download; all-download can stay in `保存中...` for minutes until WeChat download/save APIs fail; after manually saving all visible results to album, `新任务` can still preserve some source groups as not fully saved.
 User-directed SAVE requirements: 2026-06-23 mark each extracted result's top-right corner with three distinct states: yellow circle for not downloaded to Frontend, green circle for downloaded to Frontend, green check for written to album; add timeout/retry/failure-skip behavior for both all-download and manual single-result save; ensure album-write success is correctly and durably recorded; `新任务` must decide cleanup based on whether every result in a source-image group has been written to the user's album.
+User-directed geometry cleanup requirement: 2026-06-23 PM must not directly modify code; Backend must remove obsolete old output-size parameters `800` and `1600` from runtime geometry calculation, directly write the current mini/wide output dimensions and image-area coordinates into code, and provide two visual artifacts showing mini and wide image areas for user confirmation before integration.
 ```
 
 ## Worktree Assignments
@@ -85,8 +87,8 @@ User-directed SAVE requirements: 2026-06-23 mark each extracted result's top-rig
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
 | Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `SAVE-FE-001`: visible result state badges, save timeout/retry/failure-skip, and album-save truth for `新任务` |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No active task unless Frontend finds a concrete Backend result-route blocker |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `SAVE-REV-001`: review Frontend save-state behavior after handoff |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | Own `GEOM-BE-001`: replace old base-size scaling with direct current geometry coordinates and visual artifacts |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `SAVE-REV-001` after Frontend handoff and `GEOM-REV-001` after Backend handoff |
 
 ## Current Tasks
 
@@ -139,6 +141,8 @@ User-directed SAVE requirements: 2026-06-23 mark each extracted result's top-rig
 | CACHE-REV-001 | Reviewer | done | Review local file cleanup after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-local-cache-cleanup.md` | Reviewer integration commit `403cf53` verdict: approved. Reviewer confirmed source and result local-file cleanup, `新任务` preservation rules, manual source-image delete reindexing, pre-processing source delete cleanup, best-effort failure handling, no system-album deletion, no Backend/API changes, no regression to immediate display/download concurrency/failed-download non-requeue, and required checks. |
 | SAVE-FE-001 | Frontend | pending | Make result download/save state visible and reliable, and harden all-download plus single-result save. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, focused mock/test if present, `docs/agents/handoffs/2026-06-23-frontend-result-save-state.md` | Each extracted result card shows a top-right status badge: yellow circle means not downloaded to Frontend, green circle means downloaded to Frontend but not written to album, and green check means written to album. Background result predownload, manual single-result save, and all-download must update this state consistently. Both all-download and single-result save must have bounded timeout/retry behavior for remote download and album-save operations; all-download must skip failed/timed-out items after the retry budget, continue later items, and show a visible partial-failure summary. A successful `wx.saveImageToPhotosAlbum` must durably mark that exact result as written to album even across later merge/download callbacks. `新任务` must preserve a source-image group only when at least one extracted result in that group is not written to album, and may clear a group only when every extracted result in that group is written to album; this decision must not use merely downloaded-to-Frontend state as success. Preserve result ordering, local-cache cleanup, source-image deletion semantics, auth, picker, upload/process/status/result API contracts, 3-active background predownload limit unless implementation justifies a local queue change, and `RESULTDL-FE-002` failed-download non-requeue behavior. |
 | SAVE-REV-001 | Reviewer | pending | Review result save-state badges, timeout/retry/skip behavior, and `新任务` album-write judgment after Frontend handoff. | Review only; `docs/agents/handoffs/2026-06-23-reviewer-result-save-state.md` | Reviewer must verify actual diff and Frontend handoff for `SAVE-FE-001`: top-right yellow circle / green circle / green check badge states; no remote-only result is shown as downloaded; single-result save and all-download both have bounded timeout/retry/failure-skip behavior; all-download continues after failures and reports partial failures; successful album writes are recorded as album-written and are not overwritten by later background predownload/status merge callbacks; `新任务` uses album-written state, not local download state, to decide cleanup; saved groups are cleared and local files are cleaned, unsaved/failed groups are preserved; no Backend/API contract changes; no regression to ordering, immediate result display, local-cache cleanup, source-image deletion, auth, picker, upload/cancel/status/result routes, postprocessing, or polaroid size. Required checks include `node --check wechat-miniprogram/pages/index/index.js` and `git diff --check`; targeted mocks should cover all three badge states, single-save timeout/retry/failure, all-download timeout/retry/failure-skip, state overwrite prevention, and `新任务` cleanup decisions. |
+| GEOM-BE-001 | Backend | pending | Remove obsolete base-size geometry scaling and write current mini/wide geometry directly. | `backend/app.py`, `scripts/check_polaroid_size.py` if needed, visual artifacts under `docs/agents/handoffs/` or linked from the Backend handoff, `docs/agents/handoffs/2026-06-23-backend-direct-polaroid-geometry.md` | Backend must remove runtime reliance on old output-size parameters such as `800` and `1600` for polaroid geometry, including `base_width`, `base_height`, `base_image_area_vertices`, and scale-derived image-area coordinates. Backend must directly configure current output sizes and image-area vertices: mini `1200x1908` with `[[82,150],[1118,150],[1118,1533],[82,1533]]`; wide `2400x1908` with `[[82,150],[2318,150],[2318,1533],[82,1533]]`. White-balance border masking must use the direct geometry and must not depend on obsolete base-size scale. Backend must generate two visual confirmation artifacts showing the mini and wide cards with the image areas clearly marked and coordinate labels visible so PM/user can confirm the written coordinates. Preserve mini/wide/auto semantics, output dimensions, postprocessing behavior, RunPod startup, auth, task queue/cancel/upload-cancel/result/status routes, and Frontend contracts. |
+| GEOM-REV-001 | Reviewer | pending | Review direct polaroid geometry cleanup after Backend handoff. | Review only; `docs/agents/handoffs/2026-06-23-reviewer-direct-polaroid-geometry.md` | Reviewer must verify `GEOM-BE-001` actual diff and visual artifacts: no obsolete runtime base-size geometry values `800` or `1600` remain in `backend/app.py` geometry calculation; current mini/wide output dimensions and image-area vertices are directly configured; white-balance mask uses direct geometry; generated mini/wide visual artifacts match the configured coordinates; `scripts/check_polaroid_size.py` or equivalent confirms mini `1200x1908`, wide `2400x1908`, and auto classification; no regressions to postprocessing, result routes, status metadata, auth, RunPod startup, task cancel, upload cancel, or Frontend API contracts. Required checks include `python -m py_compile backend/app.py scripts/check_polaroid_size.py`, `python scripts/check_polaroid_size.py` where dependencies are available, and `git diff --check`. |
 
 Status values:
 
@@ -186,7 +190,7 @@ Large-result output-size and immediate-delivery contract:
 - The mini program must support downloading/saving result sets larger than 40 polaroids.
 - User rejected lazy download, LRU eviction, delayed display, and active-session cleanup of completed result images.
 - Backend mini completed output width must change from `1600` to `1200`; mini remains `1:1.59`, and wide remains two mini outputs side by side.
-- Backend must recompute mini/wide output dimensions and `IMAGE_AREA_VERTICES` using the existing border proportions.
+- Backend must treat the earlier border-proportion recomputation as superseded by `GEOM-BE-001`: current production geometry should directly configure the accepted current dimensions and image-area vertices, without deriving them from obsolete base output sizes.
 - Backend must expose each extracted polaroid immediately after extraction through the existing status/result flow.
 - Frontend must download each result immediately after receiving it and display it immediately in the extraction result area.
 - Frontend must retain completed-size downloaded result images until the mini program exits or the user explicitly deletes the corresponding result through `新任务` cleanup or source-image deletion.
@@ -258,8 +262,10 @@ Polaroid size contract:
 - Existing output size is named `mini`, but RESULTDL changes its completed output width from `1600` to `1200`.
 - `mini` ratio is `1:1.59`; updated output must be `1200x1908`.
 - `wide` ratio is `2:1.59`; updated output must be `2400x1908`.
-- Updated mini image-area vertices should be the 0.75-scaled version of the prior mini geometry, rounded consistently for integer pixels; expected target is `[[83,150],[1118,150],[1118,1533],[83,1533]]`.
-- Updated wide image-area vertices should be the 0.75-scaled version of the prior wide geometry, rounded consistently for integer pixels; expected target is `[[83,150],[2318,150],[2318,1533],[83,1533]]`.
+- The previous 0.75-scaled geometry guidance is superseded by `GEOM-BE-001`; Backend should not keep runtime scaling from old output-size parameters.
+- Backend direct-geometry cleanup supersedes runtime old-size scaling: after `GEOM-BE-001`, production code should directly configure current output sizes and current image-area vertices, not derive them from old `800` / `1600` base output dimensions.
+- The accepted direct coordinates for implementation and visual confirmation are mini `[[82,150],[1118,150],[1118,1533],[82,1533]]` and wide `[[82,150],[2318,150],[2318,1533],[82,1533]]`, matching the current checked script expectations.
+- Backend must provide visual mini/wide artifacts showing the direct image-area coordinates before PM treats the geometry cleanup as ready for integration.
 - The wide card keeps the same top/bottom blank border heights as mini and the same left/right blank border widths as mini; only the total width and image-area width expand.
 - Frontend sends `polaroid_size` per image with value `auto`, `mini`, or `wide`; absent value must behave as `mini`.
 - If `polaroid_size=mini`, Backend warps every detected quadrilateral to mini output.
@@ -412,10 +418,13 @@ Contact email contract:
 | 2026-06-23 | `新任务` cleanup must judge album-write state only. | User clarified that source-image cleanup should depend on whether every extracted result was written to the user's album, not whether it merely downloaded to the mini program. |
 | 2026-06-23 | Add timeout/retry/failure-skip for all result save paths. | User testing found all-download can stay in `保存中...` for minutes until WeChat APIs fail, and manual single-result saves can wait on remote download; both paths need bounded behavior and reliable partial failure handling. |
 | 2026-06-23 | Keep save-state fixes Frontend-only with Reviewer verification. | The problem is mini-program UI state, local download/album-save tracking, and WeChat API timeout handling; Backend result routes remain unchanged unless Frontend finds a concrete blocker. |
+| 2026-06-23 | Remove obsolete polaroid geometry base-size scaling from Backend. | User clarified the old `800` and `1600` output-size parameters should be fully discarded from runtime code, with current geometry coordinates written directly instead. |
+| 2026-06-23 | Backend must provide mini/wide coordinate visualizations for PM confirmation. | User requested two images showing the mini and wide image areas so the written coordinates can be visually confirmed before integration. |
+| 2026-06-23 | PM must not modify business code directly. | User explicitly corrected the workflow: code changes must be assigned to role agents; PM coordinates through taskboard and readiness decisions only. |
 
 ## Open Questions
 
-- None. The result save-state requirement has concrete Frontend and Reviewer owners; Backend is out of scope unless Frontend finds a real API blocker.
+- None. The result save-state and direct-geometry cleanup requirements have concrete Frontend, Backend, and Reviewer owners.
 
 ## Completed Work Summary
 
@@ -478,3 +487,5 @@ Contact email contract:
 - Integration `main` was pushed to GitHub at `9a4b311` with the approved local-cache cleanup work and taskboard completion status.
 - User testing found that result display does not distinguish remote-only, downloaded-to-Frontend, and written-to-album states; tapping single results can still need seconds of download, all-download can stay in `保存中...` for minutes, and `新任务` can preserve groups even after the user manually saved visible results to album.
 - PM assigned `SAVE-FE-001` and `SAVE-REV-001` for visible three-state result badges, bounded timeout/retry/failure-skip save behavior, durable album-write recording, and `新任务` cleanup decisions based only on album-write state.
+- User clarified that PM must not directly modify code and all code changes should be assigned to role agents.
+- PM assigned `GEOM-BE-001` and `GEOM-REV-001`: Backend must remove obsolete `800`/`1600` base-size scaling from polaroid geometry, directly write current mini/wide dimensions and image-area coordinates, and provide mini/wide visual artifacts for confirmation; Reviewer must verify the diff, artifacts, and regression checks.
