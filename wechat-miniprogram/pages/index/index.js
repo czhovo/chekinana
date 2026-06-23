@@ -643,13 +643,14 @@ Page({
   finishInterruptedProcessing(images) {
     this.clearPollTimer();
     const visibleImages = Array.isArray(images) ? images : this.data.extractedImages;
+    const extractedImages = this.mergeWithLatestResultState(visibleImages);
     this.activeTaskId = "";
     this.setData({
-      extractedImages: visibleImages,
+      extractedImages,
       processing: false,
       showCountInput: false,
-      statusText: visibleImages.length
-        ? `已中断处理，已保留 ${visibleImages.length} 张结果`
+      statusText: extractedImages.length
+        ? `已中断处理，已保留 ${extractedImages.length} 张结果`
         : "已中断处理",
       statusKind: "error"
     });
@@ -730,7 +731,7 @@ Page({
       const nextFailures = result.error
         ? failures.concat({ imageIndex, message: result.error })
         : failures;
-      this.setData({ extractedImages: this.mergeImages(this.data.extractedImages, nextImages) });
+      this.setExtractedImagesPreservingState(nextImages);
       this.processBatchImage(processImages, imageIndex + 1, nextImages, nextFailures, apiBaseUrl, token, runId);
     });
   },
@@ -850,7 +851,7 @@ Page({
 
     const directImages = this.scopeBatchImages(this.normalizeImages(payload), imageIndex, `image${imageIndex + 1}`);
     if (directImages.length > 0) {
-      this.setData({ extractedImages: this.mergeImages(baseImages, directImages) });
+      this.setExtractedImagesPreservingState(this.mergeImages(baseImages, directImages));
       const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
       done({
         images: directImages,
@@ -905,7 +906,7 @@ Page({
           const status = payload.status || payload.state;
           const images = this.scopeBatchImages(this.normalizeImages(payload, taskId), imageIndex, taskId);
           const nextCollectedImages = this.mergeImages(collectedImages, images);
-          const visibleImages = this.mergeImages(baseImages, nextCollectedImages);
+          const visibleImages = this.mergeWithLatestResultState(this.mergeImages(baseImages, nextCollectedImages));
           const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
           const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
@@ -999,14 +1000,15 @@ Page({
   finishBatchExtract(images, failures, totalImages) {
     this.clearPollTimer();
     this.activeTaskId = "";
-    const hasImages = images.length > 0;
+    const mergedImages = this.mergeWithLatestResultState(images);
+    const hasImages = mergedImages.length > 0;
     const shortageText = this.getShortageSummaryText(failures);
     const statusText = hasImages
       ? shortageText
-        ? `批量处理完成，共提取 ${images.length} 张，${shortageText}`
+        ? `批量处理完成，共提取 ${mergedImages.length} 张，${shortageText}`
         : failures.length
-          ? `批量处理完成，提取 ${images.length} 张，${failures.length}/${totalImages} 张图片失败`
-          : `批量处理完成，共提取 ${images.length} 张`
+          ? `批量处理完成，提取 ${mergedImages.length} 张，${failures.length}/${totalImages} 张图片失败`
+          : `批量处理完成，共提取 ${mergedImages.length} 张`
       : shortageText
         ? `批量处理完成，${shortageText}`
         : `批量处理失败，${failures.length || totalImages}/${totalImages} 张图片未提取到结果`;
@@ -1016,7 +1018,7 @@ Page({
         : "done"
       : "error";
     this.setData({
-      extractedImages: images,
+      extractedImages: mergedImages,
       failedImageIndexes: failures.map((failure) => failure.imageIndex),
       processing: false,
       showCountInput: false,
@@ -1024,7 +1026,7 @@ Page({
       statusKind
     });
     if (hasImages) {
-      this.prefetchResultImages(images);
+      this.prefetchResultImages(mergedImages);
     } else {
       wx.showToast({ title: "批量处理失败", icon: "none" });
     }
@@ -1270,11 +1272,19 @@ Page({
   updatePartialImages(images) {
     if (!images.length) return;
 
-    const merged = this.mergeImages(this.data.extractedImages, images);
-    if (merged.length !== this.data.extractedImages.length) {
-      this.setData({ extractedImages: merged });
-    }
+    const merged = this.mergeWithLatestResultState(images);
+    this.setData({ extractedImages: merged });
     this.prefetchResultImages(merged);
+  },
+
+  setExtractedImagesPreservingState(images) {
+    const merged = this.mergeWithLatestResultState(images);
+    this.setData({ extractedImages: merged });
+    return merged;
+  },
+
+  mergeWithLatestResultState(images) {
+    return this.mergeImages(this.data.extractedImages || [], images || []);
   },
 
   mergeImages(currentImages, nextImages) {
@@ -1285,26 +1295,27 @@ Page({
       if (!image || !image.url) return;
       const key = String(image.id || image.url);
       if (imageMap[key]) {
+        const target = imageMap[key];
         const previousSaveStatus = imageMap[key].saveStatus;
         const previousDownloadStatus = imageMap[key].downloadStatus;
         const previousLocalPath = imageMap[key].localPath;
-        Object.assign(imageMap[key], image);
+        Object.assign(target, image);
         if (previousSaveStatus === RESULT_SAVE_STATUS_SAVED) {
-          imageMap[key].saveStatus = RESULT_SAVE_STATUS_SAVED;
+          target.saveStatus = RESULT_SAVE_STATUS_SAVED;
         } else if (previousSaveStatus
           && (!image.saveStatus || image.saveStatus === RESULT_SAVE_STATUS_UNKNOWN)
           && previousSaveStatus !== RESULT_SAVE_STATUS_UNKNOWN) {
-          imageMap[key].saveStatus = previousSaveStatus;
+          target.saveStatus = previousSaveStatus;
         }
         if (previousDownloadStatus
           && (!image.downloadStatus || image.downloadStatus === RESULT_DOWNLOAD_STATUS_UNKNOWN)
           && previousDownloadStatus !== RESULT_DOWNLOAD_STATUS_UNKNOWN) {
-          imageMap[key].downloadStatus = previousDownloadStatus;
+          target.downloadStatus = previousDownloadStatus;
         }
         if (previousLocalPath && !image.localPath) {
-          imageMap[key].localPath = previousLocalPath;
+          target.localPath = previousLocalPath;
         }
-        imageMap[key] = this.decorateResultImage(imageMap[key]);
+        Object.assign(target, this.decorateResultImage(target));
         return;
       }
       const copy = this.decorateResultImage(Object.assign({
