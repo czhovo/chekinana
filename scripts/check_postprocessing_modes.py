@@ -80,7 +80,8 @@ def check_white_balance():
     image[16:48, 16:48] = [70, 80, 90]
     geometry = {
         "image_area_vertices": np.array([[16, 16], [48, 16], [48, 48], [16, 48]], dtype=np.int32),
-        "scale": 0.125,
+        "white_balance_block_size": 4,
+        "white_balance_step": 2,
     }
     balanced, info = backend_app.apply_fixed_border_white_balance(image, geometry)
     assert info["applied"] is True

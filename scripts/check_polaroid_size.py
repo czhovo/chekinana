@@ -128,10 +128,18 @@ def main():
 
     mini_geometry = backend_app.get_polaroid_geometry(backend_app.POLAROID_SIZE_MINI)
     wide_geometry = backend_app.get_polaroid_geometry(backend_app.POLAROID_SIZE_WIDE)
+    for geometry in (mini_geometry, wide_geometry):
+        assert "base_width" not in geometry
+        assert "base_height" not in geometry
+        assert "base_image_area_vertices" not in geometry
+        assert "scale" not in geometry
+
     assert (mini_geometry["width"], mini_geometry["height"]) == (1200, 1908)
     assert mini_geometry["image_area_vertices"].tolist() == [[82, 150], [1118, 150], [1118, 1533], [82, 1533]]
+    assert (mini_geometry["white_balance_block_size"], mini_geometry["white_balance_step"]) == (48, 24)
     assert (wide_geometry["width"], wide_geometry["height"]) == (2400, 1908)
     assert wide_geometry["image_area_vertices"].tolist() == [[82, 150], [2318, 150], [2318, 1533], [82, 1533]]
+    assert (wide_geometry["white_balance_block_size"], wide_geometry["white_balance_step"]) == (48, 24)
 
     assert backend_app.resolve_polaroid_size("mini", WIDE_VERTS) == "mini"
     assert backend_app.resolve_polaroid_size("wide", MINI_VERTS) == "wide"
