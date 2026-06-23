@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Local-cache cleanup for removed source images is approved and integrated. No active implementation task is open.
+Make extracted-result download/save state explicit and reliable: every extracted result must show whether it is not downloaded to the mini program, downloaded to the mini program, or written to the user's album; all-download and single-result save must have timeout/retry/failure-skip behavior; `新任务` must judge cleanup only by whether results were written to the album.
 
 Scope constraints:
 
@@ -15,6 +15,8 @@ Scope constraints:
 - Maximum selected images: 9.
 - Do not delete photos already saved to the user's system album; only delete mini-program local files created or referenced by the scanner flow.
 - Keep immediate result download/display behavior; cache cleanup is tied to explicit source-image removal through `新任务` or manual source-image delete.
+- Preserve local-cache cleanup from `CACHE-FE-001`: removing a source-image group still deletes its source/result local files.
+- Do not add Backend API scope unless Frontend finds a concrete result URL/status contract blocker.
 
 ## Current Workspace State
 
@@ -72,7 +74,9 @@ Reviewer RESULTDL changes-requested commit: b774fb2; Backend passed, Frontend bl
 User-directed local-cache cleanup constraint: 2026-06-21 WeChat mini-program local files are limited to about 200 MB, which is not enough for a normal high-count task if deleted images/results remain cached; when a source image is removed by `新任务` cleanup or manual source-image deletion, Frontend must immediately delete the source image file and that source's extracted result files from mini-program local storage.
 Frontend local-cache cleanup commit: 7a9b81f
 Reviewer local-cache cleanup approval commit: 403cf53
-Integration push: 403cf53 main includes approved local-cache cleanup work
+Integration push: 9a4b311 main includes approved local-cache cleanup work and taskboard completion status
+User-reported save-state issue: 2026-06-23 result thumbnails can display before local download is complete; about one third of manually tapped saves still need seconds of remote download; all-download can stay in `保存中...` for minutes until WeChat download/save APIs fail; after manually saving all visible results to album, `新任务` can still preserve some source groups as not fully saved.
+User-directed SAVE requirements: 2026-06-23 mark each extracted result's top-right corner with three distinct states: yellow circle for not downloaded to Frontend, green circle for downloaded to Frontend, green check for written to album; add timeout/retry/failure-skip behavior for both all-download and manual single-result save; ensure album-write success is correctly and durably recorded; `新任务` must decide cleanup based on whether every result in a source-image group has been written to the user's album.
 ```
 
 ## Worktree Assignments
@@ -80,9 +84,9 @@ Integration push: 403cf53 main includes approved local-cache cleanup work
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No active task |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No active task |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | No active task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | Own `SAVE-FE-001`: visible result state badges, save timeout/retry/failure-skip, and album-save truth for `新任务` |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No active task unless Frontend finds a concrete Backend result-route blocker |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | Own `SAVE-REV-001`: review Frontend save-state behavior after handoff |
 
 ## Current Tasks
 
@@ -133,6 +137,8 @@ Integration push: 403cf53 main includes approved local-cache cleanup work
 | RESULTDL-REV-002 | Reviewer | done | Re-review failed-download requeue fix after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-result-download-requeue.md` | Reviewer verdict: approved. Reviewer polling confirmed Frontend completed `b46f215` and Backend had no follow-up task. Checks passed for the fixed failed-download requeue mock, positive 45-result immediate-display/3-active-download regression mock, upload max retries of 3, helper text, backend 60-result route/fresh-upload smoke, 1200/2400 size geometry, postprocessing compatibility, `node --check`, `python -m py_compile`, and `git diff --check`. |
 | CACHE-FE-001 | Frontend | done | Delete mini-program local files for removed source-image groups. | `wechat-miniprogram/pages/index/index.js`, `docs/agents/handoffs/2026-06-21-frontend-local-cache-cleanup.md` | Frontend integration commit `7a9b81f` implements best-effort local file cleanup for removed source-image groups: `新任务` cleanup deletes files for groups it clears, completed-state manual source-image deletion deletes exactly that source group, pre-processing source delete cleans the selected file path, source/result path cleanup is de-duplicated, pending download bookkeeping for removed results is cleared, and album photos are not deleted. |
 | CACHE-REV-001 | Reviewer | done | Review local file cleanup after Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-21-reviewer-local-cache-cleanup.md` | Reviewer integration commit `403cf53` verdict: approved. Reviewer confirmed source and result local-file cleanup, `新任务` preservation rules, manual source-image delete reindexing, pre-processing source delete cleanup, best-effort failure handling, no system-album deletion, no Backend/API changes, no regression to immediate display/download concurrency/failed-download non-requeue, and required checks. |
+| SAVE-FE-001 | Frontend | pending | Make result download/save state visible and reliable, and harden all-download plus single-result save. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, focused mock/test if present, `docs/agents/handoffs/2026-06-23-frontend-result-save-state.md` | Each extracted result card shows a top-right status badge: yellow circle means not downloaded to Frontend, green circle means downloaded to Frontend but not written to album, and green check means written to album. Background result predownload, manual single-result save, and all-download must update this state consistently. Both all-download and single-result save must have bounded timeout/retry behavior for remote download and album-save operations; all-download must skip failed/timed-out items after the retry budget, continue later items, and show a visible partial-failure summary. A successful `wx.saveImageToPhotosAlbum` must durably mark that exact result as written to album even across later merge/download callbacks. `新任务` must preserve a source-image group only when at least one extracted result in that group is not written to album, and may clear a group only when every extracted result in that group is written to album; this decision must not use merely downloaded-to-Frontend state as success. Preserve result ordering, local-cache cleanup, source-image deletion semantics, auth, picker, upload/process/status/result API contracts, 3-active background predownload limit unless implementation justifies a local queue change, and `RESULTDL-FE-002` failed-download non-requeue behavior. |
+| SAVE-REV-001 | Reviewer | pending | Review result save-state badges, timeout/retry/skip behavior, and `新任务` album-write judgment after Frontend handoff. | Review only; `docs/agents/handoffs/2026-06-23-reviewer-result-save-state.md` | Reviewer must verify actual diff and Frontend handoff for `SAVE-FE-001`: top-right yellow circle / green circle / green check badge states; no remote-only result is shown as downloaded; single-result save and all-download both have bounded timeout/retry/failure-skip behavior; all-download continues after failures and reports partial failures; successful album writes are recorded as album-written and are not overwritten by later background predownload/status merge callbacks; `新任务` uses album-written state, not local download state, to decide cleanup; saved groups are cleared and local files are cleaned, unsaved/failed groups are preserved; no Backend/API contract changes; no regression to ordering, immediate result display, local-cache cleanup, source-image deletion, auth, picker, upload/cancel/status/result routes, postprocessing, or polaroid size. Required checks include `node --check wechat-miniprogram/pages/index/index.js` and `git diff --check`; targeted mocks should cover all three badge states, single-save timeout/retry/failure, all-download timeout/retry/failure-skip, state overwrite prevention, and `新任务` cleanup decisions. |
 
 Status values:
 
@@ -206,6 +212,23 @@ Local file cleanup contract:
 - Cleanup must not call any Backend API, change `/api/process`, `/api/status`, `/api/result`, auth, RunPod startup, postprocessing, `polaroid_size`, picker, or upload/cancel contracts.
 - Cleanup must not delete photos already saved to the user's system album through `wx.saveImageToPhotosAlbum`.
 - Exiting the mini program may still rely on WeChat/system cleanup; this task is only about immediate cleanup when the user explicitly removes source-image groups.
+
+Result save-state contract:
+
+- Every extracted result must expose three user-visible states on the result card's top-right corner:
+  - yellow circle: not downloaded to Frontend; the result is only available by remote backend URL or is waiting/failed before local download.
+  - green circle: downloaded to Frontend; a valid local mini-program file path exists, but the result has not been written to the user's album.
+  - green check: written to the user's album; `wx.saveImageToPhotosAlbum` has succeeded for that exact result.
+- A result being visible in the result grid is not sufficient to treat it as downloaded or album-saved.
+- Frontend state must keep local-download state and album-write state separate; album-write success is the only success state used by `新任务`.
+- Background predownload may still run after results arrive, but it must not overwrite a result that is already marked written to album.
+- Manual single-result save and all-download must both use bounded timeout and retry behavior for remote result downloads and album writes.
+- If a manual single-result save times out or fails after retry budget, the result must visibly remain not album-written and show a failure state/message without corrupting other results.
+- If all-download times out or fails on one result after retry budget, it must mark that result failed/not album-written, skip it, continue later results, and show a final partial-failure summary.
+- All-download must not stay indefinitely in `保存中...`; every per-result operation needs a completion path through success, failure, or timeout.
+- `新任务` must preserve a source-image group if any extracted result in that group is not album-written.
+- `新任务` may clear a source-image group only if every extracted result in that group is album-written, and clearing the group must retain the `CACHE-FE-001` behavior of deleting the source/result local files for that cleared group.
+- The save-state UI and logic must not introduce new Backend API requirements.
 
 Frontend request flow:
 
@@ -385,10 +408,14 @@ Contact email contract:
 | 2026-06-21 | Reopen RESULTDL Frontend for failed-download requeue after Reviewer changes requested. | Reviewer commit `b774fb2` found Backend passed, but Frontend can requeue a permanently failed eager result on later status/prefetch passes, recreating the resource-exhaustion risk. |
 | 2026-06-21 | Deleted source-image groups must immediately release mini-program local files. | User clarified the WeChat mini-program local file budget is about 200 MB, which is not enough for a normal task if removed source images and extracted result files remain cached. |
 | 2026-06-21 | Keep local-cache cleanup Frontend-only with Reviewer verification. | The files to delete are mini-program-selected source paths and `wx.downloadFile` result paths tracked in Frontend state; Backend result routes and processing contracts do not need to change. |
+| 2026-06-23 | Expose three result states directly on result cards. | User testing showed result display can hide whether a polaroid is remote-only, downloaded locally, or already saved to album; each state must be visible with yellow circle, green circle, or green check. |
+| 2026-06-23 | `新任务` cleanup must judge album-write state only. | User clarified that source-image cleanup should depend on whether every extracted result was written to the user's album, not whether it merely downloaded to the mini program. |
+| 2026-06-23 | Add timeout/retry/failure-skip for all result save paths. | User testing found all-download can stay in `保存中...` for minutes until WeChat APIs fail, and manual single-result saves can wait on remote download; both paths need bounded behavior and reliable partial failure handling. |
+| 2026-06-23 | Keep save-state fixes Frontend-only with Reviewer verification. | The problem is mini-program UI state, local download/album-save tracking, and WeChat API timeout handling; Backend result routes remain unchanged unless Frontend finds a concrete blocker. |
 
 ## Open Questions
 
-- None. Local-cache cleanup is approved and integrated; no active implementation or review tasks remain.
+- None. The result save-state requirement has concrete Frontend and Reviewer owners; Backend is out of scope unless Frontend finds a real API blocker.
 
 ## Completed Work Summary
 
@@ -448,4 +475,6 @@ Contact email contract:
 - PM assigned `CACHE-FE-001` and `CACHE-REV-001`: when `新任务` or manual source-image deletion removes a source-image group, Frontend must immediately delete that source image file and its extracted result local files from mini-program local storage.
 - Frontend completed local-cache cleanup in integration commit `7a9b81f`.
 - Reviewer approved local-cache cleanup in integration commit `403cf53`.
-- Integration `main` was pushed to GitHub at `403cf53` with the approved local-cache cleanup work.
+- Integration `main` was pushed to GitHub at `9a4b311` with the approved local-cache cleanup work and taskboard completion status.
+- User testing found that result display does not distinguish remote-only, downloaded-to-Frontend, and written-to-album states; tapping single results can still need seconds of download, all-download can stay in `保存中...` for minutes, and `新任务` can preserve groups even after the user manually saved visible results to album.
+- PM assigned `SAVE-FE-001` and `SAVE-REV-001` for visible three-state result badges, bounded timeout/retry/failure-skip save behavior, durable album-write recording, and `新任务` cleanup decisions based only on album-write state.
