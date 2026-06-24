@@ -117,11 +117,14 @@ On every pod start:
    ModelScope caches.
 2. Recreates `/root/.ssh` from the RunPod environment.
 3. Clones or fetches `CHEKINANA_REPO_BRANCH` from GitHub.
-4. Fails loudly and exits if clone/fetch/checkout/reset fails.
-5. Creates or reuses `/workspace/.chekinana/venv`.
-6. Installs or updates dependencies when `backend/requirements.txt` changes.
-7. Prints PyTorch/CUDA information.
-8. Starts `backend/app.py` on `0.0.0.0:8080`.
+4. Retries GitHub clone/fetch/checkout/reset on temporary network failures.
+   Defaults: `CHEKINANA_GIT_SYNC_ATTEMPTS=3` and
+   `CHEKINANA_GIT_SYNC_RETRY_SECONDS=10`.
+5. Fails loudly and exits if GitHub sync still fails after all retries.
+6. Creates or reuses `/workspace/.chekinana/venv`.
+7. Installs or updates dependencies when `backend/requirements.txt` changes.
+8. Prints PyTorch/CUDA information.
+9. Starts `backend/app.py` on `0.0.0.0:8080`.
 
 The script intentionally does not continue with stale code when GitHub sync
 fails.

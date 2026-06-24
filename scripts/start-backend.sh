@@ -37,6 +37,8 @@ HOST="${HOST:-0.0.0.0}"
 THREADS="${THREADS:-6}"
 PYTORCH_INDEX_URL="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 SSH_KEY_PATH="${CHEKINANA_SSH_KEY_PATH:-/root/.ssh/chekinana_github}"
+GIT_SYNC_ATTEMPTS="${CHEKINANA_GIT_SYNC_ATTEMPTS:-3}"
+GIT_SYNC_RETRY_SECONDS="${CHEKINANA_GIT_SYNC_RETRY_SECONDS:-10}"
 
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=utf-8
@@ -62,6 +64,26 @@ ensure_command() {
   fi
 
   command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd. Install $pkg in the RunPod template."
+}
+
+retry_cmd() {
+  local description="$1"
+  shift
+  local attempt=1
+
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+
+    if [ "$attempt" -ge "$GIT_SYNC_ATTEMPTS" ]; then
+      return 1
+    fi
+
+    log "$description failed on attempt $attempt/$GIT_SYNC_ATTEMPTS; retrying in ${GIT_SYNC_RETRY_SECONDS}s"
+    sleep "$GIT_SYNC_RETRY_SECONDS"
+    attempt=$((attempt + 1))
+  done
 }
 
 write_ssh_key() {
@@ -146,9 +168,9 @@ sync_repo() {
   log "Syncing GitHub repo: $REPO_URL branch: $REPO_BRANCH"
   if [ -d "$APP_DIR/.git" ]; then
     git -C "$APP_DIR" remote set-url origin "$REPO_URL"
-    git -C "$APP_DIR" fetch --prune origin "+refs/heads/$REPO_BRANCH:refs/remotes/origin/$REPO_BRANCH" || die "GitHub sync failed during fetch. Check SSH key, network, repo URL, and branch."
-    git -C "$APP_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH" || die "GitHub sync failed during checkout."
-    git -C "$APP_DIR" reset --hard "origin/$REPO_BRANCH" || die "GitHub sync failed during reset."
+    retry_cmd "GitHub fetch" git -C "$APP_DIR" fetch --prune origin "+refs/heads/$REPO_BRANCH:refs/remotes/origin/$REPO_BRANCH" || die "GitHub sync failed during fetch after $GIT_SYNC_ATTEMPTS attempts. Check SSH key, network, repo URL, and branch."
+    retry_cmd "Git checkout" git -C "$APP_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH" || die "GitHub sync failed during checkout after $GIT_SYNC_ATTEMPTS attempts."
+    retry_cmd "Git reset" git -C "$APP_DIR" reset --hard "origin/$REPO_BRANCH" || die "GitHub sync failed during reset after $GIT_SYNC_ATTEMPTS attempts."
   else
     if [ -e "$APP_DIR" ] && [ "$(find "$APP_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
       local backup_dir="${APP_DIR}.non-git.$(date +%Y%m%d-%H%M%S)"
@@ -156,11 +178,11 @@ sync_repo() {
       mv "$APP_DIR" "$backup_dir"
     fi
 
-    git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$APP_DIR" || die "GitHub sync failed during clone. Check SSH key, network, repo URL, and branch."
+    retry_cmd "GitHub clone" git clone --branch "$REPO_BRANCH" --single-branch "$REPO_URL" "$APP_DIR" || die "GitHub sync failed during clone after $GIT_SYNC_ATTEMPTS attempts. Check SSH key, network, repo URL, and branch."
   fi
 
   if [ -f "$APP_DIR/.gitmodules" ]; then
-    git -C "$APP_DIR" submodule update --init --recursive || die "GitHub sync failed during submodule update."
+    retry_cmd "Git submodule update" git -C "$APP_DIR" submodule update --init --recursive || die "GitHub sync failed during submodule update after $GIT_SYNC_ATTEMPTS attempts."
   fi
 
   log "GitHub sync complete: $(git -C "$APP_DIR" rev-parse --short HEAD) $(git -C "$APP_DIR" log -1 --pretty=%s)"
