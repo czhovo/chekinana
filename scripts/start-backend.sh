@@ -87,6 +87,15 @@ retry_cmd() {
 }
 
 write_ssh_key() {
+  local key_value="${CHEKINANA_GITHUB_SSH_KEY:-${GITHUB_SSH_PRIVATE_KEY:-}}"
+  if [ -n "$key_value" ]; then
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    printf '%s\n' "$key_value" | sed 's/\r$//' > "$SSH_KEY_PATH"
+    chmod 600 "$SSH_KEY_PATH"
+    return 0
+  fi
+
   local key_b64_value="${CHEKINANA_GITHUB_SSH_KEY_B64:-${GITHUB_SSH_PRIVATE_KEY_B64:-}}"
   if [ -n "$key_b64_value" ]; then
     mkdir -p /root/.ssh
@@ -96,16 +105,7 @@ write_ssh_key() {
     return 0
   fi
 
-  local key_value="${CHEKINANA_GITHUB_SSH_KEY:-${GITHUB_SSH_PRIVATE_KEY:-}}"
-  if [ -z "$key_value" ]; then
-    return 1
-  fi
-
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
-  printf '%s\n' "$key_value" | sed 's/\r$//' > "$SSH_KEY_PATH"
-  chmod 600 "$SSH_KEY_PATH"
-  return 0
+  return 1
 }
 
 prepare_ssh() {
@@ -129,7 +129,7 @@ prepare_ssh() {
     chmod 600 "$SSH_KEY_PATH"
     log "Using existing default SSH key at $SSH_KEY_PATH"
   else
-    die "No GitHub SSH key found. Set CHEKINANA_GITHUB_SSH_KEY_B64, CHEKINANA_GITHUB_SSH_KEY, GITHUB_SSH_PRIVATE_KEY_B64, or GITHUB_SSH_PRIVATE_KEY in the RunPod environment."
+    die "No GitHub SSH key found. Set CHEKINANA_GITHUB_SSH_KEY or GITHUB_SSH_PRIVATE_KEY in the RunPod environment. CHEKINANA_GITHUB_SSH_KEY_B64 and GITHUB_SSH_PRIVATE_KEY_B64 are legacy fallbacks."
   fi
 
   cat > /root/.ssh/config <<EOF

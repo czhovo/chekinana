@@ -39,11 +39,12 @@ Set the pod start command to:
 bash /workspace/chekinana/scripts/start-backend.sh
 ```
 
-For a brand-new pod where `/workspace/chekinana` does not exist yet, use this
-bootstrap start command once:
+For a brand-new pod, or any pod that may migrate between machines, use this
+bootstrap start command. It syncs GitHub on every start and retries transient
+clone/fetch failures three times with a 10 second delay:
 
 ```bash
-bash -lc 'set -e; mkdir -p /workspace/bootstrap; if [ ! -d /workspace/chekinana/.git ]; then mkdir -p /root/.ssh; chmod 700 /root/.ssh; printf "%s\n" "$CHEKINANA_GITHUB_SSH_KEY" | sed "s/\r$//" > /root/.ssh/chekinana_github; chmod 600 /root/.ssh/chekinana_github; cat > /root/.ssh/config <<EOF
+bash -lc 'set -e; APP="${CHEKINANA_APP_DIR:-/workspace/chekinana}"; REPO="${CHEKINANA_REPO_URL:-ssh://git@ssh.github.com:443/czhovo/chekinana.git}"; BRANCH="${CHEKINANA_REPO_BRANCH:-main}"; ATTEMPTS="${CHEKINANA_GIT_SYNC_ATTEMPTS:-3}"; DELAY="${CHEKINANA_GIT_SYNC_RETRY_SECONDS:-10}"; mkdir -p /root/.ssh /workspace/bootstrap; chmod 700 /root/.ssh; printf "%s\n" "$CHEKINANA_GITHUB_SSH_KEY" | sed "s/\r$//" > /root/.ssh/chekinana_github; chmod 600 /root/.ssh/chekinana_github; cat > /root/.ssh/config <<EOF
 Host github.com
   HostName ssh.github.com
   Port 443
@@ -58,14 +59,7 @@ Host ssh.github.com
   IdentitiesOnly yes
   StrictHostKeyChecking accept-new
 EOF
-chmod 600 /root/.ssh/config; export GIT_SSH_COMMAND="ssh -F /root/.ssh/config"; git clone --branch "${CHEKINANA_REPO_BRANCH:-main}" --single-branch "${CHEKINANA_REPO_URL:-ssh://git@ssh.github.com:443/czhovo/chekinana.git}" /workspace/chekinana; fi; exec bash /workspace/chekinana/scripts/start-backend.sh'
-```
-
-After the first successful clone, change the pod start command back to the
-normal command:
-
-```bash
-bash /workspace/chekinana/scripts/start-backend.sh
+chmod 600 /root/.ssh/config; export GIT_SSH_COMMAND="ssh -F /root/.ssh/config -o ServerAliveInterval=30 -o ServerAliveCountMax=3"; run_retry(){ desc="$1"; shift; n=1; while true; do "$@" && return 0; if [ "$n" -ge "$ATTEMPTS" ]; then echo "[chekinana:start:ERROR] $desc failed after $ATTEMPTS attempts" >&2; return 1; fi; echo "[chekinana:start] $desc failed on attempt $n/$ATTEMPTS; retrying in ${DELAY}s"; sleep "$DELAY"; n=$((n+1)); done; }; if [ -d "$APP/.git" ]; then git -C "$APP" remote set-url origin "$REPO"; run_retry "GitHub fetch" git -C "$APP" fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"; run_retry "Git checkout" git -C "$APP" checkout -B "$BRANCH" "origin/$BRANCH"; run_retry "Git reset" git -C "$APP" reset --hard "origin/$BRANCH"; else rm -rf "$APP"; run_retry "GitHub clone" git clone --branch "$BRANCH" --single-branch "$REPO" "$APP"; fi; unset CHEKINANA_GITHUB_SSH_KEY_B64 GITHUB_SSH_PRIVATE_KEY_B64; export CHEKINANA_GIT_SYNC_ATTEMPTS=3 CHEKINANA_GIT_SYNC_RETRY_SECONDS=10; exec bash "$APP/scripts/start-backend.sh"'
 ```
 
 ## Required environment variables
@@ -88,8 +82,8 @@ The referenced RunPod Secret must contain the complete private key text:
 -----END OPENSSH PRIVATE KEY-----
 ```
 
-The script also accepts `CHEKINANA_GITHUB_SSH_KEY_B64` if a future pod uses a
-single-line base64 key instead.
+The script still accepts `CHEKINANA_GITHUB_SSH_KEY_B64` as a legacy fallback,
+but `CHEKINANA_GITHUB_SSH_KEY` is preferred and takes precedence.
 
 Optional variables:
 
