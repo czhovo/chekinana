@@ -5,12 +5,25 @@ const MAX_SELECTED_IMAGES = 9;
 const CONTACT_MESSAGE_MAX_LENGTH = 1000;
 const CONTACT_INFO_MAX_LENGTH = 200;
 const UPLOAD_TIMEOUT_MS = 15000;
-const UPLOAD_MAX_RETRIES = 2;
+const UPLOAD_MAX_RETRIES = 3;
+const RESULT_DOWNLOAD_MAX_CONCURRENCY = 3;
+const RESULT_DOWNLOAD_MAX_RETRIES = 1;
+const RESULT_SAVE_MAX_RETRIES = 1;
+const RESULT_SAVE_OPERATION_TIMEOUT_MS = 15000;
 const PRE_TASK_UPLOAD_CANCEL_PATH = "/api/upload-cancel";
 const POLAROID_SIZE_OPTIONS = ["auto", "mini", "wide"];
 const DEFAULT_POLAROID_SIZE = "mini";
 const POSTPROCESS_MODE_OPTIONS = ["off", "denoise", "sharpen"];
 const DEFAULT_POSTPROCESS_MODE = "denoise";
+const RESULT_SAVE_STATUS_UNKNOWN = "unknown";
+const RESULT_SAVE_STATUS_SAVING = "saving";
+const RESULT_SAVE_STATUS_SAVED = "saved";
+const RESULT_SAVE_STATUS_FAILED = "failed";
+const RESULT_DOWNLOAD_STATUS_UNKNOWN = "unknown";
+const RESULT_DOWNLOAD_STATUS_PENDING = "pending";
+const RESULT_DOWNLOAD_STATUS_DOWNLOADING = "downloading";
+const RESULT_DOWNLOAD_STATUS_DOWNLOADED = "downloaded";
+const RESULT_DOWNLOAD_STATUS_FAILED = "failed";
 
 Page({
   data: {
@@ -46,6 +59,9 @@ Page({
   activeUploadAttemptId: "",
   activeUploadTimer: null,
   batchInterrupted: false,
+  resultDownloadQueue: [],
+  activeResultDownloadCount: 0,
+  queuedResultDownloadKeys: {},
 
   onUnload() {
     this.clearPollTimer();
@@ -58,9 +74,7 @@ Page({
     if (!token) {
       wx.removeStorageSync(SCANNER_AUTH_PASSED_KEY);
       wx.redirectTo({ url: "/pages/auth/auth" });
-      return;
     }
-    this.verifyCachedToken(token);
   },
 
   setTabBarSelected(selected) {
@@ -206,43 +220,89 @@ Page({
       return;
     }
 
+    if (typeof wx.chooseImage === "function") {
+      wx.chooseImage({
+        count: remainingCount,
+        sourceType: ["album", "camera"],
+        sizeType: ["original"],
+        success: (res) => {
+          this.handleImagePickerSuccess(this.normalizeImagePickerPaths(res), remainingCount);
+        },
+        fail: (err) => {
+          this.handleImagePickerFailure(err, "chooseImage");
+        }
+      });
+      return;
+    }
+
+    this.chooseImageWithMediaFallback(remainingCount);
+  },
+
+  chooseImageWithMediaFallback(remainingCount) {
     wx.chooseMedia({
       count: remainingCount,
       mediaType: ["image"],
       sourceType: ["album", "camera"],
       sizeType: ["original"],
       success: (res) => {
-        const files = (res.tempFiles || []).filter((file) => file && file.tempFilePath);
-        if (!files.length) {
-          wx.showToast({ title: "未选择图片", icon: "none" });
-          return;
-        }
-
-        this.clearPollTimer();
-        this.downloadingImageUrls = {};
-        const selectedImages = this.data.selectedImages.concat(
-          files.slice(0, remainingCount).map((file) => this.createSelectedImage(file.tempFilePath))
-        );
-        const currentImageIndex = this.data.selectedImages.length ? this.data.currentImageIndex : 0;
-        const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
-          selectedImages,
-          currentImageIndex,
-          extractedImages: [],
-          failedImageIndexes: [],
-          processing: false,
-          showCountInput: true,
-          statusText: selectedImages.length > 1
-            ? `已添加 ${selectedImages.length} 张图片，当前仍按单张流程处理`
-            : "图片已选择，点击开始提取",
-          statusKind: "ready"
-        });
-        this.pendingAuthRestoreState = nextState;
-        this.setData(nextState);
+        this.handleImagePickerSuccess(this.normalizeImagePickerPaths(res), remainingCount);
       },
-      fail: () => {
-        wx.showToast({ title: "选择图片失败", icon: "none" });
+      fail: (err) => {
+        this.handleImagePickerFailure(err, "chooseMedia");
       }
     });
+  },
+
+  normalizeImagePickerPaths(res) {
+    const paths = [];
+    (res && res.tempFilePaths || []).forEach((path) => {
+      if (path) paths.push(path);
+    });
+    (res && res.tempFiles || []).forEach((file) => {
+      const path = file && (file.tempFilePath || file.path);
+      if (path) paths.push(path);
+    });
+    return paths.filter((path, index) => paths.indexOf(path) === index);
+  },
+
+  handleImagePickerSuccess(paths, remainingCount) {
+    const selectedPaths = (paths || []).filter(Boolean).slice(0, remainingCount);
+    if (!selectedPaths.length) {
+      wx.showToast({ title: "未选择图片", icon: "none" });
+      return;
+    }
+
+    this.clearPollTimer();
+    this.downloadingImageUrls = {};
+    const selectedImages = this.data.selectedImages.concat(
+      selectedPaths.map((path) => this.createSelectedImage(path))
+    );
+    const currentImageIndex = this.data.selectedImages.length ? this.data.currentImageIndex : 0;
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+      selectedImages,
+      currentImageIndex,
+      extractedImages: [],
+      failedImageIndexes: [],
+      processing: false,
+      showCountInput: true,
+      statusText: selectedImages.length > 1
+        ? `已添加 ${selectedImages.length} 张图片，当前仍按单张流程处理`
+        : "图片已选择，点击开始提取",
+      statusKind: "ready"
+    });
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
+  },
+
+  handleImagePickerFailure(err, pickerName) {
+    if (this.isImagePickerCancel(err)) return;
+    console.error(`${pickerName || "image picker"} failed`, err);
+    wx.showToast({ title: "选择图片失败，请重试", icon: "none" });
+  },
+
+  isImagePickerCancel(err) {
+    const errMsg = err && err.errMsg ? String(err.errMsg).toLowerCase() : "";
+    return errMsg.includes("cancel");
   },
 
   onInputFrameTap() {
@@ -311,9 +371,18 @@ Page({
 
   deleteCurrentImage() {
     if (!this.data.selectedImages.length || this.data.processing) return;
+    if (this.hasCompletedActionState()) {
+      this.deleteCompletedCurrentImage();
+      return;
+    }
 
     this.clearPollTimer();
     this.downloadingImageUrls = {};
+    const deletedImage = this.data.selectedImages[this.data.currentImageIndex];
+    this.cleanupRemovedSourceGroups([{
+      sourceImage: deletedImage,
+      results: []
+    }]);
     const selectedImages = this.data.selectedImages.filter((image, index) => index !== this.data.currentImageIndex);
     if (!selectedImages.length) {
       const nextState = {
@@ -348,6 +417,52 @@ Page({
         ? `当前图片 ${currentImageIndex + 1}/${selectedImages.length}，点击开始提取`
         : "图片已选择，点击开始提取",
       statusKind: "ready"
+    });
+    this.pendingAuthRestoreState = nextState;
+    this.setData(nextState);
+  },
+
+  deleteCompletedCurrentImage() {
+    this.clearPollTimer();
+    this.downloadingImageUrls = {};
+    const deletedIndex = this.data.currentImageIndex;
+    const removedGroups = this.getSourceCleanupGroups([deletedIndex]);
+    const selectedImages = this.data.selectedImages.filter((image, index) => index !== deletedIndex);
+    if (!selectedImages.length) {
+      this.resetAllImagesState();
+      return;
+    }
+    this.cleanupRemovedSourceGroups(removedGroups);
+
+    const oldToNewIndex = {};
+    selectedImages.forEach((image, index) => {
+      const oldIndex = index >= deletedIndex ? index + 1 : index;
+      oldToNewIndex[oldIndex] = index;
+    });
+    const extractedImages = (this.data.extractedImages || [])
+      .filter((image) => this.getResultSourceIndex(image) !== deletedIndex)
+      .map((image) => Object.assign({}, image, {
+        sourceImageIndex: oldToNewIndex[this.getResultSourceIndex(image)]
+      }));
+    const failedImageIndexes = (this.data.failedImageIndexes || [])
+      .filter((index) => index !== deletedIndex)
+      .map((index) => oldToNewIndex[index])
+      .filter((index) => Number.isInteger(index));
+    const currentImageIndex = Math.min(deletedIndex, selectedImages.length - 1);
+    const hasCompletedArtifacts = extractedImages.length > 0 || failedImageIndexes.length > 0;
+    const nextState = Object.assign(this.getCurrentImageState(selectedImages, currentImageIndex), {
+      selectedImages,
+      currentImageIndex,
+      extractedImages,
+      failedImageIndexes,
+      processing: false,
+      showCountInput: !hasCompletedArtifacts,
+      statusText: hasCompletedArtifacts
+        ? this.data.statusText
+        : selectedImages.length > 1
+          ? `当前图片 ${currentImageIndex + 1}/${selectedImages.length}，点击开始提取`
+          : "图片已选择，点击开始提取",
+      statusKind: hasCompletedArtifacts ? this.data.statusKind : "ready"
     });
     this.pendingAuthRestoreState = nextState;
     this.setData(nextState);
@@ -528,13 +643,14 @@ Page({
   finishInterruptedProcessing(images) {
     this.clearPollTimer();
     const visibleImages = Array.isArray(images) ? images : this.data.extractedImages;
+    const extractedImages = this.mergeWithLatestResultState(visibleImages);
     this.activeTaskId = "";
     this.setData({
-      extractedImages: visibleImages,
+      extractedImages,
       processing: false,
       showCountInput: false,
-      statusText: visibleImages.length
-        ? `已中断处理，已保留 ${visibleImages.length} 张结果`
+      statusText: extractedImages.length
+        ? `已中断处理，已保留 ${extractedImages.length} 张结果`
         : "已中断处理",
       statusKind: "error"
     });
@@ -615,7 +731,7 @@ Page({
       const nextFailures = result.error
         ? failures.concat({ imageIndex, message: result.error })
         : failures;
-      this.setData({ extractedImages: this.mergeImages(this.data.extractedImages, nextImages) });
+      this.setExtractedImagesPreservingState(nextImages);
       this.processBatchImage(processImages, imageIndex + 1, nextImages, nextFailures, apiBaseUrl, token, runId);
     });
   },
@@ -735,7 +851,7 @@ Page({
 
     const directImages = this.scopeBatchImages(this.normalizeImages(payload), imageIndex, `image${imageIndex + 1}`);
     if (directImages.length > 0) {
-      this.setData({ extractedImages: this.mergeImages(baseImages, directImages) });
+      this.setExtractedImagesPreservingState(this.mergeImages(baseImages, directImages));
       const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
       done({
         images: directImages,
@@ -790,7 +906,7 @@ Page({
           const status = payload.status || payload.state;
           const images = this.scopeBatchImages(this.normalizeImages(payload, taskId), imageIndex, taskId);
           const nextCollectedImages = this.mergeImages(collectedImages, images);
-          const visibleImages = this.mergeImages(baseImages, nextCollectedImages);
+          const visibleImages = this.mergeWithLatestResultState(this.mergeImages(baseImages, nextCollectedImages));
           const expectedCount = this.getExpectedPolaroidTarget(payload, fallbackExpectedCount);
           const warning = payload.warning || payload.detection_warning || "";
           const extractionComplete = payload.extraction_complete === true
@@ -884,14 +1000,15 @@ Page({
   finishBatchExtract(images, failures, totalImages) {
     this.clearPollTimer();
     this.activeTaskId = "";
-    const hasImages = images.length > 0;
+    const mergedImages = this.mergeWithLatestResultState(images);
+    const hasImages = mergedImages.length > 0;
     const shortageText = this.getShortageSummaryText(failures);
     const statusText = hasImages
       ? shortageText
-        ? `批量处理完成，共提取 ${images.length} 张，${shortageText}`
+        ? `批量处理完成，共提取 ${mergedImages.length} 张，${shortageText}`
         : failures.length
-          ? `批量处理完成，提取 ${images.length} 张，${failures.length}/${totalImages} 张图片失败`
-          : `批量处理完成，共提取 ${images.length} 张`
+          ? `批量处理完成，提取 ${mergedImages.length} 张，${failures.length}/${totalImages} 张图片失败`
+          : `批量处理完成，共提取 ${mergedImages.length} 张`
       : shortageText
         ? `批量处理完成，${shortageText}`
         : `批量处理失败，${failures.length || totalImages}/${totalImages} 张图片未提取到结果`;
@@ -901,7 +1018,7 @@ Page({
         : "done"
       : "error";
     this.setData({
-      extractedImages: images,
+      extractedImages: mergedImages,
       failedImageIndexes: failures.map((failure) => failure.imageIndex),
       processing: false,
       showCountInput: false,
@@ -909,7 +1026,7 @@ Page({
       statusKind
     });
     if (hasImages) {
-      this.prefetchResultImages(images);
+      this.prefetchResultImages(mergedImages);
     } else {
       wx.showToast({ title: "批量处理失败", icon: "none" });
     }
@@ -1143,20 +1260,31 @@ Page({
               ? item.name
               : `p${index + 1}`,
           url,
-          title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`
+          title: typeof item === "object" && item.label ? item.label : `拍立得 ${index + 1}`,
+          downloadStatus: RESULT_DOWNLOAD_STATUS_UNKNOWN,
+          saveStatus: RESULT_SAVE_STATUS_UNKNOWN
         };
       })
+      .map((image) => this.decorateResultImage(image))
       .filter(Boolean);
   },
 
   updatePartialImages(images) {
     if (!images.length) return;
 
-    const merged = this.mergeImages(this.data.extractedImages, images);
-    if (merged.length !== this.data.extractedImages.length) {
-      this.setData({ extractedImages: merged });
-    }
+    const merged = this.mergeWithLatestResultState(images);
+    this.setData({ extractedImages: merged });
     this.prefetchResultImages(merged);
+  },
+
+  setExtractedImagesPreservingState(images) {
+    const merged = this.mergeWithLatestResultState(images);
+    this.setData({ extractedImages: merged });
+    return merged;
+  },
+
+  mergeWithLatestResultState(images) {
+    return this.mergeImages(this.data.extractedImages || [], images || []);
   },
 
   mergeImages(currentImages, nextImages) {
@@ -1167,10 +1295,33 @@ Page({
       if (!image || !image.url) return;
       const key = String(image.id || image.url);
       if (imageMap[key]) {
-        Object.assign(imageMap[key], image);
+        const target = imageMap[key];
+        const previousSaveStatus = imageMap[key].saveStatus;
+        const previousDownloadStatus = imageMap[key].downloadStatus;
+        const previousLocalPath = imageMap[key].localPath;
+        Object.assign(target, image);
+        if (previousSaveStatus === RESULT_SAVE_STATUS_SAVED) {
+          target.saveStatus = RESULT_SAVE_STATUS_SAVED;
+        } else if (previousSaveStatus
+          && (!image.saveStatus || image.saveStatus === RESULT_SAVE_STATUS_UNKNOWN)
+          && previousSaveStatus !== RESULT_SAVE_STATUS_UNKNOWN) {
+          target.saveStatus = previousSaveStatus;
+        }
+        if (previousDownloadStatus
+          && (!image.downloadStatus || image.downloadStatus === RESULT_DOWNLOAD_STATUS_UNKNOWN)
+          && previousDownloadStatus !== RESULT_DOWNLOAD_STATUS_UNKNOWN) {
+          target.downloadStatus = previousDownloadStatus;
+        }
+        if (previousLocalPath && !image.localPath) {
+          target.localPath = previousLocalPath;
+        }
+        Object.assign(target, this.decorateResultImage(target));
         return;
       }
-      const copy = Object.assign({}, image);
+      const copy = this.decorateResultImage(Object.assign({
+        downloadStatus: RESULT_DOWNLOAD_STATUS_UNKNOWN,
+        saveStatus: RESULT_SAVE_STATUS_UNKNOWN
+      }, image));
       imageMap[key] = copy;
       merged.push(copy);
     });
@@ -1202,33 +1353,122 @@ Page({
 
   prefetchResultImages(images) {
     images.forEach((image) => {
-      if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
-      if (this.downloadingImageUrls[image.url]) return;
+      this.enqueueResultDownload(image);
+    });
+    this.processResultDownloadQueue();
+  },
 
-      this.downloadingImageUrls[image.url] = true;
+  enqueueResultDownload(image) {
+    if (!image || !image.url || image.localPath || image.url.startsWith("wxfile://")) return;
+    if (image.downloadStatus === RESULT_DOWNLOAD_STATUS_FAILED) return;
+    const key = this.getResultKey(image);
+    if (this.downloadingImageUrls[key] || this.queuedResultDownloadKeys[key]) return;
+
+    this.queuedResultDownloadKeys[key] = true;
+    this.resultDownloadQueue.push({ key, image: Object.assign({}, image), retryCount: 0 });
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+  },
+
+  processResultDownloadQueue() {
+    while (this.activeResultDownloadCount < RESULT_DOWNLOAD_MAX_CONCURRENCY && this.resultDownloadQueue.length) {
+      const item = this.resultDownloadQueue.shift();
+      delete this.queuedResultDownloadKeys[item.key];
+      const image = this.findExtractedImageByKey(item.key);
+      if (!image || image.localPath || image.url.startsWith("wxfile://")) continue;
+
+      this.activeResultDownloadCount += 1;
+      this.downloadingImageUrls[item.key] = true;
+      this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADING });
       wx.downloadFile({
         url: image.url,
         header: this.getAuthHeader(),
         success: (res) => {
+          const currentImage = this.findCurrentResultForDownload(item);
+          if (!currentImage) return;
           if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-            this.updateImageLocalPath(image, res.tempFilePath);
+            this.updateImageLocalPath(currentImage, res.tempFilePath);
+            return;
           }
+          this.handleResultDownloadFailure(item, currentImage, res);
+        },
+        fail: (err) => {
+          const currentImage = this.findCurrentResultForDownload(item);
+          if (!currentImage) return;
+          this.handleResultDownloadFailure(item, currentImage, err);
         },
         complete: () => {
-          delete this.downloadingImageUrls[image.url];
+          delete this.downloadingImageUrls[item.key];
+          this.activeResultDownloadCount = Math.max(0, this.activeResultDownloadCount - 1);
+          this.processResultDownloadQueue();
         }
       });
-    });
+    }
+  },
+
+  handleResultDownloadFailure(item, image, err) {
+    console.error("result download failed", err);
+    if (item.retryCount < RESULT_DOWNLOAD_MAX_RETRIES) {
+      item.retryCount += 1;
+      this.queuedResultDownloadKeys[item.key] = true;
+      this.resultDownloadQueue.push(item);
+      this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+      return;
+    }
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_FAILED });
   },
 
   updateImageLocalPath(targetImage, localPath) {
-    const targetKey = String(targetImage.id || targetImage.url);
+    this.updateResultSaveState(targetImage, {
+      localPath,
+      downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADED
+    });
+  },
+
+  updateResultSaveState(targetImage, patch) {
+    if (!targetImage) return;
+    const targetKey = this.getResultKey(targetImage);
     const extractedImages = this.data.extractedImages.map((image) => {
-      const key = String(image.id || image.url);
+      const key = this.getResultKey(image);
       if (key !== targetKey) return image;
-      return Object.assign({}, image, { localPath });
+      const nextImage = Object.assign({}, image, patch);
+      if (image.saveStatus === RESULT_SAVE_STATUS_SAVED
+        && patch.saveStatus
+        && patch.saveStatus !== RESULT_SAVE_STATUS_SAVED) {
+        nextImage.saveStatus = RESULT_SAVE_STATUS_SAVED;
+      }
+      return this.decorateResultImage(nextImage);
     });
     this.setData({ extractedImages });
+  },
+
+  decorateResultImage(image) {
+    if (!image) return image;
+    const resultState = image.saveStatus === RESULT_SAVE_STATUS_SAVED
+      ? "album"
+      : this.getResultLocalPath(image)
+        ? "downloaded"
+        : "remote";
+    return Object.assign({}, image, { resultState });
+  },
+
+  getResultLocalPath(image) {
+    if (!image) return "";
+    if (image.localPath) return image.localPath;
+    return image.url && image.url.startsWith("wxfile://") ? image.url : "";
+  },
+
+  getResultKey(image) {
+    return String(image && (image.id || image.url) || "");
+  },
+
+  findExtractedImageByKey(key) {
+    return (this.data.extractedImages || []).find((image) => this.getResultKey(image) === key) || null;
+  },
+
+  getResultSourceIndex(image) {
+    if (image && Number.isInteger(image.sourceImageIndex)) return image.sourceImageIndex;
+    if ((this.data.selectedImages || []).length === 1) return 0;
+    return Number.isInteger(this.data.currentImageIndex) ? this.data.currentImageIndex : 0;
   },
 
   getUploadStatusText(imageIndex, totalImages) {
@@ -1532,9 +1772,27 @@ Page({
             : `已保存 ${savedCount} 张`,
           icon: failedCount ? "none" : "success"
         });
+        this.setData({
+          statusText: failedCount
+            ? `保存完成，成功 ${savedCount} 张，失败 ${failedCount} 张`
+            : `保存完成，已保存 ${savedCount} 张`,
+          statusKind: failedCount ? "error" : "done"
+        });
         return;
       }
-      this.saveResultImageForBatch(images[index], (ok) => {
+      const image = images[index];
+      const currentImage = this.findExtractedImageByKey(this.getResultKey(image)) || image;
+      if (currentImage.saveStatus === RESULT_SAVE_STATUS_SAVED) {
+        savedCount += 1;
+        saveNext(index + 1);
+        return;
+      }
+      this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+      this.setData({
+        statusText: `正在保存 ${index + 1}/${images.length}`,
+        statusKind: "processing"
+      });
+      this.saveResultToAlbum(currentImage, (ok) => {
         if (ok) {
           savedCount += 1;
         } else {
@@ -1547,54 +1805,283 @@ Page({
     saveNext(0);
   },
 
-  saveResultImageForBatch(image, done) {
+  saveResultToAlbum(image, done) {
     if (!image || !image.url) {
       done(false);
       return;
     }
 
-    const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
+    const localPath = this.getResultLocalPath(image);
     if (localPath) {
-      this.saveImagePathForBatch(localPath, done);
+      this.saveImagePathWithRetry(this.getResultKey(image), localPath, 0, done);
       return;
     }
 
-    wx.downloadFile({
-      url: image.url,
+    this.downloadResultForSaveWithRetry(this.getResultKey(image), image.url, 0, (downloadedPath) => {
+      if (!downloadedPath) {
+        done(false);
+        return;
+      }
+      this.saveImagePathWithRetry(this.getResultKey(image), downloadedPath, 0, done);
+    });
+  },
+
+  downloadResultForSaveWithRetry(key, url, retryCount, done) {
+    const image = this.findExtractedImageByKey(key);
+    if (!image || !url) {
+      done("");
+      return;
+    }
+    this.updateResultSaveState(image, { downloadStatus: RESULT_DOWNLOAD_STATUS_DOWNLOADING });
+    this.downloadResultWithTimeout(url, (result) => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (!currentImage) {
+        done("");
+        return;
+      }
+      if (result.ok && result.filePath) {
+        this.updateImageLocalPath(currentImage, result.filePath);
+        done(result.filePath);
+        return;
+      }
+      console.error("save download failed", result.err || result.res || result.reason || result);
+      if (retryCount < RESULT_SAVE_MAX_RETRIES) {
+        this.updateResultSaveState(currentImage, { downloadStatus: RESULT_DOWNLOAD_STATUS_PENDING });
+        this.downloadResultForSaveWithRetry(key, url, retryCount + 1, done);
+        return;
+      }
+      this.updateResultSaveState(currentImage, {
+        downloadStatus: RESULT_DOWNLOAD_STATUS_FAILED,
+        saveStatus: RESULT_SAVE_STATUS_FAILED
+      });
+      done("");
+    });
+  },
+
+  downloadResultWithTimeout(url, done) {
+    let settled = false;
+    let task = null;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (task && typeof task.abort === "function") task.abort();
+      done({ ok: false, reason: "timeout" });
+    }, RESULT_SAVE_OPERATION_TIMEOUT_MS);
+    task = wx.downloadFile({
+      url,
       header: this.getAuthHeader(),
       success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-          this.updateImageLocalPath(image, res.tempFilePath);
-          this.saveImagePathForBatch(res.tempFilePath, done);
-          return;
-        }
-        done(false);
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const ok = res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath;
+        done({ ok: !!ok, filePath: ok ? res.tempFilePath : "", res });
       },
-      fail: () => {
-        done(false);
+      fail: (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        done({ ok: false, err });
       }
     });
   },
 
-  saveImagePathForBatch(filePath, done) {
+  saveImagePathWithRetry(key, filePath, retryCount, done) {
+    const image = this.findExtractedImageByKey(key);
+    if (!image || !filePath) {
+      done(false);
+      return;
+    }
+    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+    this.saveImagePathWithTimeout(filePath, (result) => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (!currentImage) {
+        done(false);
+        return;
+      }
+      if (result.ok) {
+        this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
+        done(true);
+        return;
+      }
+      if (this.isAlbumAuthDenied(result.err)) {
+        this.showAlbumAuthModal();
+        this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+        done(false);
+        return;
+      }
+      console.error("save image to album failed", result.err || result.reason || result);
+      if (retryCount < RESULT_SAVE_MAX_RETRIES) {
+        this.saveImagePathWithRetry(key, filePath, retryCount + 1, done);
+        return;
+      }
+      this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_FAILED });
+      done(false);
+    }, () => {
+      const currentImage = this.findExtractedImageByKey(key);
+      if (currentImage) this.updateResultSaveState(currentImage, { saveStatus: RESULT_SAVE_STATUS_SAVED });
+    });
+  },
+
+  saveImagePathWithTimeout(filePath, done, onLateSuccess) {
+    let doneCalled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      if (doneCalled) return;
+      doneCalled = true;
+      timedOut = true;
+      done({ ok: false, reason: "timeout" });
+    }, RESULT_SAVE_OPERATION_TIMEOUT_MS);
     wx.saveImageToPhotosAlbum({
       filePath,
-      success: () => done(true),
-      fail: (err) => {
-        if (err.errMsg && err.errMsg.includes("auth deny")) {
-          wx.hideLoading();
-          wx.showModal({
-            title: "需要相册权限",
-            content: "请在设置中允许保存到相册。",
-            confirmText: "去设置",
-            success: (res) => {
-              if (res.confirm) wx.openSetting();
-            }
-          });
+      success: () => {
+        if (timedOut) {
+          if (typeof onLateSuccess === "function") onLateSuccess();
+          return;
         }
-        done(false);
+        if (doneCalled) return;
+        doneCalled = true;
+        clearTimeout(timer);
+        done({ ok: true });
+      },
+      fail: (err) => {
+        if (doneCalled) return;
+        doneCalled = true;
+        clearTimeout(timer);
+        done({ ok: false, err });
       }
     });
+  },
+
+  isAlbumAuthDenied(err) {
+    return !!(err && err.errMsg && err.errMsg.includes("auth deny"));
+  },
+
+  showAlbumAuthModal() {
+    wx.showModal({
+      title: "需要相册权限",
+      content: "请在设置中允许保存到相册。",
+      confirmText: "去设置",
+      success: (res) => {
+        if (res.confirm) wx.openSetting();
+      }
+    });
+  },
+
+  getSourceCleanupGroups(sourceIndexes) {
+    const indexSet = {};
+    (sourceIndexes || []).forEach((index) => {
+      if (Number.isInteger(index)) indexSet[index] = true;
+    });
+    return Object.keys(indexSet).map((indexKey) => {
+      const sourceIndex = Number(indexKey);
+      return {
+        sourceImage: (this.data.selectedImages || [])[sourceIndex],
+        results: (this.data.extractedImages || [])
+          .filter((image) => this.getResultSourceIndex(image) === sourceIndex)
+      };
+    });
+  },
+
+  getAllSourceCleanupGroups() {
+    const selectedImages = this.data.selectedImages || [];
+    if (!selectedImages.length) {
+      return [{
+        sourceImage: null,
+        results: this.data.extractedImages || []
+      }];
+    }
+    return selectedImages.map((image, index) => ({
+      sourceImage: image,
+      results: (this.data.extractedImages || [])
+        .filter((result) => this.getResultSourceIndex(result) === index)
+    }));
+  },
+
+  cleanupRemovedSourceGroups(groups) {
+    const localPaths = {};
+    const removedResults = [];
+    (groups || []).forEach((group) => {
+      const sourceImage = group && group.sourceImage;
+      this.addLocalCleanupPath(localPaths, sourceImage && sourceImage.path);
+      this.addLocalCleanupPath(localPaths, sourceImage && sourceImage.previewPath);
+      (group && group.results || []).forEach((result) => {
+        removedResults.push(result);
+        this.addLocalCleanupPath(localPaths, result && result.localPath);
+        if (result && result.url && result.url.startsWith("wxfile://")) {
+          this.addLocalCleanupPath(localPaths, result.url);
+        }
+      });
+    });
+
+    this.dropResultDownloadReferences(removedResults);
+    Object.keys(localPaths).forEach((filePath) => {
+      this.deleteLocalFileBestEffort(filePath);
+    });
+  },
+
+  addLocalCleanupPath(localPaths, filePath) {
+    if (!filePath || !this.isLocalCleanupPath(filePath)) return;
+    localPaths[filePath] = true;
+  },
+
+  isLocalCleanupPath(filePath) {
+    if (!filePath || typeof filePath !== "string") return false;
+    return !filePath.startsWith("http://") && !filePath.startsWith("https://");
+  },
+
+  deleteLocalFileBestEffort(filePath) {
+    const fs = typeof wx.getFileSystemManager === "function" ? wx.getFileSystemManager() : null;
+    if (fs && typeof fs.unlink === "function") {
+      try {
+        fs.unlink({
+          filePath,
+          fail: (err) => {
+            this.removeSavedFileBestEffort(filePath, err);
+          }
+        });
+        return;
+      } catch (err) {
+        this.removeSavedFileBestEffort(filePath, err);
+        return;
+      }
+    }
+    this.removeSavedFileBestEffort(filePath);
+  },
+
+  removeSavedFileBestEffort(filePath, unlinkErr) {
+    if (typeof wx.removeSavedFile !== "function") {
+      if (unlinkErr) console.warn("delete local file failed", filePath, unlinkErr);
+      return;
+    }
+    wx.removeSavedFile({
+      filePath,
+      fail: (err) => {
+        console.warn("delete local file failed", filePath, unlinkErr || err);
+      }
+    });
+  },
+
+  dropResultDownloadReferences(results) {
+    const keySet = {};
+    (results || []).forEach((image) => {
+      const key = this.getResultKey(image);
+      if (key) keySet[key] = true;
+    });
+    if (!Object.keys(keySet).length) return;
+
+    this.resultDownloadQueue = (this.resultDownloadQueue || [])
+      .filter((item) => !keySet[item.key]);
+    Object.keys(keySet).forEach((key) => {
+      delete this.queuedResultDownloadKeys[key];
+      delete this.downloadingImageUrls[key];
+    });
+  },
+
+  findCurrentResultForDownload(item) {
+    const image = this.findExtractedImageByKey(item && item.key);
+    if (!image || !item || !item.image) return null;
+    return image.url === item.image.url ? image : null;
   },
 
   clearProcessedImages() {
@@ -1608,22 +2095,61 @@ Page({
     (this.data.failedImageIndexes || []).forEach((index) => {
       failedIndexSet[index] = true;
     });
-    const remainingImages = selectedImages.filter((image, index) => failedIndexSet[index]);
+    const extractedImages = this.data.extractedImages || [];
+    const resultsBySourceIndex = {};
+    extractedImages.forEach((image) => {
+      const sourceIndex = this.getResultSourceIndex(image);
+      if (!resultsBySourceIndex[sourceIndex]) resultsBySourceIndex[sourceIndex] = [];
+      resultsBySourceIndex[sourceIndex].push(image);
+    });
+
+    const preserveSourceIndexSet = {};
+    selectedImages.forEach((image, index) => {
+      const sourceResults = resultsBySourceIndex[index] || [];
+      const hasUnsavedResult = sourceResults.some((result) => result.saveStatus !== RESULT_SAVE_STATUS_SAVED);
+      if (failedIndexSet[index] || hasUnsavedResult) {
+        preserveSourceIndexSet[index] = true;
+      }
+    });
+
+    const oldToNewIndex = {};
+    const remainingImages = selectedImages.filter((image, index) => {
+      if (!preserveSourceIndexSet[index]) return false;
+      oldToNewIndex[index] = Object.keys(oldToNewIndex).length;
+      return true;
+    });
 
     if (!remainingImages.length) {
       this.resetAllImagesState();
       return;
     }
 
+    const removedSourceIndexes = selectedImages
+      .map((image, index) => index)
+      .filter((index) => !preserveSourceIndexSet[index]);
+    this.cleanupRemovedSourceGroups(this.getSourceCleanupGroups(removedSourceIndexes));
+
+    const remainingExtractedImages = extractedImages
+      .filter((image) => preserveSourceIndexSet[this.getResultSourceIndex(image)])
+      .map((image) => Object.assign({}, image, {
+        sourceImageIndex: oldToNewIndex[this.getResultSourceIndex(image)]
+      }));
+    const remainingFailedImageIndexes = Object.keys(preserveSourceIndexSet)
+      .map((index) => Number(index))
+      .filter((index) => failedIndexSet[index])
+      .map((index) => oldToNewIndex[index]);
+
     const nextState = Object.assign(this.getCurrentImageState(remainingImages, 0), {
       selectedImages: remainingImages,
       currentImageIndex: 0,
-      extractedImages: [],
-      failedImageIndexes: [],
+      extractedImages: remainingExtractedImages,
+      failedImageIndexes: remainingFailedImageIndexes,
       processing: false,
-      showCountInput: true,
-      statusText: `已删除成功图片，保留 ${remainingImages.length} 张失败图片`,
-      statusKind: "ready"
+      showCountInput: remainingExtractedImages.length === 0,
+      statusText: remainingExtractedImages.length
+        ? `已清除已保存图片，保留 ${remainingImages.length} 张未完全保存的图片`
+        : `已删除成功图片，保留 ${remainingImages.length} 张失败图片`,
+      statusKind: remainingExtractedImages.length ? "error" : "ready"
     });
     this.pendingAuthRestoreState = nextState;
     this.setData(nextState);
@@ -1632,6 +2158,7 @@ Page({
   resetAllImagesState() {
     this.clearPollTimer();
     this.downloadingImageUrls = {};
+    this.cleanupRemovedSourceGroups(this.getAllSourceCleanupGroups());
     this.pendingAuthRestoreState = null;
     this.setData({
       inputPath: "",
@@ -1655,64 +2182,24 @@ Page({
     const image = this.data.extractedImages[index];
     if (!image || !image.url) return;
 
-    wx.showLoading({ title: "保存中..." });
-
-    const localPath = image.localPath || (image.url.startsWith("wxfile://") ? image.url : "");
-    if (localPath) {
-      this.saveToAlbum(localPath, image);
+    if (image.saveStatus === RESULT_SAVE_STATUS_SAVED) {
+      wx.showToast({ title: "已保存", icon: "success" });
       return;
     }
 
-    this.downloadAndSaveImage(image);
-  },
-
-  downloadAndSaveImage(image) {
-    wx.downloadFile({
-      url: image.url,
-      header: this.getAuthHeader(),
-      success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
-          this.updateImageLocalPath(image, res.tempFilePath);
-          this.saveToAlbum(res.tempFilePath, image, false);
-          return;
-        }
-        wx.hideLoading();
-        wx.showToast({ title: "下载失败", icon: "none" });
-      },
-      fail: (err) => {
-        console.error("downloadFile failed", err);
-        wx.hideLoading();
-        wx.showToast({ title: "下载失败", icon: "none" });
-      }
-    });
-  },
-
-  saveToAlbum(filePath, fallbackImage, allowFallback = true) {
-    wx.saveImageToPhotosAlbum({
-      filePath,
-      success: () => {
-        wx.hideLoading();
+    wx.showLoading({ title: "保存中..." });
+    this.updateResultSaveState(image, { saveStatus: RESULT_SAVE_STATUS_SAVING });
+    this.saveResultToAlbum(image, (ok) => {
+      wx.hideLoading();
+      if (ok) {
         wx.showToast({ title: "已保存", icon: "success" });
-      },
-      fail: (err) => {
-        wx.hideLoading();
-        if (err.errMsg && err.errMsg.includes("auth deny")) {
-          wx.showModal({
-            title: "需要相册权限",
-            content: "请在设置中允许保存到相册。",
-            confirmText: "去设置",
-            success: (res) => {
-              if (res.confirm) wx.openSetting();
-            }
-          });
-          return;
-        }
-        if (allowFallback && fallbackImage && fallbackImage.url && fallbackImage.url !== filePath) {
-          this.downloadAndSaveImage(fallbackImage);
-          return;
-        }
-        wx.showToast({ title: "保存失败", icon: "none" });
+        return;
       }
+      this.setData({
+        statusText: "保存失败，请重试",
+        statusKind: "error"
+      });
+      wx.showToast({ title: "保存失败", icon: "none" });
     });
   },
 

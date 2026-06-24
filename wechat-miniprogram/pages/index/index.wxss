@@ -257,6 +257,13 @@
   line-height: 82rpx;
 }
 
+.placeholder-helper {
+  margin-top: 10rpx;
+  color: #a0a6b0;
+  font-size: 24rpx;
+  line-height: 1.35;
+}
+
 .selected-image-strip {
   width: 100%;
   margin-top: 18rpx;
@@ -473,11 +480,44 @@
 }
 
 .result-card {
+  position: relative;
   min-width: 0;
   background: #ffffff;
   border: 2rpx solid #e5e7eb;
   border-radius: 12rpx;
   overflow: hidden;
+}
+
+.result-state-badge {
+  position: absolute;
+  top: 14rpx;
+  right: 14rpx;
+  width: 34rpx;
+  height: 34rpx;
+  border-radius: 50%;
+  border: 4rpx solid #ffffff;
+  box-sizing: border-box;
+  box-shadow: 0 4rpx 10rpx rgba(17, 24, 39, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+.result-state-badge.remote {
+  background: #facc15;
+}
+
+.result-state-badge.downloaded,
+.result-state-badge.album {
+  background: #16a34a;
+}
+
+.result-state-badge.album {
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .result-image {

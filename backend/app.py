@@ -293,32 +293,22 @@ POLAROID_SIZE_WIDE = "wide"
 POLAROID_SIZE_VALUES = {POLAROID_SIZE_AUTO, POLAROID_SIZE_MINI, POLAROID_SIZE_WIDE}
 POLAROID_GEOMETRIES = {
     POLAROID_SIZE_MINI: {
-        "base_width": 800,
-        "base_height": 1272,
-        "width": 1600,
-        "height": 2544,
-        "image_area_vertices": np.array([[110,200],[1490,200],[1490,2044],[110,2044]], dtype=np.int32),
+        "width": 1200,
+        "height": 1908,
+        "image_area_vertices": np.array([[82,150],[1118,150],[1118,1533],[82,1533]], dtype=np.int32),
+        "white_balance_block_size": 48,
+        "white_balance_step": 24,
     },
     POLAROID_SIZE_WIDE: {
-        "base_width": 1600,
-        "base_height": 1272,
-        "width": 3200,
-        "height": 2544,
-        "image_area_vertices": np.array([[110,200],[3090,200],[3090,2044],[110,2044]], dtype=np.int32),
+        "width": 2400,
+        "height": 1908,
+        "image_area_vertices": np.array([[82,150],[2318,150],[2318,1533],[82,1533]], dtype=np.int32),
+        "white_balance_block_size": 48,
+        "white_balance_step": 24,
     },
 }
-for _geometry in POLAROID_GEOMETRIES.values():
-    _geometry["scale"] = min(
-        _geometry["width"] / _geometry["base_width"],
-        _geometry["height"] / _geometry["base_height"],
-    )
-
-BASE_POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_width"]
-BASE_POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["base_height"]
 POLAROID_W = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["width"]
 POLAROID_H = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["height"]
-POLAROID_SCALE = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["scale"]
-BASE_IMAGE_AREA_VERTICES = np.array([[55,100],[745,100],[745,1022],[55,1022]], dtype=np.float32)
 IMAGE_AREA_VERTICES = POLAROID_GEOMETRIES[POLAROID_SIZE_MINI]["image_area_vertices"]
 COLORS = [(255,0,0),(0,200,0),(0,120,255),(255,165,0),(200,0,200),(0,200,200),
           (255,80,80),(80,255,80),(80,80,255),(255,200,0),(255,0,200),(0,255,200)]
@@ -481,8 +471,8 @@ def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = 
     is_white = is_bright & is_neutral & border_mask
 
     blocks = []
-    block_size = max(1, int(round(32 * geometry["scale"])))
-    step = max(1, int(round(16 * geometry["scale"])))
+    block_size = int(geometry.get("white_balance_block_size") or max(1, round(min(h, w) / 16)))
+    step = int(geometry.get("white_balance_step") or max(1, round(block_size / 2)))
     for y in range(0, h - block_size, step):
         for x in range(0, w - block_size, step):
             block = is_white[y:y+block_size, x:x+block_size]
