@@ -43,7 +43,7 @@ For a brand-new pod where `/workspace/chekinana` does not exist yet, use this
 bootstrap start command once:
 
 ```bash
-bash -lc 'set -e; mkdir -p /workspace/bootstrap; if [ ! -d /workspace/chekinana/.git ]; then mkdir -p /root/.ssh; chmod 700 /root/.ssh; printf "%s" "$CHEKINANA_GITHUB_SSH_KEY_B64" | tr -d "\r\n " | base64 -d > /root/.ssh/chekinana_github; chmod 600 /root/.ssh/chekinana_github; cat > /root/.ssh/config <<EOF
+bash -lc 'set -e; mkdir -p /workspace/bootstrap; if [ ! -d /workspace/chekinana/.git ]; then mkdir -p /root/.ssh; chmod 700 /root/.ssh; printf "%s\n" "$CHEKINANA_GITHUB_SSH_KEY" | sed "s/\r$//" > /root/.ssh/chekinana_github; chmod 600 /root/.ssh/chekinana_github; cat > /root/.ssh/config <<EOF
 Host github.com
   HostName ssh.github.com
   Port 443
@@ -70,25 +70,26 @@ bash /workspace/chekinana/scripts/start-backend.sh
 
 ## Required environment variables
 
-Set this secret in the RunPod pod environment. Prefer the base64 form because
-RunPod's environment-variable value field is a single-line input:
+Set this secret in the RunPod pod environment:
 
 ```text
-CHEKINANA_GITHUB_SSH_KEY_B64=<base64 encoded private deploy key with read access to czhovo/chekinana>
+CHEKINANA_GITHUB_SSH_KEY={{ RUNPOD_SECRET_CHEKINANA_GITHUB_SSH_KEY }}
 ```
 
 `/root` is not durable across migrations, so the script recreates
 `/root/.ssh/chekinana_github` from the RunPod environment on every start. Do
 not store the private key in `/workspace` or commit it to Git.
 
-On Windows, create the base64 value with:
+The referenced RunPod Secret must contain the complete private key text:
 
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.ssh\chekinana_runpod_ed25519")) | Set-Clipboard
+```text
+-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----
 ```
 
-The script also accepts `CHEKINANA_GITHUB_SSH_KEY` with a raw multiline key if
-your RunPod UI supports it.
+The script also accepts `CHEKINANA_GITHUB_SSH_KEY_B64` if a future pod uses a
+single-line base64 key instead.
 
 Optional variables:
 
@@ -150,9 +151,8 @@ pod:
 .\scripts\runpod\sync-runpod-pod.ps1
 ```
 
-`scripts/runpod/runpod.config.json` intentionally keeps `podId` and
-`networkVolumeId` empty after the network-volume reset. Fill `podId` manually
-or keep the new pod name as `chekinana-migration` so the helper can discover it.
+`scripts/runpod/runpod.config.json` stores the latest active pod id. After a
+manual RunPod migration, update it or run `sync-runpod-pod.ps1`.
 
 Run an upload/download smoke test:
 
