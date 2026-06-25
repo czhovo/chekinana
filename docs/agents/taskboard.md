@@ -2,10 +2,16 @@
 
 ## Current Objective
 
-Save-state refresh durability is approved: receiving later results or refreshing extraction status must not downgrade a result from album-written or downloaded state back to remote-only.
+Move the hidden `lianliankan` and `izaya7` page entrances out of auth token input and into Settings page buttons.
 
 Scope constraints:
 
+- Frontend owns the implementation: add two Settings buttons that navigate to `pages/lianliankan/lianliankan` and `pages/izaya7-map/izaya7-map`.
+- Auth token input must no longer accept `lianliankan` or `izaya7` as special route triggers; both values should follow the normal token validation path and fail unless they are real backend tokens.
+- Preserve the normal backend token authentication flow, stored-token behavior, manual clear-token behavior in Settings, and scanner lifecycle behavior from `STATE-FE-001`.
+- Preserve the newly synced `lianliankan` page registration, worker registration, tile assets, and the existing `izaya7-map` page.
+- Backend has no implementation scope unless Frontend finds a concrete API or auth-contract blocker; Backend must still read the sync handoff and provide a no-code compatibility handoff so Reviewer understands the current codebase changes.
+- Reviewer must review the Frontend diff plus the Backend no-code compatibility handoff and must verify that no backend API/auth route contract was changed.
 - Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
 - Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
 - Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
@@ -85,6 +91,8 @@ Reviewer direct-geometry approval commit: b180ae7; reviewed Backend implementati
 Integration push: 822b51c main includes approved save-state and direct-geometry work.
 User-reported SAVE refresh regression: 2026-06-23 after each newly received extracted polaroid causes the result area to refresh, previously green downloaded dots and green album checks can both reset to yellow remote-only circles; after a few seconds some items become green downloaded again, but album-written check state is lost.
 Reviewer save-state refresh approval commit: 07d2644; reviewed Frontend implementation commit `37b43b0`, cherry-picked as `cba7352`, verdict approved.
+Lianliankan direct sync handoff: 2026-06-25 `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`
+Direct sync changes currently present in all worktrees: new `wechat-miniprogram/pages/lianliankan/`, new `wechat-miniprogram/workers/`, `wechat-miniprogram/app.json` page/worker registration, `wechat-miniprogram/pages/auth/auth.js` temporary `lianliankan` special token branch, and removal of old `wechat-miniprogram/pages/izaya-map/`.
 ```
 
 ## Worktree Assignments
@@ -92,14 +100,17 @@ Reviewer save-state refresh approval commit: 07d2644; reviewed Frontend implemen
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `SAVE-FE-002` complete and approved; no active PM-assigned task |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `GEOM-BE-001` complete and approved; no active PM-assigned task |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `SAVE-REV-002` complete and approved; no active PM-assigned task |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ROUTE-FE-001` in progress: move hidden page entries from auth to Settings |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ROUTE-BE-001` pending after Frontend handoff: no-code compatibility/context handoff |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ROUTE-REV-001` pending after Frontend and Backend handoffs |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| ROUTE-FE-001 | Frontend | in_progress | Move `lianliankan` and `izaya7-map` entry points from auth token input to Settings buttons. | `wechat-miniprogram/pages/settings/settings.js`, `wechat-miniprogram/pages/settings/settings.wxml`, `wechat-miniprogram/pages/settings/settings.wxss` if needed, `wechat-miniprogram/pages/auth/auth.js`, `wechat-miniprogram/app.json` only if route registration needs repair, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md` | Settings shows two clear buttons that navigate to `/pages/lianliankan/lianliankan` and `/pages/izaya7-map/izaya7-map`; auth no longer treats exact `lianliankan` or `izaya7` as special inputs; normal token validation/storage/failure behavior is unchanged; existing `lianliankan` page/worker registration and `izaya7-map` page continue to work; no backend API, RunPod, processing, result, contact, picker, or scanner state contract changes. |
+| ROUTE-BE-001 | Backend | pending | Read the lianliankan sync handoff and the Frontend route-entry handoff, then confirm Backend has no implementation scope. | `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md`, `docs/agents/handoffs/2026-06-25-backend-settings-hidden-routes.md` | Backend writes a handoff explaining that the synced lianliankan/auth/app changes are mini-program-only, no Flask route/auth/token/API behavior needs modification, and existing `/api/auth/verify`, `/api/process`, status/result/cancel/upload-cancel/contact, RunPod startup, and processing contracts are unaffected. If Backend finds a concrete server contract blocker, stop and report it instead of patching code. |
+| ROUTE-REV-001 | Reviewer | pending | Review the hidden-route entry relocation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-settings-hidden-routes.md` | Reviewer verifies the imported diff and handoffs: Settings has working buttons for both pages; auth no longer special-cases `lianliankan` or `izaya7`; exact strings now fail through normal token validation unless real tokens; page registrations/workers remain valid; no backend API/auth route changes were introduced; Backend correctly treated the task as no-code compatibility; required checks include `node --check` for changed mini-program JS and lianliankan worker/page JS, `python -m py_compile backend/app.py` only if Backend code changed unexpectedly, and `git diff --check`. |
 | BATCH-FE-001 | Frontend | done | Replace the single-image selection state with a selected-images list while preserving the existing single-image workflow. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-batch-images.md` | Frontend commits `94471d5` through `9865fe4` implement selection up to 9, add-more behavior, and selected-image state. |
 | BATCH-FE-002 | Frontend | done | Implement current-image preview management for multiple selected images. | Same Frontend files and same handoff as `BATCH-FE-001` | Frontend implements one large current-image preview, left/right navigation, delete-on-preview, index clamping, and thumbnail strip; UI blockers were resolved by `BATCH-FE-005`. |
 | BATCH-FE-003 | Frontend | done | Bind polaroid count and rotation to the current image. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for independent per-image count and rotation state. |
@@ -301,9 +312,11 @@ Postprocessing contract:
 Frontend auth/map contract:
 
 - The normal token authentication flow must remain unchanged for real backend tokens.
-- Exact token-page input `izaya7` routes to a new blank mini-program page.
-- The new page navigation title must be `izaya7's map`.
-- `izaya7` must not be stored or treated as a valid backend API token.
+- Auth token input must not contain hidden page-entry shortcuts. Exact inputs `lianliankan` and `izaya7` must go through the same backend token validation path as any other non-token string and must not be stored as valid backend API tokens.
+- Settings owns hidden/debug page entry points. It must expose one button for `/pages/lianliankan/lianliankan` and one button for `/pages/izaya7-map/izaya7-map`.
+- The `izaya7-map` page navigation title remains `izaya7's map`.
+- The newly synced `lianliankan` page, its worker dependencies under `wechat-miniprogram/workers/`, and the top-level worker registration in `app.json` must remain valid.
+- This contract is Frontend-only. Backend `/api/auth/verify` semantics must not change for these strings.
 
 Ordering contract:
 
@@ -432,10 +445,12 @@ Contact email contract:
 | 2026-06-23 | Save-state and direct-geometry work are approved by Reviewer. | Reviewer commits `48f00c3` and `b180ae7` have approved verdicts; PM marks `SAVE-FE-001`, `SAVE-REV-001`, `GEOM-BE-001`, and `GEOM-REV-001` done and ready for user-directed integration. |
 | 2026-06-23 | Reopen save-state work for refresh durability. | User testing after integration found that newly received extracted results can refresh the list and downgrade green downloaded or green-check album badges back to yellow; this remains Frontend-only because Backend result routes do not know album-write state. |
 | 2026-06-23 | Save-state refresh durability is approved by Reviewer. | Reviewer commit `07d2644` approved Frontend commit `37b43b0`; PM marks `SAVE-FE-002` and `SAVE-REV-002` done and ready for local integration. |
+| 2026-06-25 | Move hidden page entrances from auth token input to Settings. | User requested `lianliankan` and `izaya7-map` to be reachable through Settings buttons and no longer through special token strings in auth. |
+| 2026-06-25 | Keep the route-entry change Frontend-owned with Backend no-code context handoff. | The synced `lianliankan` page and existing `izaya7-map` are mini-program pages; Backend only needs to confirm no server auth/API contract changes are required so Reviewer can evaluate the current codebase state. |
 
 ## Open Questions
 
-- None. The save-state refresh durability work is approved and ready for local integration.
+- None. Publish and review `ROUTE-FE-001`, `ROUTE-BE-001`, and `ROUTE-REV-001` in Frontend, Backend, Reviewer order.
 
 ## Completed Work Summary
 
@@ -505,3 +520,4 @@ Contact email contract:
 - User testing after integration found a save-state refresh regression: receiving later extraction results can reset prior result badges from green downloaded or green-check album to yellow remote-only, and later predownload can restore only green downloaded while losing album-written state.
 - PM assigned `SAVE-FE-002` and `SAVE-REV-002` for Frontend to make downloaded/album-written result state durable across all extraction refresh paths and for Reviewer to verify the stale-array/status-refresh regression.
 - Reviewer approved `SAVE-REV-002` in `07d2644`; Frontend save-state refresh implementation commit is `37b43b0`.
+- A direct sync added the completed `lianliankan` mini-program page, worker files, route registration, and a temporary auth special input for `lianliankan` across all worktrees; PM recorded the sync handoff and assigned `ROUTE-FE-001`, `ROUTE-BE-001`, and `ROUTE-REV-001` to move both `lianliankan` and `izaya7-map` entrances into Settings and remove auth shortcuts.
