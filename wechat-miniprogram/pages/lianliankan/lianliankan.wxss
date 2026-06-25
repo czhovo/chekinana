@@ -204,28 +204,33 @@
 }
 
 .audio-player {
-  width: min(90vw, 840rpx);
+  width: min(90vw, 520rpx);
   margin: 22rpx auto 0;
   display: flex;
   align-items: center;
-  gap: 18rpx;
+  justify-content: center;
+  gap: 22rpx;
   color: #1e3a8a;
 }
 
 .audio-toggle {
-  flex: 0 0 112rpx;
-  height: 56rpx;
-  border-radius: 16rpx;
-  background: #2563eb;
-  color: #ffffff;
-  font-size: 24rpx;
+  flex: 0 0 76rpx;
+  width: 76rpx;
+  height: 76rpx;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+.audio-icon-image {
+  width: 68rpx;
+  height: 68rpx;
+  display: block;
+}
+
 .audio-panel {
-  flex: 1;
+  flex: 0 0 300rpx;
+  width: 300rpx;
   min-width: 0;
 }
 
@@ -239,8 +244,15 @@
   text-overflow: ellipsis;
 }
 
+.audio-status {
+  min-height: 28rpx;
+  font-size: 20rpx;
+  line-height: 28rpx;
+  color: #64748b;
+}
+
 .audio-slider {
-  margin: 2rpx 0 0;
+  margin: 0;
 }
 
 .audio-times {

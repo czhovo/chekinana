@@ -42,9 +42,16 @@
   </view>
 
   <view class="audio-player" wx:if="{{status === 'won'}}">
-    <view class="audio-toggle" bindtap="onAudioPlayPauseTap">{{audioIsPlaying ? '暂停' : '播放'}}</view>
+    <view class="audio-toggle" bindtap="onAudioPlayPauseTap">
+      <image
+        class="audio-icon-image"
+        src="{{audioIsPlaying ? '/assets/lianliankan/audio-pause.png' : '/assets/lianliankan/audio-play.png'}}"
+        mode="aspectFit"
+      />
+    </view>
     <view class="audio-panel">
-      <view class="audio-title">{{audioStatusText || 'muguang.m4a'}}</view>
+      <view class="audio-title">目光 - 空色轨迹</view>
+      <view class="audio-status" wx:if="{{audioStatusText}}">{{audioStatusText}}</view>
       <slider
         class="audio-slider"
         min="0"
