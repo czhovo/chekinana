@@ -2,16 +2,20 @@
 
 ## Current Objective
 
-Settings hidden route entry relocation is approved: `lianliankan` and `izaya7-map` are reached from Settings buttons, not auth token input.
+Remote lianliankan asset hosting: move the 14 lianliankan tile images out of the mini-program package and serve them from `https://chekinana.top` through Cloudflare Pages.
 
 Scope constraints:
 
-- Frontend owns the implementation: add two Settings buttons that navigate to `pages/lianliankan/lianliankan` and `pages/izaya7-map/izaya7-map`.
-- Auth token input must no longer accept `lianliankan` or `izaya7` as special route triggers; both values should follow the normal token validation path and fail unless they are real backend tokens.
-- Preserve the normal backend token authentication flow, stored-token behavior, manual clear-token behavior in Settings, and scanner lifecycle behavior from `STATE-FE-001`.
-- Preserve the newly synced `lianliankan` page registration, worker registration, tile assets, and the existing `izaya7-map` page.
-- Backend has no implementation scope unless Frontend finds a concrete API or auth-contract blocker; Backend must still read the sync handoff and provide a no-code compatibility handoff so Reviewer understands the current codebase changes.
-- Reviewer must review the Frontend diff plus the Backend no-code compatibility handoff and must verify that no backend API/auth route contract was changed.
+- Use Cloudflare Pages for this task, not R2. R2 is not currently enabled on the Cloudflare account and should not be subscribed/enabled in this task.
+- The domain `chekinana.top` is registered at Alibaba Cloud but is already present in Cloudflare. Static lianliankan assets must be served from Cloudflare, not Alibaba Cloud OSS.
+- Current Cloudflare state observed by PM on 2026-06-25: `chekinana.top` zone exists; DNS has `api.chekinana.top` proxied to the existing `chekinana-runpod-proxy` Worker; root `chekinana.top` and `www` have no active content record; Workers/Pages has only `chekinana-runpod-proxy`; R2 shows the plan/enable screen.
+- Do not modify or break the existing `api.chekinana.top` Worker route, RunPod proxy, `/api/*` behavior, token flow, image extraction APIs, or result download APIs.
+- Static asset URLs should be versioned and future-migratable, starting with `https://chekinana.top/assets/lianliankan/v1/manifest.json` and `https://chekinana.top/assets/lianliankan/v1/images/*.png`.
+- The manifest is the frontend contract for asset names and version. Future asset categories should be able to add parallel versioned directories without changing the lianliankan contract.
+- The mini program package should no longer include the 14 lianliankan PNG images under `wechat-miniprogram/pages/lianliankan/images`.
+- The lianliankan page must download the manifest and images from `chekinana.top` on first entry, persist images with `wx.saveFile`, and reuse cached local paths on later entries when the manifest version matches.
+- Because the package-local images are removed, download failure must produce a clear retry/error state instead of silently falling back to bundled images.
+- User confirmed `https://chekinana.top` is or will be configured as a WeChat `downloadFile` legal domain.
 - Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
 - Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
 - Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
@@ -33,7 +37,7 @@ Required fields:
 ```text
 Branch: codex/pm-next
 Worktree: C:\Users\20888\Desktop\chekinana-pm
-Git status: clean at task start
+Git status: dirty at ASSET task start due previously synced mini-program lianliankan files (`wechat-miniprogram/app.json`, `pages/auth/auth.js`, `pages/lianliankan/`, `workers/`) that PM must not commit while publishing ASSET tasks.
 Relevant existing changes:
   Frontend direct/simple commit: 29fa626 frontend: remove contact placeholders
   Frontend contact dialog approved baseline includes c2027c4 and 29fa626
@@ -97,6 +101,7 @@ Frontend settings hidden route commit: ee9d792
 Backend settings hidden route no-code handoff commit: 2991858
 Reviewer settings hidden route changes-requested commit: 6751bab
 Reviewer settings hidden route approval commit: ad09f8d
+Cloudflare asset-hosting decision: 2026-06-25 use Cloudflare Pages for `chekinana.top` static assets; do not enable R2 for this task.
 ```
 
 ## Worktree Assignments
@@ -104,14 +109,17 @@ Reviewer settings hidden route approval commit: ad09f8d
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ROUTE-FE-001` completed in `ee9d792`; Reviewer applied authorized whitespace-only fix |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ROUTE-BE-001` completed in `2991858` as no-code compatibility handoff |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ROUTE-REV-001` completed with verdict: approved |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ASSET-FE-001` pending after PM taskboard sync |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ASSET-BE-001` pending after PM taskboard sync |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ASSET-REV-001` pending after Frontend and Backend handoffs |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| ASSET-FE-001 | Frontend | pending | Make the lianliankan page load tile images from the remote Cloudflare asset manifest and remove bundled tile PNGs from the mini-program package. | `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` if worker contracts need asset-path changes, remove `wechat-miniprogram/pages/lianliankan/images/*.png`, optional utility under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-25-frontend-lianliankan-remote-assets.md` | On first entry, the page downloads `https://chekinana.top/assets/lianliankan/v1/manifest.json`, downloads all 14 PNGs with `wx.downloadFile`, persists them via `wx.saveFile`, stores version and local path mapping with `wx.setStorage`, and uses local file paths for board rendering; later entries reuse cached paths when the manifest version matches; missing/invalid/stale cache redownloads only what is needed; download failure shows a clear retry/error state; no package-local lianliankan image PNGs remain; existing board generation, page route, worker usage, settings entry, and auth behavior stay unchanged. |
+| ASSET-BE-001 | Backend | pending | Create Cloudflare Pages static asset source for lianliankan images and manifest, without enabling R2 or changing the API Worker. | New static asset source directory such as `cloudflare-pages/` or `cloudflare-assets/`, the 14 source PNGs copied from `wechat-miniprogram/pages/lianliankan/images`, manifest JSON, deployment README/scripts if needed, `docs/agents/handoffs/2026-06-25-backend-lianliankan-assets.md` | Provides versioned assets at the planned path structure `/assets/lianliankan/v1/manifest.json` and `/assets/lianliankan/v1/images/*.png`; manifest lists all 14 image ids/files and version `v1`; includes deploy instructions for Cloudflare Pages binding to `chekinana.top`; does not touch `cloudflare-worker` route `api.chekinana.top/*`, backend Flask code, RunPod config, R2, or Alibaba Cloud; verifies local static file layout and, if deployed during the task, verifies public URLs return correct content types. |
+| ASSET-REV-001 | Reviewer | pending | Review Cloudflare static asset hosting and lianliankan remote asset loading after Backend and Frontend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-lianliankan-assets.md` | Reviewer verifies: Cloudflare Pages/static source contains all 14 images and manifest; URL contract is versioned and does not conflict with `api.chekinana.top`; R2 is not enabled or required; package-local lianliankan images are removed; frontend first-entry download/cache/retry behavior is correct; cached second entry does not redownload unnecessarily; manifest version mismatch redownloads; failure state is visible; no regression to settings entry, auth token flow, scanner APIs, RunPod proxy, or extraction routes; checks include `node --check` for changed mini-program JS/worker JS, manifest JSON validation, static asset path validation, and `git diff --check`. |
 | ROUTE-FE-001 | Frontend | done | Move `lianliankan` and `izaya7-map` entry points from auth token input to Settings buttons. | `wechat-miniprogram/pages/settings/settings.js`, `wechat-miniprogram/pages/settings/settings.wxml`, `wechat-miniprogram/pages/settings/settings.wxss` if needed, `wechat-miniprogram/pages/auth/auth.js`, `wechat-miniprogram/app.json` only if route registration needs repair, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md` | Frontend commit `ee9d792` moves the hidden entries to Settings and removes auth shortcuts; Reviewer applied a one-time authorized whitespace-only fix so `git diff --check` passes. |
 | ROUTE-BE-001 | Backend | done | Read the lianliankan sync handoff and the Frontend route-entry handoff, then confirm Backend has no implementation scope. | `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md`, `docs/agents/handoffs/2026-06-25-backend-settings-hidden-routes.md` | Backend commit `2991858` confirms no Backend code changes are required; Reviewer verified no Backend implementation or deployment-path files changed in this task. |
 | ROUTE-REV-001 | Reviewer | done | Review the hidden-route entry relocation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-settings-hidden-routes.md` | Reviewer verdict: approved. Settings routes, auth shortcut removal, app/page/worker registration, Backend no-code scope, and required checks all passed after the authorized whitespace-only fix. |
@@ -322,6 +330,23 @@ Frontend auth/map contract:
 - The newly synced `lianliankan` page, its worker dependencies under `wechat-miniprogram/workers/`, and the top-level worker registration in `app.json` must remain valid.
 - This contract is Frontend-only. Backend `/api/auth/verify` semantics must not change for these strings.
 
+Remote asset contract:
+
+- This task uses Cloudflare Pages/static hosting for lianliankan assets. Do not enable or require Cloudflare R2 in this task.
+- The public asset root is `https://chekinana.top/assets/lianliankan/v1/`.
+- The manifest URL is `https://chekinana.top/assets/lianliankan/v1/manifest.json`.
+- The image URL base is `https://chekinana.top/assets/lianliankan/v1/images/`.
+- Manifest fields should be explicit enough for frontend caching and future categories, at minimum: `type`, `version`, `baseUrl`, and an `images` list containing stable `id` and `file` fields for all 14 PNGs.
+- The first manifest version is `v1`.
+- All 14 files currently under `wechat-miniprogram/pages/lianliankan/images` must be represented in the manifest and hosted remotely.
+- The mini-program package should remove those 14 PNGs after remote loading is implemented; there is no bundled-image fallback requirement.
+- Frontend should use `wx.downloadFile` for manifest and image downloads so the confirmed `downloadFile` legal domain covers the flow; if it chooses `wx.request` for the manifest, the handoff must explicitly note the extra WeChat `request` legal-domain requirement.
+- Frontend must persist downloaded images with `wx.saveFile` and store a mapping keyed by manifest version and image id/file.
+- Cache validity requires the cached manifest version to match the remote manifest version and all required local files to exist or be recoverable; missing entries should trigger targeted redownload.
+- Download errors, corrupt manifest, missing files, or save failures must surface a clear retry/error state on the lianliankan page.
+- The remote asset service must not change `api.chekinana.top`, the existing Cloudflare Worker `chekinana-runpod-proxy`, backend Flask APIs, RunPod startup, extraction behavior, contact routes, or scanner result downloads.
+- Future migration to R2 + Worker should be possible without changing the frontend URL contract by preserving the same `/assets/<category>/<version>/...` URL structure.
+
 Ordering contract:
 
 - Overall display order is selected image order.
@@ -451,10 +476,12 @@ Contact email contract:
 | 2026-06-23 | Save-state refresh durability is approved by Reviewer. | Reviewer commit `07d2644` approved Frontend commit `37b43b0`; PM marks `SAVE-FE-002` and `SAVE-REV-002` done and ready for local integration. |
 | 2026-06-25 | Move hidden page entrances from auth token input to Settings. | User requested `lianliankan` and `izaya7-map` to be reachable through Settings buttons and no longer through special token strings in auth. |
 | 2026-06-25 | Keep the route-entry change Frontend-owned with Backend no-code context handoff. | The synced `lianliankan` page and existing `izaya7-map` are mini-program pages; Backend only needs to confirm no server auth/API contract changes are required so Reviewer can evaluate the current codebase state. |
+| 2026-06-25 | Use Cloudflare Pages, not R2, for the first lianliankan remote assets task. | The current payload is only 14 PNGs, R2 is not enabled and would require a subscription step, while Pages can serve versioned static assets from `chekinana.top` without touching Alibaba Cloud OSS. |
+| 2026-06-25 | Keep the remote asset URL contract future-migratable. | Future large asset storage may move to R2 + Worker, so the first implementation should use `/assets/<category>/<version>/...` URLs and a manifest format that can survive backend storage migration. |
 
 ## Open Questions
 
-- None. `ROUTE-REV-001` is approved after the one-time authorized whitespace-only fix in `wechat-miniprogram/pages/lianliankan/lianliankan.wxss`.
+- None. Publish tasks in Frontend, Backend, Reviewer order: `ASSET-FE-001`, `ASSET-BE-001`, then `ASSET-REV-001`. Frontend implements against the documented URL contract; final verification depends on Backend/infra making the Cloudflare Pages asset URLs available.
 
 ## Completed Work Summary
 
@@ -526,3 +553,5 @@ Contact email contract:
 - Reviewer approved `SAVE-REV-002` in `07d2644`; Frontend save-state refresh implementation commit is `37b43b0`.
 - A direct sync added the completed `lianliankan` mini-program page, worker files, route registration, and a temporary auth special input for `lianliankan` across all worktrees; PM recorded the sync handoff and assigned `ROUTE-FE-001`, `ROUTE-BE-001`, and `ROUTE-REV-001` to move both `lianliankan` and `izaya7-map` entrances into Settings and remove auth shortcuts.
 - Frontend completed `ROUTE-FE-001` in `ee9d792` and Backend completed `ROUTE-BE-001` in `2991858`; Reviewer initially requested changes for a `git diff --check` EOF blank-line failure, then applied the user-authorized whitespace-only fix and approved `ROUTE-REV-001`.
+- PM confirmed Cloudflare state for `chekinana.top`: the zone exists in Cloudflare, `api.chekinana.top` is proxied to the existing Worker, root and `www` are not serving content, Workers/Pages has only `chekinana-runpod-proxy`, and R2 is not enabled. User confirmed `chekinana.top` is a WeChat `downloadFile` legal domain and the 14 lianliankan package images should be removed after remote loading is implemented.
+- PM assigned `ASSET-FE-001`, `ASSET-BE-001`, and `ASSET-REV-001` to load/cache lianliankan assets in the mini program on first page entry, host them on Cloudflare Pages under a versioned manifest contract, and review the full remote-asset behavior.
