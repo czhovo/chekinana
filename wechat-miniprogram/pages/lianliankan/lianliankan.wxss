@@ -1,4 +1,4 @@
-﻿.page {
+.page {
   min-height: 100vh;
   background: #f4f7ff;
   color: #0f172a;
@@ -202,3 +202,52 @@
   color: #1e40af;
   font-size: 28rpx;
 }
+
+.audio-player {
+  width: min(90vw, 840rpx);
+  margin: 22rpx auto 0;
+  display: flex;
+  align-items: center;
+  gap: 18rpx;
+  color: #1e3a8a;
+}
+
+.audio-toggle {
+  flex: 0 0 112rpx;
+  height: 56rpx;
+  border-radius: 16rpx;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 24rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.audio-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+.audio-title {
+  min-height: 32rpx;
+  font-size: 24rpx;
+  line-height: 32rpx;
+  color: #1d4ed8;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.audio-slider {
+  margin: 2rpx 0 0;
+}
+
+.audio-times {
+  display: flex;
+  justify-content: space-between;
+  color: #64748b;
+  font-size: 22rpx;
+  line-height: 28rpx;
+}
+

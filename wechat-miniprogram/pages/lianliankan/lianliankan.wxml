@@ -41,6 +41,28 @@
     </view>
   </view>
 
-  <view class="result" wx:if="{{status === 'won'}}">恭喜过关！再来一局！</view>
+  <view class="audio-player" wx:if="{{status === 'won'}}">
+    <view class="audio-toggle" bindtap="onAudioPlayPauseTap">{{audioIsPlaying ? '暂停' : '播放'}}</view>
+    <view class="audio-panel">
+      <view class="audio-title">{{audioStatusText || 'muguang.m4a'}}</view>
+      <slider
+        class="audio-slider"
+        min="0"
+        max="100"
+        step="1"
+        value="{{audioProgress}}"
+        disabled="{{audioDuration <= 0}}"
+        block-size="16"
+        activeColor="#2563eb"
+        backgroundColor="#bfdbfe"
+        bindchanging="onAudioSeekChanging"
+        bindchange="onAudioSeekChange"
+      />
+      <view class="audio-times">
+        <text>{{audioCurrentLabel}}</text>
+        <text>{{audioDurationLabel}}</text>
+      </view>
+    </view>
+  </view>
   <view class="result" wx:elif="{{statusText}}">{{statusText}}</view>
 </view>
