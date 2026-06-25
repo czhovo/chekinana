@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "category": "lianliankan",
+  "version": "v1",
+  "baseUrl": "https://chekinana.top/assets/lianliankan/v1/",
+  "images": [
+    {
+      "id": 1,
+      "file": "pattern1r.png",
+      "path": "images/pattern1r.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern1r.png",
+      "bytes": 68583,
+      "sha256": "b529886a028ff9a08e48a2ea333456aa08e0f2aef16be85cfe4d767b8e447e22"
+    },
+    {
+      "id": 2,
+      "file": "pattern2p.png",
+      "path": "images/pattern2p.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern2p.png",
+      "bytes": 65471,
+      "sha256": "3da7966118cc1dc5fc936a379514136a521d4376d20c116dcfd3f61cecde48fb"
+    },
+    {
+      "id": 3,
+      "file": "pattern3s.png",
+      "path": "images/pattern3s.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern3s.png",
+      "bytes": 73392,
+      "sha256": "8c620b1033eb6c7fac395dc30d379180389935bb0354bf3588a044c1b25d4328"
+    },
+    {
+      "id": 4,
+      "file": "pattern4g.png",
+      "path": "images/pattern4g.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern4g.png",
+      "bytes": 67466,
+      "sha256": "f82e37608ce3cc8cc06b327a6831e3644bcef6abe630af50a4dcc9bc9c325b0c"
+    },
+    {
+      "id": 5,
+      "file": "pattern5k.png",
+      "path": "images/pattern5k.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern5k.png",
+      "bytes": 71803,
+      "sha256": "fcaf95c3ebcb97d1c0ab19fdfab2644e6c41429bfe6d2e69ee3a59f167f262bb"
+    },
+    {
+      "id": 6,
+      "file": "pattern6b.png",
+      "path": "images/pattern6b.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern6b.png",
+      "bytes": 71119,
+      "sha256": "bba7172ffd6cb0221b771c9f1995bb7ff015bb338439ea797f167f991b3ab9b0"
+    },
+    {
+      "id": 7,
+      "file": "pattern7w.png",
+      "path": "images/pattern7w.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern7w.png",
+      "bytes": 64525,
+      "sha256": "1f3e098a9edb3343532b2f8aa3aa4bf26bf17299d4b1af4505548be5e6a7d8b4"
+    },
+    {
+      "id": 8,
+      "file": "pattern8g.png",
+      "path": "images/pattern8g.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern8g.png",
+      "bytes": 92280,
+      "sha256": "fafb1050c7a34336277949526014e29f813dae104ffeb2d5e481af3dfef6bb9d"
+    },
+    {
+      "id": 9,
+      "file": "pattern9s.png",
+      "path": "images/pattern9s.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern9s.png",
+      "bytes": 76707,
+      "sha256": "9bc13651d8a65425d610f2c18886de76f60617a3b6841d88baeefd560939f35f"
+    },
+    {
+      "id": 10,
+      "file": "pattern10p.png",
+      "path": "images/pattern10p.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern10p.png",
+      "bytes": 85823,
+      "sha256": "535c8ca85877a860ebd87c0a50808520a8280087753548076faec8bea3f80454"
+    },
+    {
+      "id": 11,
+      "file": "pattern11y.png",
+      "path": "images/pattern11y.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern11y.png",
+      "bytes": 62355,
+      "sha256": "58e47223ead3876eac7c806ccbf191c5fb4e1cf24e16af1db04f7b54b23d8419"
+    },
+    {
+      "id": 12,
+      "file": "pattern12k.png",
+      "path": "images/pattern12k.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern12k.png",
+      "bytes": 79267,
+      "sha256": "a210e278fe0f53641db301a5f1873d751ff8b8b1951d84afbc35b014107b7149"
+    },
+    {
+      "id": 13,
+      "file": "pattern13r.png",
+      "path": "images/pattern13r.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern13r.png",
+      "bytes": 69878,
+      "sha256": "ebfb53ccddaa7dcb08b858fd6340e3a766afe96fc492751d604a93247f0bfe25"
+    },
+    {
+      "id": 14,
+      "file": "pattern14w.png",
+      "path": "images/pattern14w.png",
+      "url": "https://chekinana.top/assets/lianliankan/v1/images/pattern14w.png",
+      "bytes": 67828,
+      "sha256": "36e10bba2dd0459d127b8b3da781863acc89a876d0802aaf5c1dc03aabd16080"
+    }
+  ],
+  "audio": {
+    "victory": {
+      "id": "victory",
+      "file": "muguang.m4a",
+      "path": "audio/muguang.m4a",
+      "url": "https://chekinana.top/assets/lianliankan/v1/audio/muguang.m4a",
+      "bytes": 5690219,
+      "sha256": "f845990d881399aadce636bb176f68bc476f1c0d75ece4dd976f90a6c21ad41e",
+      "contentType": "audio/mp4"
+    }
+  }
+}
