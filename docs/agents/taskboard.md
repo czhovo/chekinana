@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Fix the real-WeChat lianliankan remote asset loading failure after `ASSET-REV-001` approval: entering the lianliankan page fails to load tile image resources, and reset/retry still does not recover.
+Fix the remaining Cloudflare Pages DNS/TLS blocker for lianliankan remote assets: `https://chekinana.top/assets/lianliankan/v1/...` must be publicly reachable over HTTPS with valid content types while `api.chekinana.top/*` continues to route to the existing API Worker.
 
 Scope constraints:
 
@@ -19,6 +19,8 @@ Scope constraints:
 - User testing after Reviewer approval commit `0bdfaaa` found that entering the lianliankan page still fails to load image resources in the real mini program, and resetting does not recover the page.
 - Reviewer handoff `0bdfaaa` did not verify public `https://chekinana.top/assets/lianliankan/v1/...` URLs because Cloudflare Pages deployment was outside the local reviewer environment; public URL availability is now a required gate.
 - Reset/retry must clear any corrupt or partial lianliankan asset cache and must not mark assets ready unless the manifest and all required image local files are actually available.
+- Reviewer commit `59a66e3` found Frontend loader/reset behavior acceptable, but public asset delivery still fails because `chekinana.top` resolves to non-public/reserved `198.18.0.x` addresses and HTTPS requests fail during TLS handshake.
+- The next fix is Backend/infra scoped: correct Cloudflare Pages deployment/custom-domain/DNS/TLS so public HTTPS asset URLs work. Do not change Frontend unless the URL contract itself changes and PM explicitly reopens Frontend scope.
 - Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
 - Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
 - Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
@@ -108,6 +110,9 @@ Cloudflare asset-hosting decision: 2026-06-25 use Cloudflare Pages for `chekinan
 Reviewer lianliankan remote asset approval commit: 0bdfaaa
 Backend ASSET-BE-001 known risk: local agent did not perform Cloudflare Pages online deployment; after deployment, `https://chekinana.top/assets/lianliankan/v1/manifest.json` and PNG URLs must be verified for public access and content type, and Pages binding to `chekinana.top` must not affect the existing `api.chekinana.top/*` Worker route.
 User-reported lianliankan asset load failure: 2026-06-25 entering the lianliankan page fails to load remote image resources in real testing, and reset still fails.
+Frontend lianliankan asset loader/reset fix commit: 692dca7
+Backend lianliankan public verification/tooling commit: 5426a6f
+Reviewer lianliankan asset load review commit: 59a66e3; verdict changes requested due DNS/TLS public asset blocker.
 ```
 
 ## Worktree Assignments
@@ -115,9 +120,9 @@ User-reported lianliankan asset load failure: 2026-06-25 entering the lianlianka
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ASSET-FE-002` completed in `692dca7` |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ASSET-BE-002` completed in `5426a6f`; public asset URL still blocked by DNS/TLS |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ASSET-REV-002` completed with verdict: changes requested |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No new task; `ASSET-FE-002` passed Reviewer checks and remaining blocker is DNS/TLS/static hosting |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ASSET-BE-003` pending after PM taskboard sync |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ASSET-REV-003` pending after Backend handoff |
 
 ## Current Tasks
 
@@ -129,6 +134,8 @@ User-reported lianliankan asset load failure: 2026-06-25 entering the lianlianka
 | ASSET-FE-002 | Frontend | done | Diagnose and fix the real-WeChat lianliankan asset loading failure and reset/retry recovery path. | `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` if asset path contracts need changes, optional mini-program asset-cache utility, `docs/agents/handoffs/2026-06-25-frontend-lianliankan-asset-load-fix.md` | Frontend commit `692dca7` passes Reviewer mocks for manifest `wx.downloadFile` + `readFile`, full-success-only cache writes, visible API/URL error state, partial-cache non-persistence, valid cache reuse, missing-file targeted redownload, and reset from `asset-error` clearing stale storage/saved files before retry. |
 | ASSET-BE-002 | Backend | done | Verify and, if needed, fix the Cloudflare Pages public asset deployment for the lianliankan manifest and 14 PNGs. | `cloudflare-pages/**` or the static asset source created by `ASSET-BE-001`, deploy docs/scripts if needed, Cloudflare Pages config notes, `docs/agents/handoffs/2026-06-25-backend-lianliankan-public-assets.md` | Backend commit `5426a6f` adds public verification tooling and documents the unresolved external blocker: `chekinana.top` resolves to non-public `198.18.0.x` addresses and manifest/PNG HTTPS requests fail TLS. No Backend/API Worker/RunPod/R2 code was changed; `api.chekinana.top/api/health` still returns protected Backend JSON rather than Pages static content. |
 | ASSET-REV-002 | Reviewer | done | Re-review the lianliankan remote asset fix after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-lianliankan-asset-load-fix.md` | Reviewer verdict: changes requested. Frontend loader/reset behavior passed; local static manifest validation and syntax checks passed; API subdomain still returns Backend JSON. Blocking P1 remains public asset availability: `chekinana.top` resolves to non-public `198.18.0.115`, manifest and PNG requests fail TLS, and `scripts/check_lianliankan_public_assets.py` fails. |
+| ASSET-BE-003 | Backend | pending | Fix the Cloudflare Pages public DNS/TLS delivery blocker for lianliankan assets. | Cloudflare Pages project/domain/DNS configuration notes, `cloudflare-pages/**` only if deploy output/config needs correction, verification scripts/docs if needed, `docs/agents/handoffs/2026-06-25-backend-lianliankan-dns-tls.md` | `https://chekinana.top/assets/lianliankan/v1/manifest.json` and all 14 PNG URLs must be reachable over public HTTPS without TLS handshake failure. `chekinana.top` must no longer resolve to non-public/reserved `198.18.0.x` addresses in the verification environment; the Pages custom domain/certificate must be active; manifest should return JSON content type and PNGs image content types; `python scripts\check_lianliankan_public_assets.py` must pass or any replacement command must verify the same URL set. Explicitly verify `https://api.chekinana.top/api/health` still reaches the existing API Worker/backend path rather than Pages static content. Do not enable R2, do not move assets to Alibaba OSS, do not change `api.chekinana.top/*` routing, and do not touch Flask/RunPod/extraction/auth/result/contact code. Handoff must include exact DNS, TLS, URL, content-type, and API-subdomain verification commands and outputs. |
+| ASSET-REV-003 | Reviewer | pending | Re-review the DNS/TLS public asset fix after Backend handoff is available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-lianliankan-dns-tls.md` | Reviewer must not approve unless public DNS/TLS and asset checks pass: `chekinana.top` does not resolve to non-public/reserved addresses, manifest and all 14 PNG URLs return successful HTTPS responses with expected content types, `scripts/check_lianliankan_public_assets.py` passes, and `https://api.chekinana.top/api/health` still returns the expected protected API/Backend JSON path rather than Pages content. Also confirm no new Frontend code task is needed because `ASSET-FE-002` already passed, no R2/Alibaba OSS/API Worker/Flask/RunPod/extraction/auth/result/contact regressions were introduced, and `git diff --check` passes. |
 | ROUTE-FE-001 | Frontend | done | Move `lianliankan` and `izaya7-map` entry points from auth token input to Settings buttons. | `wechat-miniprogram/pages/settings/settings.js`, `wechat-miniprogram/pages/settings/settings.wxml`, `wechat-miniprogram/pages/settings/settings.wxss` if needed, `wechat-miniprogram/pages/auth/auth.js`, `wechat-miniprogram/app.json` only if route registration needs repair, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md` | Frontend commit `ee9d792` moves the hidden entries to Settings and removes auth shortcuts; Reviewer applied a one-time authorized whitespace-only fix so `git diff --check` passes. |
 | ROUTE-BE-001 | Backend | done | Read the lianliankan sync handoff and the Frontend route-entry handoff, then confirm Backend has no implementation scope. | `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md`, `docs/agents/handoffs/2026-06-25-backend-settings-hidden-routes.md` | Backend commit `2991858` confirms no Backend code changes are required; Reviewer verified no Backend implementation or deployment-path files changed in this task. |
 | ROUTE-REV-001 | Reviewer | done | Review the hidden-route entry relocation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-settings-hidden-routes.md` | Reviewer verdict: approved. Settings routes, auth shortcut removal, app/page/worker registration, Backend no-code scope, and required checks all passed after the authorized whitespace-only fix. |
@@ -489,10 +496,12 @@ Contact email contract:
 | 2026-06-25 | Keep the remote asset URL contract future-migratable. | Future large asset storage may move to R2 + Worker, so the first implementation should use `/assets/<category>/<version>/...` URLs and a manifest format that can survive backend storage migration. |
 | 2026-06-25 | Reopen lianliankan asset loading after real-mini-program failure. | User testing after reviewer approval found entering the page still fails to load image resources and reset does not recover; the previous review did not verify public `chekinana.top` asset URLs. |
 | 2026-06-25 | Split the fix across Frontend and Backend/static hosting, then require Reviewer to verify public URLs and reset/retry behavior. | The failure can be caused by mini-program loader/cache/reset handling, Cloudflare Pages deployment/domain/path availability, or both; review must exercise the real public URL contract instead of only local static files. |
+| 2026-06-25 | Keep the TLS follow-up Backend/infra-only. | Reviewer commit `59a66e3` passed Frontend loader/reset behavior and isolated the remaining P1 to public DNS/TLS/Cloudflare Pages asset delivery. |
+| 2026-06-25 | Treat `198.18.0.x` resolution as a blocker for public asset delivery. | `198.18.0.0/15` is not a normal public serving address for this domain, and reviewer observed TLS handshake failures for both manifest and PNG URLs while the API subdomain still reached the protected backend path. |
 
 ## Open Questions
 
-- None. `ASSET-REV-002` found Frontend loader/reset behavior acceptable, but public `https://chekinana.top/assets/lianliankan/v1/...` availability still fails DNS/TLS verification and must be fixed before approval.
+- None. Publish follow-up tasks for the remaining blocker: `ASSET-BE-003`, then `ASSET-REV-003`. No Frontend task is open because `ASSET-REV-002` found Frontend loader/reset behavior acceptable.
 
 ## Completed Work Summary
 
@@ -570,3 +579,4 @@ Contact email contract:
 - User testing after Reviewer commit `0bdfaaa` found lianliankan image resources still fail to load on page entry in the real mini program, and reset/retry still fails.
 - PM reopened the asset work with `ASSET-FE-002`, `ASSET-BE-002`, and `ASSET-REV-002` so Frontend fixes loader/cache/reset behavior, Backend verifies or fixes public Cloudflare Pages asset availability, and Reviewer verifies the real public URL plus reset/retry path before approval.
 - Frontend completed `ASSET-FE-002` in `692dca7` and Backend completed `ASSET-BE-002` in `5426a6f`; Reviewer completed `ASSET-REV-002` with verdict `changes requested` because Frontend loader/reset behavior passed, but public `chekinana.top` asset URLs still resolve to non-public `198.18.0.x` addresses and fail TLS/public asset verification.
+- PM assigned `ASSET-BE-003` and `ASSET-REV-003` to fix and re-review the remaining Cloudflare Pages DNS/TLS public asset delivery blocker without reopening Frontend implementation scope.
