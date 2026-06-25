@@ -3,11 +3,13 @@
     "pages/auth/auth",
     "pages/index/index",
     "pages/izaya7-map/izaya7-map",
+    "pages/lianliankan/lianliankan",
     "pages/calendar/calendar",
     "pages/idols/idols",
     "pages/gallery/gallery",
     "pages/settings/settings"
   ],
+  "workers": "workers",
   "tabBar": {
     "custom": true,
     "color": "#7a7f87",
