@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Move the hidden `lianliankan` and `izaya7` page entrances out of auth token input and into Settings page buttons.
+Settings hidden route entry relocation is approved: `lianliankan` and `izaya7-map` are reached from Settings buttons, not auth token input.
 
 Scope constraints:
 
@@ -93,6 +93,10 @@ User-reported SAVE refresh regression: 2026-06-23 after each newly received extr
 Reviewer save-state refresh approval commit: 07d2644; reviewed Frontend implementation commit `37b43b0`, cherry-picked as `cba7352`, verdict approved.
 Lianliankan direct sync handoff: 2026-06-25 `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`
 Direct sync changes currently present in all worktrees: new `wechat-miniprogram/pages/lianliankan/`, new `wechat-miniprogram/workers/`, `wechat-miniprogram/app.json` page/worker registration, `wechat-miniprogram/pages/auth/auth.js` temporary `lianliankan` special token branch, and removal of old `wechat-miniprogram/pages/izaya-map/`.
+Frontend settings hidden route commit: ee9d792
+Backend settings hidden route no-code handoff commit: 2991858
+Reviewer settings hidden route changes-requested commit: 6751bab
+Reviewer settings hidden route approval commit: ad09f8d
 ```
 
 ## Worktree Assignments
