@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Close the lianliankan victory-audio round after receiving Backend static-source work, Frontend playback and follow-up commits, Reviewer review result, PM Cloudflare Pages redeploy with the replaced `D:\muguang.m4a` source, and the user's corrected ownership boundary for future Backend work.
+Update the lianliankan page so clearing a board shows an interactive minimalist audio player instead of the previous congratulation/replay text, and start downloading the 14 tile image assets when the mini program enters rather than waiting until the lianliankan page is opened.
 
 Scope constraints:
 
@@ -13,6 +13,10 @@ Scope constraints:
 - The mini-program package must not include the 14 lianliankan tile PNGs under `wechat-miniprogram/pages/lianliankan/images` in any implementation/review worktree after this task completes.
 - Frontend should not bundle `muguang.m4a`; it should use the public HTTPS asset URL or manifest-declared URL and handle playback through mini-program audio APIs.
 - Victory audio playback should start only after a lianliankan board is cleared. It must not block the victory UI/reset flow, must not restart repeatedly due to state refreshes, and should be stopped/released when leaving or resetting the page.
+- The clear-state UI should no longer show the old `恭喜过关` / `再来一局` style text. It should show a compact audio player with play/pause control and a scrubbable progress bar.
+- The audio player should use the already deployed remote `muguang.m4a` asset and should stay visually simple, consistent with the lianliankan page, and not introduce decorative/large UI.
+- The 14 lianliankan tile images should begin downloading/cache-warming when the mini program enters. This should be non-blocking for authentication, settings, scanner, and other page entry.
+- Backend has no task for this round. Static assets and mini-program download timing/UI are not server runtime/image-extraction work.
 - Current Cloudflare state observed by PM on 2026-06-25: `chekinana.top` zone exists; DNS has `api.chekinana.top` proxied to the existing `chekinana-runpod-proxy` Worker; root `chekinana.top` and `www` have no active content record; Workers/Pages has only `chekinana-runpod-proxy`; R2 shows the plan/enable screen.
 - Do not modify or break the existing `api.chekinana.top` Worker route, RunPod proxy, `/api/*` behavior, token flow, image extraction APIs, or result download APIs.
 - Static asset URLs should be versioned and future-migratable, starting with `https://chekinana.top/assets/lianliankan/v1/manifest.json` and `https://chekinana.top/assets/lianliankan/v1/images/*.png`.
@@ -128,15 +132,18 @@ LLAUDIO round closure inputs: Backend completed `LLAUDIO-BE-001` in `e1fd6a2` be
 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
-| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Close the lianliankan victory-audio round and preserve the corrected ownership boundary |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No new task; `LLAUDIO-FE-001` and follow-up `fbe0dda` are complete |
+| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, and ownership boundaries for the lianliankan audio-player/preload round |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `LLPLAYER-FE-001`: replace clear-state text with an interactive audio player and preload tile images on mini-program entry |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No lianliankan audio/static asset task; Backend owns only server-side runtime code such as current image extraction algorithms and future server code |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | No new task; `LLAUDIO-REV-001` is recorded as completed with verdict `changes requested` before Frontend follow-up `fbe0dda` |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `LLPLAYER-REV-001`: review Frontend clear-state player and asset-preload behavior; confirm Backend remains out of scope |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| LLPLAYER-FE-001 | Frontend | pending | Replace the lianliankan clear-state text with an interactive audio player and start tile-image downloading when the mini program enters. | `wechat-miniprogram/app.js` if startup hook is needed, `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` only if existing lianliankan asset contracts require it, optional shared cache helper under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-26-frontend-lianliankan-player-preload.md` | After a board is cleared, the old congratulation/replay text is not shown; a compact audio player is shown with play/pause and a scrubbable progress bar; progress stays in sync with playback and user seeking works; player state handles pending download, failure, pause/resume, reset/new game, hide, and unload without duplicate playback. The 14 remote tile images begin downloading/cache-warming when the mini program enters, before the lianliankan page is opened, without blocking auth/settings/scanner startup and without bundling package-local tile PNGs. Run focused `node --check` on changed mini-program JS files, `git diff --check`, and a targeted mock or manual notes covering preload trigger and player controls. |
+| LLPLAYER-BE-001 | Backend | not_applicable | No Backend implementation for this round. | None | Backend should not change server runtime, Cloudflare Pages/static assets, mini-program package files, or lianliankan preload/player behavior for this task. Backend scope remains server-side runtime code only. |
+| LLPLAYER-REV-001 | Reviewer | pending | Review the lianliankan audio-player and startup-preload Frontend work after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-lianliankan-player-preload.md` | Verify the actual Frontend diff against `LLPLAYER-FE-001`; confirm old clear-state congratulations/replay text is removed from the clear-state UI; confirm the player has play/pause, progress display, and seeking behavior; confirm tile image preload starts on mini-program entry and does not block unrelated flows; confirm no package-local tile PNGs or `.m4a` files are bundled; confirm Backend has no implementation diff for this round; run focused syntax checks and produce an approved/changes-requested verdict. |
 | LLAUDIO-PM-001 | PM | done | Upload and maintain the lianliankan victory audio asset on Cloudflare Pages direct-upload project `chekinana-assets`. | External Cloudflare Pages deployment and PM taskboard records only | PM uploaded `muguang.m4a` to `https://chekinana.top/assets/lianliankan/v1/audio/muguang.m4a`. Initial upload used `C:\Users\20888\Downloads\muguang.m4a` and was publicly verified; user then replaced the source with `D:\muguang.m4a` and PM redeployed it with Pages deployment `https://398ead2d.chekinana-assets.pages.dev`. Backend is not responsible for this static asset operation. |
 | LLAUDIO-FE-001 | Frontend | done | Synchronize the mini-program lianliankan asset cleanup and start remote victory audio playback when a board is cleared. | `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` if lianliankan worker contracts need adjustment, remove any residual `wechat-miniprogram/pages/lianliankan/images/*.png`, optional shared asset/audio helper under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-25-frontend-lianliankan-audio.md`, `docs/agents/handoffs/2026-06-26-frontend-lianliankan-audio-followup.md` | Frontend commits `324e1ed`, `43e12cd`, and follow-up `fbe0dda` implement remote victory audio, local cache/failure hints, delayed background audio download after board draw, dedicated audio cache key, one retry, and pending/failure UI states. Frontend handoff reports `node --check`, `git diff --check`, no package-local tile PNGs, no bundled `.m4a`, and targeted Node mock coverage passed. |
 | LLAUDIO-BE-001 | Backend | done | Historical static-source/audio task completed before the corrected ownership boundary was recorded. | `cloudflare-pages/**`, `scripts/check_lianliankan_assets.py`, `scripts/check_lianliankan_public_assets.py`, `docs/agents/handoffs/2026-06-25-backend-lianliankan-audio.md` | Backend commit `e1fd6a2` added the Cloudflare Pages audio source/manifest/header/verification support and removed residual Backend worktree package PNGs without changing Flask/API runtime behavior. After this round, Backend must not be assigned Cloudflare Pages/static asset or mini-program package cleanup work; Backend scope is server-side runtime code only. |
@@ -517,10 +524,11 @@ Contact email contract:
 | 2026-06-25 | Keep audio hosting in Cloudflare Pages and playback in Frontend. | Backend/static-asset work owns the Pages source, headers, manifest/verification scripts, and deployment handoff; Frontend owns mini-program audio playback and must not bundle the audio; PM remains responsible for any external dashboard deployment step if it cannot be completed by code. |
 | 2026-06-26 | Correct lianliankan audio ownership away from Backend. | User clarified Backend should only own server-side runtime code: currently image extraction algorithms and future server features. Cloudflare Pages static assets, direct uploads, and mini-program package cleanup are not Backend scope. |
 | 2026-06-26 | Close LLAUDIO after follow-up by user direction. | Backend `e1fd6a2`, Reviewer `79d3142`, Frontend follow-up `fbe0dda`, and PM redeploy from `D:\muguang.m4a` are recorded. Reviewer verdict was changes requested before the follow-up, so any further approval review should be a new user-directed review task. |
+| 2026-06-26 | Start LLPLAYER as Frontend-only plus Reviewer. | User requested replacing the lianliankan clear-state congratulations/replay text with an interactive minimalist audio player and starting 14 tile-image downloads when the mini program enters. This is mini-program UI/cache behavior, so Backend is explicitly not assigned implementation work. |
 
 ## Open Questions
 
-- None. The LLAUDIO round is closed by user direction after Backend `e1fd6a2`, Reviewer `79d3142`, Frontend follow-up `fbe0dda`, and PM deployment of the replaced `D:\muguang.m4a` source.
+- None. `LLPLAYER-FE-001` and `LLPLAYER-REV-001` are open; `LLPLAYER-BE-001` is explicitly not applicable.
 
 ## Completed Work Summary
 
@@ -608,3 +616,4 @@ Contact email contract:
 - Backend completed the originally assigned `LLAUDIO-BE-001` in `e1fd6a2` before the ownership correction; PM records it as historical completed work but keeps future Backend scope limited to server-side runtime code.
 - Reviewer completed `LLAUDIO-REV-001` in `79d3142` with verdict `changes requested`; Frontend then completed follow-up `fbe0dda` and wrote `docs/agents/handoffs/2026-06-26-frontend-lianliankan-audio-followup.md`.
 - User directed PM to understand the completed Backend/Frontend/Reviewer/PM deployment changes and close the LLAUDIO round.
+- PM assigned `LLPLAYER-FE-001` and `LLPLAYER-REV-001` for the new interactive victory-audio player and mini-program-entry tile-image preload behavior; Backend is marked `not_applicable`.
