@@ -2,12 +2,17 @@
 
 ## Current Objective
 
-Fix the remaining Cloudflare Pages DNS/TLS blocker for lianliankan remote assets: `https://chekinana.top/assets/lianliankan/v1/...` must be publicly reachable over HTTPS with valid content types while `api.chekinana.top/*` continues to route to the existing API Worker.
+Synchronize the lianliankan asset cleanup across agent worktrees, remove residual package-local tile PNGs from the mini-program, and add a remote victory audio asset so the lianliankan page starts playing `muguang.m4a` automatically when the user clears a board.
 
 Scope constraints:
 
 - Use Cloudflare Pages for this task, not R2. R2 is not currently enabled on the Cloudflare account and should not be subscribed/enabled in this task.
 - The domain `chekinana.top` is registered at Alibaba Cloud but is already present in Cloudflare. Static lianliankan assets must be served from Cloudflare, not Alibaba Cloud OSS.
+- The source audio file is local to the PM machine at `C:\Users\20888\Downloads\muguang.m4a`; Backend/static-asset work must copy it into the Cloudflare Pages asset source, not into the mini-program package.
+- The public audio URL should be versioned under the existing asset namespace, for example `https://chekinana.top/assets/lianliankan/v1/audio/muguang.m4a`, and must return a valid audio content type over HTTPS.
+- The mini-program package must not include the 14 lianliankan tile PNGs under `wechat-miniprogram/pages/lianliankan/images` in any implementation/review worktree after this task completes.
+- Frontend should not bundle `muguang.m4a`; it should use the public HTTPS asset URL or manifest-declared URL and handle playback through mini-program audio APIs.
+- Victory audio playback should start only after a lianliankan board is cleared. It must not block the victory UI/reset flow, must not restart repeatedly due to state refreshes, and should be stopped/released when leaving or resetting the page.
 - Current Cloudflare state observed by PM on 2026-06-25: `chekinana.top` zone exists; DNS has `api.chekinana.top` proxied to the existing `chekinana-runpod-proxy` Worker; root `chekinana.top` and `www` have no active content record; Workers/Pages has only `chekinana-runpod-proxy`; R2 shows the plan/enable screen.
 - Do not modify or break the existing `api.chekinana.top` Worker route, RunPod proxy, `/api/*` behavior, token flow, image extraction APIs, or result download APIs.
 - Static asset URLs should be versioned and future-migratable, starting with `https://chekinana.top/assets/lianliankan/v1/manifest.json` and `https://chekinana.top/assets/lianliankan/v1/images/*.png`.
@@ -114,6 +119,7 @@ Frontend lianliankan asset loader/reset fix commit: 692dca7
 Backend lianliankan public verification/tooling commit: 5426a6f
 Reviewer lianliankan asset load review commit: 59a66e3; verdict changes requested due DNS/TLS public asset blocker.
 PM Cloudflare Pages/DNS/TLS configuration completed: 2026-06-25; Dashboard DNS has root `chekinana.top` proxied CNAME to `chekinana-assets.pages.dev`, `api.chekinana.top` proxied CNAME to `workers.dev`, public DoH resolves both to Cloudflare public IPs `104.21.62.94` and `172.67.222.117`, manifest and all 14 PNG URLs return 200 with expected content types, and `api.chekinana.top/api/health` still returns protected Backend JSON 401.
+LLAUDIO task start status: 2026-06-25 PM check found no pending Frontend/Backend/Reviewer task before reopening this work. Frontend and Reviewer worktrees had no matching `wechat-miniprogram/pages/lianliankan/images/*.png`; Backend and integration worktrees still had 14 tracked package-local tile PNGs; PM worktree had the same 14 PNGs as untracked direct-sync residue. Source audio exists at `C:\Users\20888\Downloads\muguang.m4a`, size 5,779,308 bytes.
 ```
 
 ## Worktree Assignments
@@ -121,14 +127,17 @@ PM Cloudflare Pages/DNS/TLS configuration completed: 2026-06-25; Dashboard DNS h
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No new task; `ASSET-FE-002` passed Reviewer checks and remaining blocker is DNS/TLS/static hosting |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No new task; DNS/TLS/Pages dashboard configuration is outside Backend code-agent scope |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | No new task; this is external configuration verification, not code review |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `LLAUDIO-FE-001`: remove residual bundled tile image state from the mini-program worktree and play remote victory audio on lianliankan clear |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `LLAUDIO-BE-001`: add `muguang.m4a` to Cloudflare Pages static asset source and update/verify the remote asset contract |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `LLAUDIO-REV-001`: review Frontend/Backend commits, public URL verification, and residual mini-program image cleanup across worktrees |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| LLAUDIO-FE-001 | Frontend | pending | Synchronize the mini-program lianliankan asset cleanup and start remote victory audio playback when a board is cleared. | `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` if lianliankan worker contracts need adjustment, remove any residual `wechat-miniprogram/pages/lianliankan/images/*.png`, optional shared asset/audio helper under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-25-frontend-lianliankan-audio.md` | The Frontend worktree contains no bundled tile PNGs under `wechat-miniprogram/pages/lianliankan/images`; lianliankan still loads its 14 tile images from the remote manifest/cache path; clearing a board starts playback of the remote `muguang.m4a` asset from `chekinana.top`; playback is triggered once per clear, does not block the clear/reset UI, and is stopped/released when leaving or resetting the page. Run `node --check` on changed mini-program JS files and `git diff --check`. |
+| LLAUDIO-BE-001 | Backend | pending | Add the victory audio file to the Cloudflare Pages static asset source and provide deployment/verification handoff for `chekinana.top`. | `cloudflare-pages/assets/lianliankan/v1/**`, `cloudflare-pages/_headers`, asset manifest or static asset metadata if used, `scripts/check_lianliankan_assets.py`, `scripts/check_lianliankan_public_assets.py`, `docs/agents/handoffs/2026-06-25-backend-lianliankan-audio.md` | Copy `C:\Users\20888\Downloads\muguang.m4a` into the Pages static source under a versioned path such as `assets/lianliankan/v1/audio/muguang.m4a`; update headers/manifest/validation scripts so local checks cover the audio file, expected byte size/hash, and content type; do not change Flask, RunPod, API Worker, auth, extraction, result download, or contact behavior; remove stale package-local `wechat-miniprogram/pages/lianliankan/images/*.png` from the Backend worktree if present as sync residue; handoff must state the exact public URL and the command PM should run or dashboard step PM should perform to deploy. |
+| LLAUDIO-REV-001 | Reviewer | pending | Review the lianliankan cleanup and victory-audio work after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-lianliankan-audio.md` | Verify actual Frontend and Backend diffs against `LLAUDIO-FE-001` and `LLAUDIO-BE-001`; confirm the mini-program package no longer includes `wechat-miniprogram/pages/lianliankan/images/*.png` in Frontend/Backend/Reviewer/integration worktrees or explicitly report any residue; verify the audio public URL returns HTTPS 200 with an audio content type after PM deployment; verify existing PNG manifest URLs still return 200 `image/png` and `api.chekinana.top/api/health` still reaches the protected API path; run focused syntax/check scripts and produce an approved/changes-requested verdict. |
 | ASSET-FE-001 | Frontend | done | Make the lianliankan page load tile images from the remote Cloudflare asset manifest and remove bundled tile PNGs from the mini-program package. | `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` if worker contracts need asset-path changes, remove `wechat-miniprogram/pages/lianliankan/images/*.png`, optional utility under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-25-frontend-lianliankan-remote-assets.md` | Frontend commit `a67f9fd` implements manifest/image loading, local save/cache, retryable failure state, and package PNG removal. The prior legal-domain blocker is resolved because user confirmed `https://chekinana.top` is now configured for WeChat `request`, `uploadFile`, and `downloadFile`. |
 | ASSET-BE-001 | Backend | done | Create Cloudflare Pages static asset source for lianliankan images and manifest, without enabling R2 or changing the API Worker. | New static asset source directory such as `cloudflare-pages/` or `cloudflare-assets/`, the 14 source PNGs copied from `wechat-miniprogram/pages/lianliankan/images`, manifest JSON, deployment README/scripts if needed, `docs/agents/handoffs/2026-06-25-backend-lianliankan-assets.md` | Backend commit `53b5694` provides the versioned Cloudflare Pages static source, manifest, 14 PNGs, headers, README, and validation script. Known risk from Backend handoff: local agent did not perform Cloudflare Pages online deployment; public access/content-type verification and confirmation that `chekinana.top` Pages binding does not affect `api.chekinana.top/*` Worker routing remain required. |
 | ASSET-REV-001 | Reviewer | done | Review Cloudflare static asset hosting and lianliankan remote asset loading after Backend and Frontend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-lianliankan-assets.md` | Reviewer verdict: approved. Static source, manifest validation, package PNG removal, cache behavior, failure state, Backend no-code API compatibility, and WeChat legal-domain coverage all passed after user confirmed `https://chekinana.top` is configured for `request`, `uploadFile`, and `downloadFile`. |
@@ -501,10 +510,12 @@ Contact email contract:
 | 2026-06-25 | Keep the TLS follow-up PM external-configuration-only. | Reviewer commit `59a66e3` passed Frontend loader/reset behavior and isolated the remaining P1 to public DNS/TLS/Cloudflare Pages asset delivery, which is outside Frontend/Backend code-agent and Reviewer code-review scope. |
 | 2026-06-25 | Treat `198.18.0.x` resolution as a blocker for public asset delivery. | `198.18.0.0/15` is not a normal public serving address for this domain, and reviewer observed TLS handshake failures for both manifest and PNG URLs while the API subdomain still reached the protected backend path. |
 | 2026-06-25 | Supersede misassigned `ASSET-BE-003` and `ASSET-REV-003`. | User clarified Frontend and Backend only write code and Reviewer only reviews code; Cloudflare dashboard/DNS/TLS configuration must be completed by PM or manually by the user. |
+| 2026-06-25 | Reopen lianliankan static assets for residual package images and victory audio. | User requested synchronizing all worktrees to remove leftover bundled tile PNGs and adding `Downloads/muguang.m4a` to `chekinana.top` so the lianliankan page can play it automatically after a board is cleared. |
+| 2026-06-25 | Keep audio hosting in Cloudflare Pages and playback in Frontend. | Backend/static-asset work owns the Pages source, headers, manifest/verification scripts, and deployment handoff; Frontend owns mini-program audio playback and must not bundle the audio; PM remains responsible for any external dashboard deployment step if it cannot be completed by code. |
 
 ## Open Questions
 
-- None. `ASSET-PM-001` is complete; no Frontend, Backend, or Reviewer agent task is open.
+- `LLAUDIO-BE-001` must confirm whether the Pages deployment can be performed from repository tooling or still requires PM/manual Cloudflare Dashboard action. If manual deployment is required, Backend must provide exact steps and PM will perform/verify the upload before Reviewer approval.
 
 ## Completed Work Summary
 
@@ -585,3 +596,5 @@ Contact email contract:
 - PM initially assigned `ASSET-BE-003` and `ASSET-REV-003`, then superseded them after user clarified role boundaries: Frontend/Backend agents only write code, Reviewer only reviews code, and the remaining Cloudflare Pages/DNS/TLS configuration belongs to PM or manual user execution.
 - PM created `ASSET-PM-001` for the external Cloudflare Pages deployment/custom-domain/DNS/TLS configuration and post-configuration public URL verification.
 - PM completed `ASSET-PM-001`: Cloudflare Pages custom domain and DNS now serve `chekinana.top/assets/lianliankan/v1/...`; manifest and all 14 PNG URLs pass HTTPS/content-type checks; `api.chekinana.top/api/health` still reaches the protected Backend/API path.
+- User requested a new lianliankan follow-up: synchronize all worktrees to remove residual package-local tile PNGs, upload `Downloads/muguang.m4a` to `chekinana.top`, and start playback automatically when a lianliankan board is cleared.
+- PM assigned `LLAUDIO-FE-001`, `LLAUDIO-BE-001`, and `LLAUDIO-REV-001` in Frontend, Backend, Reviewer order.
