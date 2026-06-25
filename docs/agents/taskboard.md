@@ -100,17 +100,17 @@ Direct sync changes currently present in all worktrees: new `wechat-miniprogram/
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
 | PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Maintain taskboard, contract, scope, and readiness decision only |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ROUTE-FE-001` completed in `ee9d792`; Reviewer requested Frontend whitespace fix |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `ROUTE-FE-001` completed in `ee9d792`; Reviewer applied authorized whitespace-only fix |
 | Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `ROUTE-BE-001` completed in `2991858` as no-code compatibility handoff |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ROUTE-REV-001` completed with verdict: changes requested |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `ROUTE-REV-001` completed with verdict: approved |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
-| ROUTE-FE-001 | Frontend | done | Move `lianliankan` and `izaya7-map` entry points from auth token input to Settings buttons. | `wechat-miniprogram/pages/settings/settings.js`, `wechat-miniprogram/pages/settings/settings.wxml`, `wechat-miniprogram/pages/settings/settings.wxss` if needed, `wechat-miniprogram/pages/auth/auth.js`, `wechat-miniprogram/app.json` only if route registration needs repair, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md` | Frontend commit `ee9d792` moves the hidden entries to Settings and removes auth shortcuts, but Reviewer found a blocking `git diff --check` failure in `wechat-miniprogram/pages/lianliankan/lianliankan.wxss:205`. |
+| ROUTE-FE-001 | Frontend | done | Move `lianliankan` and `izaya7-map` entry points from auth token input to Settings buttons. | `wechat-miniprogram/pages/settings/settings.js`, `wechat-miniprogram/pages/settings/settings.wxml`, `wechat-miniprogram/pages/settings/settings.wxss` if needed, `wechat-miniprogram/pages/auth/auth.js`, `wechat-miniprogram/app.json` only if route registration needs repair, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md` | Frontend commit `ee9d792` moves the hidden entries to Settings and removes auth shortcuts; Reviewer applied a one-time authorized whitespace-only fix so `git diff --check` passes. |
 | ROUTE-BE-001 | Backend | done | Read the lianliankan sync handoff and the Frontend route-entry handoff, then confirm Backend has no implementation scope. | `docs/agents/handoffs/2026-06-25-lianliankan-page-sync.md`, `docs/agents/handoffs/2026-06-25-frontend-settings-hidden-routes.md`, `docs/agents/handoffs/2026-06-25-backend-settings-hidden-routes.md` | Backend commit `2991858` confirms no Backend code changes are required; Reviewer verified no Backend implementation or deployment-path files changed in this task. |
-| ROUTE-REV-001 | Reviewer | done | Review the hidden-route entry relocation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-settings-hidden-routes.md` | Reviewer verdict: changes requested. Settings routes, auth shortcut removal, app/page/worker registration, and Backend no-code scope passed; blocking issue remains Frontend `git diff --check` failure on EOF blank line. |
+| ROUTE-REV-001 | Reviewer | done | Review the hidden-route entry relocation after Frontend and Backend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-25-reviewer-settings-hidden-routes.md` | Reviewer verdict: approved. Settings routes, auth shortcut removal, app/page/worker registration, Backend no-code scope, and required checks all passed after the authorized whitespace-only fix. |
 | BATCH-FE-001 | Frontend | done | Replace the single-image selection state with a selected-images list while preserving the existing single-image workflow. | `wechat-miniprogram/pages/index/index.js`, `wechat-miniprogram/pages/index/index.wxml`, `wechat-miniprogram/pages/index/index.wxss`, `docs/agents/handoffs/2026-06-17-frontend-batch-images.md` | Frontend commits `94471d5` through `9865fe4` implement selection up to 9, add-more behavior, and selected-image state. |
 | BATCH-FE-002 | Frontend | done | Implement current-image preview management for multiple selected images. | Same Frontend files and same handoff as `BATCH-FE-001` | Frontend implements one large current-image preview, left/right navigation, delete-on-preview, index clamping, and thumbnail strip; UI blockers were resolved by `BATCH-FE-005`. |
 | BATCH-FE-003 | Frontend | done | Bind polaroid count and rotation to the current image. | Same Frontend files and same handoff as `BATCH-FE-001` | Reviewer mock checks passed for independent per-image count and rotation state. |
@@ -450,7 +450,7 @@ Contact email contract:
 
 ## Open Questions
 
-- None. `ROUTE-REV-001` found no behavior or backend-contract blocker, but Frontend must remove the EOF blank line in `wechat-miniprogram/pages/lianliankan/lianliankan.wxss` so the required `git diff --check` passes.
+- None. `ROUTE-REV-001` is approved after the one-time authorized whitespace-only fix in `wechat-miniprogram/pages/lianliankan/lianliankan.wxss`.
 
 ## Completed Work Summary
 
@@ -521,4 +521,4 @@ Contact email contract:
 - PM assigned `SAVE-FE-002` and `SAVE-REV-002` for Frontend to make downloaded/album-written result state durable across all extraction refresh paths and for Reviewer to verify the stale-array/status-refresh regression.
 - Reviewer approved `SAVE-REV-002` in `07d2644`; Frontend save-state refresh implementation commit is `37b43b0`.
 - A direct sync added the completed `lianliankan` mini-program page, worker files, route registration, and a temporary auth special input for `lianliankan` across all worktrees; PM recorded the sync handoff and assigned `ROUTE-FE-001`, `ROUTE-BE-001`, and `ROUTE-REV-001` to move both `lianliankan` and `izaya7-map` entrances into Settings and remove auth shortcuts.
-- Frontend completed `ROUTE-FE-001` in `ee9d792` and Backend completed `ROUTE-BE-001` in `2991858`; Reviewer completed `ROUTE-REV-001` with verdict `changes requested` because route behavior and backend no-code compatibility passed, but required `git diff --check` fails on `wechat-miniprogram/pages/lianliankan/lianliankan.wxss:205`.
+- Frontend completed `ROUTE-FE-001` in `ee9d792` and Backend completed `ROUTE-BE-001` in `2991858`; Reviewer initially requested changes for a `git diff --check` EOF blank-line failure, then applied the user-authorized whitespace-only fix and approved `ROUTE-REV-001`.
