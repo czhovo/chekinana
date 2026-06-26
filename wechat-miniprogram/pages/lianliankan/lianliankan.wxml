@@ -1,0 +1,75 @@
+<view class="page">
+  <view class="header">
+    <view class="title">连连看Demo</view>
+    <view class="stats">
+      <text class="stat">时间 {{timer}}</text>
+      <text class="stat">剩余 {{pairsLeft}}</text>
+    </view>
+  </view>
+
+  <view class="board-wrap">
+    <view class="board-controls">
+      <view class="restart board-control board-control--reset" bindtap="startGame">重置</view>
+      <view
+        class="answer board-control board-control--answer {{status === 'playing' && pairsLeft > 0 && !isSolvingBoard ? '' : 'control-disabled'}}"
+        bindtap="onAnswerTap">
+        {{isAutoSolving ? '暂停' : '解答'}}
+      </view>
+    </view>
+
+    <view class="board">
+      <block wx:for="{{board}}" wx:for-index="r" wx:for-item="row">
+        <block wx:for="{{row}}" wx:for-index="c" wx:for-item="tile">
+          <view
+            class="cell {{selected.r === r && selected.c === c ? 'cell--active' : ''}} {{tile === 0 ? 'cell--empty' : ''}} {{tile > 0 ? tileBorderClasses[tile] : ''}}"
+            data-index="{{r * cols + c}}"
+            bindtap="onCellTap">
+            <image
+              wx:if="{{tile > 0}}"
+              class="tile"
+              src="{{tileImages[tile]}}"
+              mode="aspectFit"
+            />
+          </view>
+        </block>
+      </block>
+    </view>
+    <view class="line-layer" wx:if="{{lineSegments.length}}">
+      <block wx:for="{{lineSegments}}" wx:for-item="line" wx:key="index">
+        <view class="line-segment" style="{{line.style}}"></view>
+      </block>
+    </view>
+  </view>
+
+  <view class="audio-player" wx:if="{{status === 'won'}}">
+    <view class="audio-toggle" bindtap="onAudioPlayPauseTap">
+      <image
+        class="audio-icon-image"
+        src="{{audioIsPlaying ? '/assets/lianliankan/audio-pause.png' : '/assets/lianliankan/audio-play.png'}}"
+        mode="aspectFit"
+      />
+    </view>
+    <view class="audio-panel">
+      <view class="audio-title">目光 - 空色轨迹</view>
+      <view class="audio-status" wx:if="{{audioStatusText}}">{{audioStatusText}}</view>
+      <slider
+        class="audio-slider"
+        min="0"
+        max="100"
+        step="1"
+        value="{{audioProgress}}"
+        disabled="{{audioDuration <= 0}}"
+        block-size="16"
+        activeColor="#2563eb"
+        backgroundColor="#bfdbfe"
+        bindchanging="onAudioSeekChanging"
+        bindchange="onAudioSeekChange"
+      />
+      <view class="audio-times">
+        <text>{{audioCurrentLabel}}</text>
+        <text>{{audioDurationLabel}}</text>
+      </view>
+    </view>
+  </view>
+  <view class="result" wx:elif="{{statusText}}">{{statusText}}</view>
+</view>
