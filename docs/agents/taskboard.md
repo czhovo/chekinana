@@ -518,6 +518,7 @@ Contact email contract:
 | 2026-06-26 | Revoke frontend Cloudflare write-credential exception. | User found frontend querying problematic and switched back to a backend approach. Frontend must no longer hold Cloudflare write credentials. Use a lightweight Cloudflare Worker/R2 backend instead of the GPU/image-processing RunPod because of cost. |
 | 2026-06-26 | Use Worker/R2, not Pages runtime writes, for Weibo avatar storage. | Cloudflare Pages is suitable for static deployments but awkward for per-query runtime uploads. The practical low-cost cloud backend is a Worker that fetches/parses Weibo and stores/serves uid-named avatar objects in R2 via a binding. |
 | 2026-06-26 | Cloud service configuration required for `WEIBO-BE-002`. | Enable/confirm Workers and R2 on the Cloudflare account, create an R2 bucket for Weibo avatars, bind it to the Worker in Wrangler config, set required Worker secrets with Wrangler/Cloudflare dashboard, and add only narrow routes such as `chekinana.top/api/weibo-profile*` and `chekinana.top/assets/weibo/avatars/*`. Existing `api.chekinana.top/*` RunPod proxy and `chekinana.top/assets/lianliankan/*` Pages assets must remain unaffected. |
+| 2026-06-26 | PM completed R2 enablement and avatar bucket creation. | User enabled R2 object storage in the Cloudflare dashboard. PM used Wrangler account `2246c53f1608330f826bfef648cc1233` to create R2 bucket `chekinana-weibo-avatars` at `2026-06-26T07:49:32.836Z`. Backend should bind this bucket in Worker config, for example with binding `WEIBO_AVATARS` or the Wrangler-suggested `chekinana_weibo_avatars`. |
 
 ## Open Questions
 
@@ -525,6 +526,7 @@ Contact email contract:
 ## Completed Work Summary
 
 - PM superseded `WEIBO-FE-001`, `WEIBO-BE-001`, and `WEIBO-REV-001`, revoked the frontend Cloudflare write-credential exception, and assigned `WEIBO-FE-002`, `WEIBO-BE-002`, and `WEIBO-REV-002` for a Cloudflare Worker/R2 backend approach.
+- PM configured the Cloudflare prerequisite for `WEIBO-BE-002`: R2 is enabled and bucket `chekinana-weibo-avatars` exists.
 
 - PM superseded `IDOLLOG-BE-001`, `IDOLLOG-FE-001`, and `IDOLLOG-REV-001` before implementation, and assigned `WEIBO-FE-001`, `WEIBO-BE-001`, and `WEIBO-REV-001` for the frontend-only Weibo profile lookup flow.
 
