@@ -2,47 +2,22 @@
 
 ## Current Objective
 
-Update the lianliankan page so clearing a board shows an interactive minimalist audio player instead of the previous congratulation/replay text, and start downloading the 14 tile image assets when the mini program enters rather than waiting until the lianliankan page is opened.
+Add a read-only IdolLog lookup flow on the mini-program `idols` page: the user enters an idol name and group name, Chekinana Backend reads the corresponding `https://www.idollog.top` admin idol record with server-side credentials, and Frontend displays the returned record(s) on the page.
 
 Scope constraints:
 
-- Use Cloudflare Pages for this task, not R2. R2 is not currently enabled on the Cloudflare account and should not be subscribed/enabled in this task.
-- The domain `chekinana.top` is registered at Alibaba Cloud but is already present in Cloudflare. Static lianliankan assets must be served from Cloudflare, not Alibaba Cloud OSS.
-- The source audio file is local to the PM machine at `C:\Users\20888\Downloads\muguang.m4a`; Backend/static-asset work must copy it into the Cloudflare Pages asset source, not into the mini-program package.
-- The public audio URL should be versioned under the existing asset namespace, for example `https://chekinana.top/assets/lianliankan/v1/audio/muguang.m4a`, and must return a valid audio content type over HTTPS.
-- The mini-program package must not include the 14 lianliankan tile PNGs under `wechat-miniprogram/pages/lianliankan/images` in any implementation/review worktree after this task completes.
-- Frontend should not bundle `muguang.m4a`; it should use the public HTTPS asset URL or manifest-declared URL and handle playback through mini-program audio APIs.
-- Victory audio playback should start only after a lianliankan board is cleared. It must not block the victory UI/reset flow, must not restart repeatedly due to state refreshes, and should be stopped/released when leaving or resetting the page.
-- The clear-state UI should no longer show the old `恭喜过关` / `再来一局` style text. It should show a compact audio player with play/pause control and a scrubbable progress bar.
-- The audio player should use the already deployed remote `muguang.m4a` asset and should stay visually simple, consistent with the lianliankan page, and not introduce decorative/large UI.
-- The 14 lianliankan tile images should begin downloading/cache-warming when the mini program enters. This should be non-blocking for authentication, settings, scanner, and other page entry.
-- Backend has no task for this round. Static assets and mini-program download timing/UI are not server runtime/image-extraction work.
-- Current Cloudflare state observed by PM on 2026-06-25: `chekinana.top` zone exists; DNS has `api.chekinana.top` proxied to the existing `chekinana-runpod-proxy` Worker; root `chekinana.top` and `www` have no active content record; Workers/Pages has only `chekinana-runpod-proxy`; R2 shows the plan/enable screen.
-- Do not modify or break the existing `api.chekinana.top` Worker route, RunPod proxy, `/api/*` behavior, token flow, image extraction APIs, or result download APIs.
-- Static asset URLs should be versioned and future-migratable, starting with `https://chekinana.top/assets/lianliankan/v1/manifest.json` and `https://chekinana.top/assets/lianliankan/v1/images/*.png`.
-- The manifest is the frontend contract for asset names and version. Future asset categories should be able to add parallel versioned directories without changing the lianliankan contract.
-- The mini program package should no longer include the 14 lianliankan PNG images under `wechat-miniprogram/pages/lianliankan/images`.
-- The lianliankan page must download the manifest and images from `chekinana.top` on first entry, persist images with `wx.saveFile`, and reuse cached local paths on later entries when the manifest version matches.
-- Because the package-local images are removed, download failure must produce a clear retry/error state instead of silently falling back to bundled images.
-- User confirmed `https://chekinana.top` is or will be configured as a WeChat `downloadFile` legal domain.
-- User testing after Reviewer approval commit `0bdfaaa` found that entering the lianliankan page still fails to load image resources in the real mini program, and resetting does not recover the page.
-- Reviewer handoff `0bdfaaa` did not verify public `https://chekinana.top/assets/lianliankan/v1/...` URLs because Cloudflare Pages deployment was outside the local reviewer environment; public URL availability is now a required gate.
-- Reset/retry must clear any corrupt or partial lianliankan asset cache and must not mark assets ready unless the manifest and all required image local files are actually available.
-- Reviewer commit `59a66e3` found Frontend loader/reset behavior acceptable, but public asset delivery still fails because `chekinana.top` resolves to non-public/reserved `198.18.0.x` addresses and HTTPS requests fail during TLS handshake.
-- The next fix is PM external configuration scoped: correct Cloudflare Pages deployment/custom-domain/DNS/TLS so public HTTPS asset URLs work. Do not assign this to Frontend or Backend code agents unless the URL contract or repository source files need code changes.
-- Use the agreed V1 approach: no new batch backend API unless Backend finds a blocker.
-- Frontend submits selected images sequentially to the existing `/api/process` single-image task API.
-- Preserve token/auth behavior, RunPod startup, SAM/extraction internals other than output-size handling, result download auth, and existing single-image behavior.
-- Preserve white-balance behavior as a separate switch; postprocessing mode controls only denoise/sharpen after perspective warp and optional white balance.
-- Batch result order must be: selected image order, then detected polaroid order inside each image.
-- Continue processing later images if one image fails; report partial failures clearly.
-- Maximum selected images: 9.
-- Do not delete photos already saved to the user's system album; only delete mini-program local files created or referenced by the scanner flow.
-- Keep immediate result download/display behavior; cache cleanup is tied to explicit source-image removal through `新任务` or manual source-image delete.
-- Preserve local-cache cleanup from `CACHE-FE-001`: removing a source-image group still deletes its source/result local files.
-- Do not add Backend API scope unless Frontend finds a concrete result URL/status contract blocker.
-- Backend geometry cleanup must preserve current output sizes and masks: mini `1200x1908` with image area `[[82,150],[1118,150],[1118,1533],[82,1533]]`; wide `2400x1908` with image area `[[82,150],[2318,150],[2318,1533],[82,1533]]`.
-- Save-state refresh fix must keep album-written as an irreversible local truth for the active result set: status polling, receiving a new extracted result, finishing single/batch processing, and background predownload completion may upgrade state but must not downgrade `album` to `downloaded` or `remote`, and must not downgrade `downloaded` to `remote` when a local path is still known.
+- Follow `C:\Users\20888\Documents\idollog-tool-2\docs\idollog-admin-access.md` for the IdolLog admin API contract.
+- Keep the first implementation read-only: Backend may call `POST /api/admin/login` to obtain a token and `GET /api/admin/records?type=idol&pageSize=20000`, but must not call IdolLog record create/update endpoints.
+- IdolLog username/password must stay server-side only. Do not put credentials in the mini program, source code, handoff text, logs, screenshots, or taskboard.
+- Backend must load credentials from `IDOLLOG_ADMIN_USERNAME` / `IDOLLOG_ADMIN_PASSWORD` or a local ignored JSON file such as `backend/idollog.credentials.json`.
+- Backend must add committed ignore rules for the credential file before any credential can be safely filled in by the user.
+- The PM-created local credential placeholder is for manual user input only and must remain untracked.
+- Frontend must call the Chekinana Backend endpoint, not `idollog.top` directly.
+- The Chekinana Backend endpoint must remain protected by the existing app token/auth model.
+- Backend matching should trim inputs, match idol `name`, and treat the group name as the first part of idol `meta` before ` 路 ` unless the implementation discovers a stronger field in the live data.
+- If multiple matches are possible, return a count and sanitized records rather than guessing or mutating data.
+- Use UTF-8 JSON handling, bounded timeouts, and retry only transient IdolLog network failures.
+- Do not change RunPod startup, image extraction, result download, lianliankan, Cloudflare Pages assets, contact email, or existing token flows except for adding the new protected read-only lookup endpoint.
 
 ## Current Workspace State
 
@@ -132,15 +107,18 @@ LLAUDIO round closure inputs: Backend completed `LLAUDIO-BE-001` in `e1fd6a2` be
 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
-| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Record completion and integration readiness for the lianliankan audio-player/preload round |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | No new task; `LLPLAYER-FE-001` and follow-up `80586c2` are complete |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | No lianliankan audio/static asset task; Backend owns only server-side runtime code such as current image extraction algorithms and future server code |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | No new task; `LLPLAYER-REV-001` follow-up approved in `fb7ba0e` |
+| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Publish IdolLog read-only lookup tasks, create local credential placeholder, and keep credentials out of git |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `IDOLLOG-FE-001`: add idols-page inputs/button and display returned idol record(s) |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `IDOLLOG-BE-001`: add protected read-only IdolLog idol lookup endpoint using server-side credentials |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `IDOLLOG-REV-001`: review Backend and Frontend implementation after both handoffs are available |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| IDOLLOG-BE-001 | Backend | pending | Add a protected read-only Backend endpoint that queries IdolLog admin idol records by idol name and group name. | `backend/app.py` and any existing backend request/config helper if appropriate, `.gitignore`, optional backend-local credential loader helper, `docs/agents/handoffs/2026-06-26-backend-idollog-idol-query.md` | Backend loads credentials from `IDOLLOG_ADMIN_USERNAME` / `IDOLLOG_ADMIN_PASSWORD` or local ignored `backend/idollog.credentials.json`; committed ignore rules cover `idollog.credentials.json`, `backend/idollog.credentials.json`, and any chosen local credential variant; endpoint is protected by existing Chekinana token auth; IdolLog calls are limited to login and read-only typed idol records; handles both `records` and `allRecords`; matches trimmed idol name plus trimmed group derived from `meta` before ` 路 `; returns sanitized `{ ok, count, records }` data; uses UTF-8, timeout, and transient retry; logs no passwords, tokens, full credential files, or full sensitive payloads; no RunPod/image-extraction/result/contact/lianliankan behavior changes. |
+| IDOLLOG-FE-001 | Frontend | pending | Add two inputs and one button to the mini-program `idols` page so the user can enter idol name and group name, request the Backend lookup, and print/display the returned record(s) on the page. | `wechat-miniprogram/pages/idols/idols.js`, `wechat-miniprogram/pages/idols/idols.wxml`, `wechat-miniprogram/pages/idols/idols.wxss`, shared request/config utilities only if existing patterns require them, `docs/agents/handoffs/2026-06-26-frontend-idollog-idol-query.md` | Page shows separate inputs for idol name and group name and a clear lookup button; validates both fields before request; calls only the new Chekinana Backend protected endpoint using existing token/request conventions; never stores or sends IdolLog admin credentials from the mini program; displays loading, empty, error, and result states; prints returned idol record(s) readably on the page without breaking tab behavior or unrelated pages. |
+| IDOLLOG-REV-001 | Reviewer | pending | Review the IdolLog lookup implementation after Backend and Frontend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-idollog-idol-query.md` | Confirm credentials are not committed or exposed; credential file ignore rules are committed; Backend endpoint is protected, read-only against IdolLog, timeout-bounded, and sanitizes logs/responses; Frontend has no credentials and calls Backend only; idols page UI meets the two-input/button/display requirement; no unrelated RunPod/extraction/result/lianliankan/contact/token regressions; run targeted syntax/check commands and any feasible mock tests without requiring real user credentials. |
 | LLPLAYER-FE-001 | Frontend | done | Replace the lianliankan clear-state text with an interactive audio player and start tile-image downloading when the mini program enters. | `wechat-miniprogram/app.js` if startup hook is needed, `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` only if existing lianliankan asset contracts require it, optional shared cache helper under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-26-frontend-lianliankan-player-preload.md` | Frontend commit `f7afe71` adds startup tile-image preload, the clear-state audio player, progress/seek behavior, and player lifecycle handling. Frontend follow-up `80586c2` replaces text play/pause with compact image icons. Reviewer follow-up `fb7ba0e` approved after an authorized EOF-format-only correction in review. |
 | LLPLAYER-BE-001 | Backend | not_applicable | No Backend implementation for this round. | None | Backend should not change server runtime, Cloudflare Pages/static assets, mini-program package files, or lianliankan preload/player behavior for this task. Backend scope remains server-side runtime code only. |
 | LLPLAYER-REV-001 | Reviewer | done | Review the lianliankan audio-player and startup-preload Frontend work after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-lianliankan-player-preload.md`, `docs/agents/handoffs/2026-06-26-reviewer-lianliankan-player-preload-followup.md` | Initial review requested changes for a `git diff --check` EOF blank-line issue. Reviewer follow-up commit `fb7ba0e` approved Frontend follow-up `80586c2`: player icons, startup preload, play/pause/progress/seek behavior, no bundled `.m4a`, no package-local tile PNGs, and Backend no-diff boundary all passed. |
@@ -527,11 +505,14 @@ Contact email contract:
 | 2026-06-26 | Start LLPLAYER as Frontend-only plus Reviewer. | User requested replacing the lianliankan clear-state congratulations/replay text with an interactive minimalist audio player and starting 14 tile-image downloads when the mini program enters. This is mini-program UI/cache behavior, so Backend is explicitly not assigned implementation work. |
 | 2026-06-26 | LLPLAYER approved after Frontend follow-up. | Reviewer commit `fb7ba0e` approved Frontend follow-up `80586c2`; the only direct reviewer correction was an authorized EOF-format-only fix. The round is ready for integration and push. |
 
+| 2026-06-26 | Add IdolLog lookup as Backend + Frontend + Reviewer work. | The mini program must not hold IdolLog admin credentials. Backend owns the protected read-only admin query endpoint; Frontend owns the `idols` page inputs/button/result display; Reviewer verifies no credential leakage, no IdolLog mutation calls, and no unrelated behavior changes. |
+
 ## Open Questions
 
-- None. `LLPLAYER-FE-001` and `LLPLAYER-REV-001` are complete; `LLPLAYER-BE-001` is explicitly not applicable.
-
+- None for task publication. PM created a local credential placeholder for the user to fill; implementation must still add committed ignore rules before any real credentials are used.
 ## Completed Work Summary
+
+- PM assigned `IDOLLOG-BE-001`, `IDOLLOG-FE-001`, and `IDOLLOG-REV-001` for the read-only IdolLog idol-record lookup flow, with server-side-only credentials and no direct mini-program access to `idollog.top`.
 
 - PM discussed and captured the agreed V1 batch design before publishing this taskboard.
 - Frontend implemented V1 batch behavior through `9865fe4`.
