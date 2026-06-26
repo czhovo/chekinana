@@ -2,22 +2,21 @@
 
 ## Current Objective
 
-Add a read-only IdolLog lookup flow on the mini-program `idols` page: the user enters an idol name and group name, Chekinana Backend reads the corresponding `https://www.idollog.top` admin idol record with server-side credentials, and Frontend displays the returned record(s) on the page.
+Add a frontend-only Weibo profile lookup flow on the mini-program `idols` page: the user enters one Weibo profile URL, taps a query button, the page extracts available public profile fields, stores the avatar under the Cloudflare Pages avatar asset namespace without duplicate uploads, then displays the avatar and prints the remaining available fields.
 
 Scope constraints:
 
-- Follow `C:\Users\20888\Documents\idollog-tool-2\docs\idollog-admin-access.md` for the IdolLog admin API contract.
-- Keep the first implementation read-only: Backend may call `POST /api/admin/login` to obtain a token and `GET /api/admin/records?type=idol&pageSize=20000`, but must not call IdolLog record create/update endpoints.
-- IdolLog username/password must stay server-side only. Do not put credentials in the mini program, source code, handoff text, logs, screenshots, or taskboard.
-- Backend must load credentials from `IDOLLOG_ADMIN_USERNAME` / `IDOLLOG_ADMIN_PASSWORD` or a local ignored JSON file such as `backend/idollog.credentials.json`.
-- Backend must add committed ignore rules for the credential file before any credential can be safely filled in by the user.
-- The PM-created local credential placeholder is for manual user input only and must remain untracked.
-- Frontend must call the Chekinana Backend endpoint, not `idollog.top` directly.
-- The Chekinana Backend endpoint must remain protected by the existing app token/auth model.
-- Backend matching should trim inputs, match idol `name`, and treat the group name as the first part of idol `meta` before ` 路 ` unless the implementation discovers a stronger field in the live data.
-- If multiple matches are possible, return a count and sanitized records rather than guessing or mutating data.
-- Use UTF-8 JSON handling, bounded timeouts, and retry only transient IdolLog network failures.
-- Do not change RunPod startup, image extraction, result download, lianliankan, Cloudflare Pages assets, contact email, or existing token flows except for adding the new protected read-only lookup endpoint.
+- Do not use the IdolLog database, `idollog.top`, IdolLog admin credentials, or the PM-created IdolLog credential placeholder for this task.
+- Do not use or modify the Chekinana Backend pod server. The backend pod remains scoped to image extraction/runtime server work.
+- Implementation ownership is Frontend-only, with Reviewer review. Backend is explicitly not applicable.
+- The `idols` page should have one input for a Weibo profile URL and one query button.
+- On query, Frontend should attempt to access the supplied Weibo profile URL and extract, when present: uid, username, avatar URL/image, Weibo verification information, user intro, and pinned Weibo. Missing fields should be skipped rather than treated as fatal.
+- The mini program should display the avatar and print the remaining extracted information on the page.
+- Avatar storage contract: store all avatars under one Cloudflare Pages directory, using the Weibo uid as the filename stem; if the avatar for that uid already exists, report that it already exists and do not upload a duplicate.
+- Frontend must not embed Cloudflare API tokens, account credentials, or other write-capable secrets in the mini-program package.
+- If direct Weibo profile access is blocked by WeChat legal-domain/TLS/request limitations or Weibo anti-scraping behavior, Frontend must report the exact blocker in its handoff and avoid adding a backend/pod workaround.
+- If Cloudflare Pages runtime upload cannot be safely completed from frontend-only code without secrets, Frontend must report the exact blocker and implement only the safe parts that can run without exposing write credentials.
+- Do not change RunPod startup, image extraction, result download, lianliankan, contact email, token auth, or existing scanner flows.
 
 ## Current Workspace State
 
@@ -107,18 +106,21 @@ LLAUDIO round closure inputs: Backend completed `LLAUDIO-BE-001` in `e1fd6a2` be
 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
-| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Publish IdolLog read-only lookup tasks, create local credential placeholder, and keep credentials out of git |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `IDOLLOG-FE-001`: add idols-page inputs/button and display returned idol record(s) |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `IDOLLOG-BE-001`: add protected read-only IdolLog idol lookup endpoint using server-side credentials |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `IDOLLOG-REV-001`: review Backend and Frontend implementation after both handoffs are available |
+| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Supersede IdolLog lookup tasks and publish frontend-only Weibo profile lookup tasks |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `WEIBO-FE-001`: add idols-page Weibo profile URL lookup, display extracted public fields, and handle avatar Cloudflare Pages asset flow without frontend secrets |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `WEIBO-BE-001`: not applicable; do not change the backend pod server |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `WEIBO-REV-001`: review Frontend implementation and Backend no-code boundary |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
-| IDOLLOG-BE-001 | Backend | pending | Add a protected read-only Backend endpoint that queries IdolLog admin idol records by idol name and group name. | `backend/app.py` and any existing backend request/config helper if appropriate, `.gitignore`, optional backend-local credential loader helper, `docs/agents/handoffs/2026-06-26-backend-idollog-idol-query.md` | Backend loads credentials from `IDOLLOG_ADMIN_USERNAME` / `IDOLLOG_ADMIN_PASSWORD` or local ignored `backend/idollog.credentials.json`; committed ignore rules cover `idollog.credentials.json`, `backend/idollog.credentials.json`, and any chosen local credential variant; endpoint is protected by existing Chekinana token auth; IdolLog calls are limited to login and read-only typed idol records; handles both `records` and `allRecords`; matches trimmed idol name plus trimmed group derived from `meta` before ` 路 `; returns sanitized `{ ok, count, records }` data; uses UTF-8, timeout, and transient retry; logs no passwords, tokens, full credential files, or full sensitive payloads; no RunPod/image-extraction/result/contact/lianliankan behavior changes. |
-| IDOLLOG-FE-001 | Frontend | pending | Add two inputs and one button to the mini-program `idols` page so the user can enter idol name and group name, request the Backend lookup, and print/display the returned record(s) on the page. | `wechat-miniprogram/pages/idols/idols.js`, `wechat-miniprogram/pages/idols/idols.wxml`, `wechat-miniprogram/pages/idols/idols.wxss`, shared request/config utilities only if existing patterns require them, `docs/agents/handoffs/2026-06-26-frontend-idollog-idol-query.md` | Page shows separate inputs for idol name and group name and a clear lookup button; validates both fields before request; calls only the new Chekinana Backend protected endpoint using existing token/request conventions; never stores or sends IdolLog admin credentials from the mini program; displays loading, empty, error, and result states; prints returned idol record(s) readably on the page without breaking tab behavior or unrelated pages. |
-| IDOLLOG-REV-001 | Reviewer | pending | Review the IdolLog lookup implementation after Backend and Frontend handoffs are available. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-idollog-idol-query.md` | Confirm credentials are not committed or exposed; credential file ignore rules are committed; Backend endpoint is protected, read-only against IdolLog, timeout-bounded, and sanitizes logs/responses; Frontend has no credentials and calls Backend only; idols page UI meets the two-input/button/display requirement; no unrelated RunPod/extraction/result/lianliankan/contact/token regressions; run targeted syntax/check commands and any feasible mock tests without requiring real user credentials. |
+| WEIBO-FE-001 | Frontend | pending | Replace the superseded IdolLog lookup plan with a frontend-only Weibo profile URL lookup on the mini-program `idols` page. | `wechat-miniprogram/pages/idols/idols.js`, `wechat-miniprogram/pages/idols/idols.wxml`, `wechat-miniprogram/pages/idols/idols.wxss`, existing mini-program request/config utilities if needed, Cloudflare Pages static asset source only if a no-secret avatar asset workflow can be implemented safely, `docs/agents/handoffs/2026-06-26-frontend-weibo-profile-lookup.md` | `idols` page has exactly one Weibo profile URL input and one query button; validates URL before request; attempts to fetch/parse the profile and extract uid, username, avatar, verification info, intro, and pinned Weibo when available; skips missing fields; displays avatar in the mini program and prints the remaining extracted fields; avatar filename uses Weibo uid under one Cloudflare Pages avatar directory; existing avatar is detected and reported without duplicate upload; no IdolLog code/credentials remain in the feature path; no Cloudflare write-capable secret is embedded in the mini program; if Weibo access or Cloudflare Pages upload is blocked by platform/security constraints, the handoff records the exact blocker and the safe partial implementation. |
+| WEIBO-BE-001 | Backend | not_applicable | No Backend implementation for this round. The user explicitly directed that this task must not use the image-extraction pod server. | None | Backend must not change Flask/API/RunPod/image-extraction/result/contact/token/lianliankan code for this task. Backend should only read the taskboard if synced and confirm no implementation scope if asked. |
+| WEIBO-REV-001 | Reviewer | pending | Review the frontend-only Weibo profile lookup after the Frontend handoff is available, and verify the Backend no-code boundary. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-weibo-profile-lookup.md` | Confirm the page has one URL input and one query button; extracted fields are displayed/skipped as required; avatar display and uid-based Cloudflare Pages asset naming/reporting behavior are implemented or a platform/security blocker is clearly documented; no Cloudflare write secrets or IdolLog credentials are present in mini-program code; no Backend pod/server files changed; unrelated scanner/lianliankan/token flows are not modified; run targeted syntax checks and any feasible mocks. |
+| IDOLLOG-BE-001 | Backend | superseded | Superseded before implementation by the user: do not use the IdolLog database. | None | No Backend IdolLog endpoint should be implemented. |
+| IDOLLOG-FE-001 | Frontend | superseded | Superseded before implementation by the user: replace with `WEIBO-FE-001`. | None | No IdolLog UI/request flow should be implemented. |
+| IDOLLOG-REV-001 | Reviewer | superseded | Superseded before implementation by the user: replace with `WEIBO-REV-001`. | None | No IdolLog review is needed unless stale work appears in a worktree. |
 | LLPLAYER-FE-001 | Frontend | done | Replace the lianliankan clear-state text with an interactive audio player and start tile-image downloading when the mini program enters. | `wechat-miniprogram/app.js` if startup hook is needed, `wechat-miniprogram/pages/lianliankan/**`, `wechat-miniprogram/workers/**` only if existing lianliankan asset contracts require it, optional shared cache helper under `wechat-miniprogram/utils/**`, `docs/agents/handoffs/2026-06-26-frontend-lianliankan-player-preload.md` | Frontend commit `f7afe71` adds startup tile-image preload, the clear-state audio player, progress/seek behavior, and player lifecycle handling. Frontend follow-up `80586c2` replaces text play/pause with compact image icons. Reviewer follow-up `fb7ba0e` approved after an authorized EOF-format-only correction in review. |
 | LLPLAYER-BE-001 | Backend | not_applicable | No Backend implementation for this round. | None | Backend should not change server runtime, Cloudflare Pages/static assets, mini-program package files, or lianliankan preload/player behavior for this task. Backend scope remains server-side runtime code only. |
 | LLPLAYER-REV-001 | Reviewer | done | Review the lianliankan audio-player and startup-preload Frontend work after the Frontend handoff is available. | Review only; `docs/agents/handoffs/2026-06-26-reviewer-lianliankan-player-preload.md`, `docs/agents/handoffs/2026-06-26-reviewer-lianliankan-player-preload-followup.md` | Initial review requested changes for a `git diff --check` EOF blank-line issue. Reviewer follow-up commit `fb7ba0e` approved Frontend follow-up `80586c2`: player icons, startup preload, play/pause/progress/seek behavior, no bundled `.m4a`, no package-local tile PNGs, and Backend no-diff boundary all passed. |
@@ -506,11 +508,15 @@ Contact email contract:
 | 2026-06-26 | LLPLAYER approved after Frontend follow-up. | Reviewer commit `fb7ba0e` approved Frontend follow-up `80586c2`; the only direct reviewer correction was an authorized EOF-format-only fix. The round is ready for integration and push. |
 
 | 2026-06-26 | Add IdolLog lookup as Backend + Frontend + Reviewer work. | The mini program must not hold IdolLog admin credentials. Backend owns the protected read-only admin query endpoint; Frontend owns the `idols` page inputs/button/result display; Reviewer verifies no credential leakage, no IdolLog mutation calls, and no unrelated behavior changes. |
+| 2026-06-26 | Supersede IdolLog lookup with frontend-only Weibo profile lookup. | User decided not to use the IdolLog database. The new task uses one Weibo profile URL input on the `idols` page, extracts public Weibo profile fields, handles avatar display and uid-based Cloudflare Pages avatar asset naming, and explicitly must not use the Backend image-extraction pod server. |
+| 2026-06-26 | Do not place Cloudflare write secrets in the mini program. | The user wants the task implemented in Frontend, but Cloudflare Pages uploads normally require write credentials or a deployment pipeline. Frontend must not embed write-capable secrets; if a no-secret upload path is not available, it must document the exact blocker instead of adding a Backend/pod workaround. |
 
 ## Open Questions
 
-- None for task publication. PM created a local credential placeholder for the user to fill; implementation must still add committed ignore rules before any real credentials are used.
+- None for task publication. There is a known implementation risk: runtime Cloudflare Pages avatar upload may not be safely possible from mini-program-only code without exposing write credentials; this is explicitly assigned to Frontend to verify and report rather than using the Backend pod server.
 ## Completed Work Summary
+
+- PM superseded `IDOLLOG-BE-001`, `IDOLLOG-FE-001`, and `IDOLLOG-REV-001` before implementation, and assigned `WEIBO-FE-001`, `WEIBO-BE-001`, and `WEIBO-REV-001` for the frontend-only Weibo profile lookup flow.
 
 - PM assigned `IDOLLOG-BE-001`, `IDOLLOG-FE-001`, and `IDOLLOG-REV-001` for the read-only IdolLog idol-record lookup flow, with server-side-only credentials and no direct mini-program access to `idollog.top`.
 
