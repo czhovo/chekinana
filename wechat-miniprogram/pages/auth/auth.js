@@ -30,10 +30,6 @@ Page({
 
   verifyToken() {
     const rawToken = this.data.token;
-    if (rawToken === "izaya7") {
-      wx.navigateTo({ url: "/pages/izaya7-map/izaya7-map" });
-      return;
-    }
     if (rawToken === "calendar") {
       wx.switchTab({ url: "/pages/calendar/calendar" });
       return;
