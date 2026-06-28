@@ -1,60 +1,60 @@
-# Chekinana
+# chekinana
 
-Chekinana 是一个微信小程序 + Flask 后端项目，用于从用户上传的照片中检测并提取拍立得照片。
-
-## 当前功能
-
-- 微信小程序端上传图片并查看提取结果。
-- 支持一次选择多张图片，单次最多 9 张。
-- 支持为每张图片填写可选的目标拍立得数量。
-- 支持 `mini`、`wide`、`auto` 三种拍立得尺寸模式。
-- 支持关闭后处理、降噪、锐化三种后处理模式。
-- 支持白平衡、旋转、取消任务、保存提取结果到相册。
-- 支持联系作者反馈。
-- 支持连连看页面，图片素材和通关音频从 `chekinana.top` 下载并缓存。
+Chekinana 是一个微信小程序项目，当前包含拍立得扫描提取、偶像资料管理、连连看小游戏等页面。Scanner 是核心图片处理功能，其他页面用于逐步承载偶像资料、小游戏、个人内容整理和设置入口。
 
 ## 项目结构
 
 ```text
-backend/                Flask API 与图像提取逻辑
-cloudflare-pages/       chekinana.top 静态资源源
-cloudflare-worker/      RunPod API 代理 Worker
-docs/agents/            多 agent 协作任务板和交接文档
-nginx/                  可选反向代理配置
-scripts/                辅助脚本与校验脚本
-wechat-miniprogram/     微信小程序前端
+backend/                 # 图像提取后端，主要用于 Scanner
+cloudflare-worker/       # 云端接口服务
+wechat-miniprogram/      # 微信小程序前端
+scripts/                 # 检查、部署和辅助脚本
+nginx/                   # 可选反向代理配置
 Dockerfile
 docker-compose.yml
+README.md
 ```
 
-## 微信小程序
+## 小程序页面
 
-小程序代码位于 `wechat-miniprogram/`。
+小程序主 tab 包含 Scanner、Calendar、Idols、Gallery、Settings。Lianliankan 和 izaya7 map 目前从 Settings 的入口进入，不作为主 tab 展示。
+
+### Scanner
+
+Scanner 是拍立得图片处理页面，也是目前功能最完整的页面。它用于从用户上传的照片中检测并提取拍立得图片。
 
 主要流程：
 
-1. 用户输入访问 token。
-2. 选择或拍摄最多 9 张图片。
-3. 为每张图片选择拍立得尺寸模式，并可填写目标数量。
-4. 上传图片到后端任务接口。
-5. 前端轮询任务状态，并在后端返回每张拍立得后立即显示和缓存结果。
-6. 用户可以单张保存或全部保存到系统相册。
+1. 在 scanner token 页面输入访问 token 并认证。
+2. 添加或选择最多 9 张图片。
+3. 为每张图片设置可选的拍立得数量。
+4. 按当前图片设置旋转角度。
+5. 选择拍立得尺寸模式：`auto`、`mini`、`wide`。
+6. 选择白平衡和后处理模式：关闭、降噪、锐化。
+7. 上传图片并进入处理队列。
+8. 页面显示上传中、排队中、图片处理中、正在提取第几张等状态。
+9. 每提取出一张拍立得，页面会即时显示结果。
+10. 用户可单张保存、全部下载、删除单张源图、删除全部图片或开始新任务。
+11. 处理过程中可中断任务。
 
-后端地址配置位于：
+图片选择与预览：
 
-```text
-wechat-miniprogram/utils/config.js
-```
+- 支持一次选择多张图片，也支持已有图片后继续添加。
+- 单次最多 9 张图片。
+- 大图预览区只显示当前图片。
+- 多图时可通过左右按钮或缩略图切换当前图片。
+- 拍立得数量输入、旋转角度、尺寸模式都与当前图片绑定。
+- 已选图片点击后是删除当前图片，而不是替换图片。
 
-## 后端
+结果显示与保存：
 
-后端代码位于 `backend/`，核心入口为：
+- 页面会逐张显示提取结果。
+- 结果会区分未下载、已下载到小程序、已写入相册等状态。
+- “全部下载”会保存所有已提取结果。
+- “新任务”会清理已安全保存的结果；如果某张源图的结果未全部下载或存在保存失败，会保留该源图和相关结果，避免误删。
+- 删除单张源图会删除该源图及其对应提取结果。
 
-```text
-backend/app.py
-```
-
-主要接口：
+后端接口：
 
 ```text
 GET  /api/health
@@ -62,48 +62,138 @@ POST /api/auth/verify
 POST /api/process
 GET  /api/status/<task_id>
 GET  /api/result/<task_id>/<result_id>
-POST /api/task/<task_id>/cancel
+POST /api/cancel/<task_id>
 ```
 
-接口通过 `X-Cheki-Token` 校验访问 token。生产环境通过 RunPod 启动后端，并由 Cloudflare Worker 代理到对外 API 域名。
-
-## 静态资源
-
-`cloudflare-pages/` 是 `chekinana.top` 的 Cloudflare Pages 静态资源源。
-
-当前包含：
-
-- 连连看 14 张图片素材
-- 连连看通关音频 `muguang.m4a`
-- `assets/lianliankan/v1/manifest.json`
-
-公开资源入口：
+Scanner 请求需要携带：
 
 ```text
-https://chekinana.top/assets/lianliankan/v1/manifest.json
+X-Cheki-Token: <scanner token>
 ```
 
-相关校验脚本：
+图像提取后端主要处理：
 
-```powershell
-python scripts\check_lianliankan_assets.py
-python scripts\check_lianliankan_public_assets.py
-```
+- 图片上传。
+- 任务排队。
+- 拍立得检测。
+- mini / wide / auto 尺寸处理。
+- 透视矫正。
+- 白平衡。
+- 降噪 / 锐化后处理。
+- 逐张返回提取结果。
+- 中断正在运行的任务。
 
-## 本地开发参考
+Scanner 是目前唯一依赖图像提取后端的核心页面。其他页面的微信登录、Idols、联系作者等功能不依赖 scanner token，也不依赖图像提取后端是否启动。
 
-后端本地启动：
+### Calendar
 
-```powershell
-cd backend
-python app.py
-```
+暂未实现。
 
-指定访问 token：
+预留目标：
 
-```powershell
-$env:CHEKINANA_ACCESS_TOKEN="your_token"
-python app.py
-```
+- 展示与偶像、活动、纪念日相关的日历信息。
+- 未来可能与用户保存的 idol 记录关联。
 
-小程序端使用微信开发者工具打开 `wechat-miniprogram/`。
+### Idols
+
+Idols 用于查询和管理偶像资料。
+
+当前能力：
+
+1. 输入微博主页 URL 查询用户资料。
+2. 获取微博 uid、用户名、头像和认证信息。
+3. 微信登录后，用户可以把查询结果添加为自己的 idol 记录。
+4. 每条 idol 记录可保存 idol name、group name、头像、颜色、微博 uid、微博用户名和微博认证信息。
+5. 用户可以使用查询得到的头像，也可以从相册选择新头像。
+6. 已保存的 idol 记录会显示在页面中，长按可删除。
+
+查询行为：
+
+- 用户输入微博主页 URL。
+- 页面展示查询到的头像、用户名和认证信息。
+- 用户简介和置顶微博当前不在功能范围内。
+- 如果认证信息缺失，页面仍可显示其余资料。
+
+添加和修改记录：
+
+- 保存前需要先在 Settings 中完成微信登录。
+- 没有微信登录时，点击保存会提示需要登录。
+- `Add` 表示把当前搜索结果添加为新的 idol。
+- `Modify` 表示当前搜索结果与某条已保存记录一致，可以修改这条记录。
+- `Add New` 表示微博 uid 相同但用户名或认证信息不同，会作为新的 idol 处理。
+- 保存成功后会清空搜索框和搜索结果卡片，并刷新用户已保存 idol 列表。
+- 颜色可以为空。
+
+已保存列表：
+
+- 每条 idol 记录以卡片形式展示。
+- 左侧为圆形头像。
+- 如果选择了颜色，头像边框显示对应颜色；多种颜色会等分显示。
+- 右侧显示 idol name 和 group name。
+- 长按卡片可以删除该记录。
+
+当前已知外部依赖风险：
+
+- 微博接口可能出现上游错误，例如系统错误、超时或接口不可用。
+- 这类错误发生时，页面查询会失败，但不代表已保存的 idol 记录失效。
+
+Idols 不依赖图像提取后端，也不使用 scanner token。
+
+### Gallery
+
+暂未实现。
+
+预留目标：
+
+- 展示用户已保存或已整理的图片内容。
+- 未来可能与 Scanner 提取结果或 idol 记录关联。
+
+### Lianliankan
+
+Lianliankan 是连连看小游戏页面。
+
+当前能力：
+
+1. 进入小程序后预下载连连看素材。
+2. 使用远程托管的图片资源。
+3. 在页面内生成棋盘并进行连连看游戏。
+4. 过关后显示简洁音频播放器。
+5. 音频播放器支持播放、暂停和进度条拖动。
+
+资源加载：
+
+- 14 张连连看图片素材不再打包在小程序页面目录中。
+- 小程序启动或首次进入相关页面时，会下载素材并缓存到本地。
+- 后续进入页面会优先使用已缓存资源。
+
+游戏行为：
+
+- 页面会生成可解的连连看棋盘。
+- 玩家消除全部方块后进入过关状态。
+- 过关后不再只显示文字提示，而是显示一个简洁的音频播放器。
+
+Lianliankan 不依赖图像提取后端，也不依赖 scanner token。
+
+### Settings
+
+Settings 用于放置通用设置和非 Scanner 功能入口。
+
+当前能力：
+
+- 微信登录。
+- 显示微信登录状态。
+- 清除 scanner token / scanner 认证状态。
+- 联系作者。
+- 进入 Lianliankan。
+- 进入 izaya7 map。
+
+微信登录只用于标识用户身份和访问用户自己的数据，例如 idol 记录；它与 scanner token 完全独立。
+
+## 后端与云服务
+
+项目包含两类后端能力：
+
+- 图像提取后端：主要服务 Scanner，负责图片处理和提取结果。
+- 云端接口服务：服务微信登录、联系作者、Idols 数据、微博资料查询等不依赖图像提取的功能。
+
+公开静态资源用于承载连连看素材、音频和部分头像资源。Scanner 相关访问仍由 scanner token 保护。
