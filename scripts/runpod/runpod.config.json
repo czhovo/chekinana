@@ -1,7 +1,7 @@
 {
-  "podId": "f8inzam03uy2c4",
-  "podName": "chekinana-migration",
-  "networkVolumeId": "jg5p3opv6h",
+  "podId": "xwi8ok68j64bmp",
+  "podName": "divine_magenta_pig-migration-migration",
+  "networkVolumeId": "",
   "httpPort": 8080,
   "autoDiscover": true,
   "wechatConfigPath": "../../wechat-miniprogram/utils/config.js"

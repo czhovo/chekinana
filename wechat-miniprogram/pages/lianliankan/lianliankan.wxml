@@ -27,7 +27,7 @@
             <image
               wx:if="{{tile > 0}}"
               class="tile"
-              src="/pages/lianliankan/images/{{tileImages[tile]}}"
+              src="{{tileImages[tile]}}"
               mode="aspectFit"
             />
           </view>
