@@ -2,14 +2,24 @@
 
 ## Current Objective
 
-Add per-user idol record persistence to the idols page, using the existing WeChat-login user session as the user identity and Cloudflare Worker D1/R2 storage for structured records and avatars.
+Add local-first calendar records to the calendar page, with a manual Settings data-sync button that uploads user data to Cloudflare Worker storage only when the user explicitly taps sync.
 
 Scope constraints:
 
+- Unless the user explicitly requests scanner work, every new feature must be fully independent from scanner. Do not modify scanner pages, scanner token auth, RunPod/pod-id routing, extraction APIs, image upload/download/result behavior, or scanner startup flows for this task.
 - Use WeChat login as the formal user identity mechanism. Frontend calls `wx.login()` and sends the returned code to Backend; Backend exchanges it with WeChat `code2Session`, maps `openid` to an internal `user_id`, and issues a Chekinana user session token.
 - WeChat login must be completely independent from the existing backend token authentication. WeChat login/session endpoints must not require `X-Cheki-Token` or any scanner access token.
 - The existing backend token authentication is only for entering and using the scanner/extraction workflow. Other mini-program functions must not require that token.
 - Scanner/extraction APIs must keep their existing token protection unless explicitly changed later. Non-scanner functions should not become scanner-token-gated as part of WeChat login.
+- For this calendar round, user behavior can assume a valid WeChat login/session already exists. Frontend still must not use scanner token as a substitute for user identity.
+- Calendar records are local-first. Creating, editing, deleting, and viewing calendar records must read/write mini-program local storage by default and must not automatically upload to Cloudflare.
+- Settings must add a manual "sync data" action. Only this action may call the cloud user-data sync API.
+- The manual sync API must compare consistency before overwriting cloud data. If cloud data has changed since the last successful local sync, the frontend must show a conflict/failure message and must not silently overwrite either side.
+- The user-facing calendar record type selector should be a dropdown/list-style selector to preserve future custom type extensibility. V1 options are exactly `cheki`, `syame`, and `douga`; custom user-defined types are not implemented in this round.
+- The add-record UI must not include a user-facing "add field" feature. Future extra fields should be preserved by the data structure only.
+- Calendar records can reference one or more existing idol records. The add-record person selector uses a circular plus button pattern: tap plus, choose one idol, render that idol avatar, then render a new plus button for additional idols.
+- Calendar record cards show idol avatar(s) on the left, then type plus quantity on the first line and note on the second line. Tapping a card opens a detail dialog that displays all stored fields and includes Modify and Delete buttons.
+- All user data should be treated as local-first going forward. This task must implement that principle for calendar records and design the sync payload so other user-data domains such as idols can be added later without changing the sync API shape. Do not rewrite existing idol persistence unless explicitly assigned in the task row.
 - WeChat login success must be clearly visible in the Settings page, including enough non-sensitive state for the user to know they are logged in.
 - Backend must keep WeChat `appid`, `appsecret`, any session signing secret, and WeChat session data server-side only. Do not put these values in mini-program code, docs, handoffs, logs, or git.
 - Backend should treat `openid` as the stable per-mini-program identity. `unionid` may be stored when returned, but implementation must not require it because it may be absent.
@@ -134,15 +144,18 @@ User closure direction for `LOGIN-006`: 2026-06-27 Frontend and Reviewer both co
 
 | Role | Worktree | Branch | Task |
 |---|---|---|---|
-| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Record approved idol save polish and Weibo OpenAPI outage findings |
-| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `IDOLSAVE-FE-005` completed in `065f373` |
-| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `IDOLSAVE-BE-003` completed in `66ef937`; deployed by PM |
-| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `IDOLSAVE-REV-005` approved in `0fbd1a0` |
+| PM | `C:\Users\20888\Desktop\chekinana-pm` | `codex/pm-next` | Publish local-first calendar records and manual sync tasks |
+| Frontend | `C:\Users\20888\Desktop\chekinana-frontend` | `codex/frontend-next` | `CALENDAR-FE-001` pending |
+| Backend | `C:\Users\20888\Desktop\chekinana-backend` | `codex/backend-next` | `CALENDAR-BE-001` pending |
+| Reviewer | `C:\Users\20888\Desktop\chekinana-reviewer` | `codex/reviewer-next` | `CALENDAR-REV-001` pending |
 
 ## Current Tasks
 
 | ID | Owner | Status | Task | Files | Acceptance Criteria |
 |---|---|---|---|---|---|
+| CALENDAR-FE-001 | Frontend | pending | Implement local-first calendar records UI and Settings manual sync entry. | `wechat-miniprogram/pages/calendar/**`, `wechat-miniprogram/pages/settings/**`, shared local user-data/session/API helpers if already used by calendar/settings/idols, `docs/agents/handoffs/2026-06-29-frontend-calendar-local-records.md`. Do not edit `wechat-miniprogram/pages/index/**`, `wechat-miniprogram/pages/auth/**`, scanner request helpers, RunPod config, or backend files. | Implement exactly this behavior: 1. Calendar page lets the user select one date. 2. An Add button is enabled only when a date is selected, or shows a clear "select date first" message if tapped without a selected date. 3. Add opens a dialog styled consistently with existing Settings/contact/Add Idol UI. 4. The dialog includes a type dropdown/list selector with only `cheki`, `syame`, `douga`; default can be `cheki`; do not implement custom types, but store type as a string. 5. The dialog includes positive integer quantity, default `1`; invalid values cannot save. 6. The dialog includes idol selection via circular plus buttons: tapping plus opens existing saved idol selection; after selecting one idol, show its circular avatar and render a new plus button; multiple idols are allowed; duplicate idol selection should be prevented or ignored. 7. The dialog includes a multiline note field; note can be empty. 8. Do not add a user-facing "add field" or arbitrary-field editor. 9. Saving creates a local record for the selected date and immediately displays it below the calendar. 10. Store records in mini-program local storage by default; no cloud call is made during add/edit/delete/view. 11. Record shape must include at least `id`, `date` as `YYYY-MM-DD`, `type`, `quantity`, `idolIds`, `idolSnapshots`, `note`, `extra` object reserved for future fields, `createdAt`, `updatedAt`. 12. The selected-date list shows only records for that date. 13. Each record card shows idol avatar(s) on the left, then first line `${type} x${quantity}`, second line note when present. 14. Tapping a card opens a detail dialog showing all stored fields in readable form and two buttons: Modify and Delete. 15. Modify reopens the edit form populated from the record and saves changes locally with `updatedAt` changed. 16. Delete asks for confirmation or uses an existing destructive-action pattern, then deletes only that local record. 17. Settings adds a manual sync data button. 18. Sync button builds a user-data bundle that includes calendar records and is shaped so `idols` or other domains can be added later, for example `{version, updatedAt, domains:{calendar:{records:[...]}}}`. 19. Sync calls Backend only when the button is tapped and uses the existing WeChat user session token, not scanner token. 20. If Backend reports success, store returned `cloudHash`/`lastSyncedHash` and `lastSyncedAt` locally and show success. 21. If Backend reports conflict, show a conflict message and do not overwrite local data. 22. If Backend/session/network fails, show failure and leave local data unchanged. 23. Do not change scanner/index/auth behavior. Handoff must list changed files, local storage keys used, sync request/response examples, and checks (`node --check` on changed JS, focused local-storage/sync mocks if available, `git diff --check`). |
+| CALENDAR-BE-001 | Backend | pending | Add Cloudflare Worker manual user-data sync endpoints with hash-based conflict protection. | `cloudflare-worker/src/**`, D1 migration files if needed, Worker config/tests/scripts/docs, `docs/agents/handoffs/2026-06-29-backend-calendar-user-data-sync.md`. Do not edit `backend/**`, RunPod startup, scanner Flask extraction code, or mini-program files. | Implement a Cloudflare Worker user-data sync contract only for scanner-independent services. Required contract: 1. Requests authenticate with the existing WeChat user session mechanism (`X-Cheki-User-Session` or current equivalent); never accept scanner token as user identity. 2. Add `GET /api/user-data` or an equivalently documented route that returns the current cloud user-data bundle plus `cloudHash`, `updatedAt`, and empty/default data when no cloud data exists. 3. Add `PUT` or `POST /api/user-data` or an equivalently documented route that accepts `{baseHash, data}`. 4. Compute a deterministic hash over the stored data bundle. 5. If no cloud data exists, accept upload and return `{ok:true, cloudHash, updatedAt}`. 6. If cloud data exists and `baseHash` equals current `cloudHash`, accept upload, replace stored bundle, and return the new hash. 7. If cloud data exists and `baseHash` does not equal current `cloudHash`, return HTTP 409 with `{ok:false, error:"sync_conflict", cloudHash, updatedAt}` and do not modify cloud data. 8. Validate that the data bundle is JSON object data with a version and domains object; do not require calendar-specific schema beyond reasonable size/type limits, because future domains will be added. 9. Apply a conservative payload size limit and return a clear validation error for oversized/invalid payloads. 10. Store the bundle per authenticated `user_id` in D1 or existing Cloudflare-managed storage; use the existing user-data D1 if appropriate. 11. Do not modify `/api/status`, `/api/process`, scanner token validation, RunPod proxy forwarding, result routes, Weibo profile lookup, contact email, or lianliankan assets. 12. Handoff must document exact routes, request/response JSON, storage table/migration, hash algorithm, conflict behavior, and checks (Worker route mocks/tests, no-session 401, conflict 409, scanner no-token still protected, `git diff --check`). PM will deploy only after Reviewer approval unless the user explicitly changes the order. |
+| CALENDAR-REV-001 | Reviewer | pending | Lightweight review of calendar local-first records and manual sync. | Review only; `docs/agents/handoffs/2026-06-29-reviewer-calendar-local-records.md`. Do not modify product code unless the user explicitly authorizes a formatting-only fix. | Review only the current diff and direct call paths for `CALENDAR-FE-001` and `CALENDAR-BE-001`. Block only on functional failures, obvious contract mismatches, syntax/build failures, scanner regressions, or exposed secrets. Required checks: 1. Confirm no scanner/index/auth/RunPod/extraction behavior was changed unless clearly unrelated generated residue already existed before this task. 2. Confirm calendar add/edit/delete/view uses local storage and does not call cloud automatically. 3. Confirm type selector options are exactly `cheki`, `syame`, `douga` and no custom-type UI exists. 4. Confirm idol picker uses plus-button/avatar flow and supports multiple idols. 5. Confirm record cards and detail dialog match the specified fields/buttons. 6. Confirm Settings sync calls only the new user-data sync endpoint and uses WeChat user session, not scanner token. 7. Confirm Backend sync contract implements no-data upload, matching-hash update, mismatched-hash 409 conflict, and invalid/session failure behavior. 8. Confirm no Cloudflare write credentials or secrets are in mini-program code/handoffs/logs. 9. Run low-cost checks only: relevant `node --check`, Worker focused tests/mocks if present, `git diff --check`, and targeted code inspection. 10. Handoff must state verdict `approved` or `changes requested`, with concise findings and exact files/lines for blockers. |
 | IDOLSAVE-FE-005 | Frontend | done | Polish idol save flow after approved two-path avatar work. | `wechat-miniprogram/pages/idols/**`, shared idols helpers if already used, `docs/agents/handoffs/2026-06-28-frontend-idol-save-polish.md` | Frontend completed in `065f373`. Empty color selection is allowed; successful Add/Modify/Add New clears the search URL and search result area while reloading saved idol records; failure paths preserve retry context; two-path avatar payloads are unchanged. Handoff reports `node --check`, focused mock, and `git diff --check`. |
 | IDOLSAVE-BE-003 | Backend | done | Allow idol records to have no colors. | `cloudflare-worker/src/**`, Worker tests/scripts/docs if needed, `docs/agents/handoffs/2026-06-28-backend-idol-empty-colors.md` | Backend completed in `66ef937`; Reviewer-local equivalent is `7debd38`. PM deployed Worker version `f43850b3-27a0-49d2-b51a-e2736c4f0fc8`. Production smoke checks: no-session `GET /api/idols` remains HTTP 401 `login_required`; no scanner token `GET /api/status` remains HTTP 401 `Token 无效或已过期`. |
 | IDOLSAVE-REV-005 | Reviewer | done | Lightweight review of optional colors and successful-save cleanup. | Review only; `docs/agents/handoffs/2026-06-28-reviewer-idol-save-polish.md` | Reviewer completed in `0fbd1a0`; verdict approved. Reviewer noted no D1 migration or secret is required, but production needed a normal Worker deploy, which PM completed as version `f43850b3-27a0-49d2-b51a-e2736c4f0fc8`. |
@@ -281,6 +294,35 @@ paused
 ```
 
 ## API / Configuration Contract
+
+Calendar/local user-data sync contract:
+
+- Scanner is out of scope. Do not change scanner pages, scanner token auth, RunPod/pod-id routing, Flask extraction APIs, upload/cancel/status/result routes, or scanner startup behavior for calendar/sync work.
+- Calendar records are local-first. Frontend add/edit/delete/view must not call the cloud.
+- Cloud sync is manual from Settings only.
+- Sync authentication uses the existing WeChat user session token, not `X-Cheki-Token`.
+- Frontend sends a versioned user-data bundle. V1 must include calendar records under a domains object and reserve space for future domains:
+
+```json
+{
+  "baseHash": "hash from last successful sync, or null",
+  "data": {
+    "version": 1,
+    "updatedAt": "ISO timestamp",
+    "domains": {
+      "calendar": {
+        "records": []
+      }
+    }
+  }
+}
+```
+
+- Backend stores one current user-data bundle per authenticated user and returns deterministic `cloudHash` values.
+- Upload succeeds when cloud data is missing or `baseHash` matches the current cloud hash.
+- Upload fails with HTTP 409 and `error: "sync_conflict"` when cloud data exists and `baseHash` differs from current cloud hash.
+- Frontend must not overwrite local data on sync failure or conflict.
+- PM will deploy Backend Worker changes after Reviewer approval unless the user explicitly directs a pre-review deploy.
 
 V1 keeps the existing single-image task API.
 
@@ -505,6 +547,12 @@ Contact email contract:
 
 | Date | Decision | Reason |
 |---|---|---|
+| 2026-06-29 | Future features are scanner-independent unless the user explicitly says otherwise. | User clarified that all non-scanner work must not modify scanner, scanner token auth, RunPod routing, or extraction behavior by default. |
+| 2026-06-29 | Calendar records are local-first with manual Settings sync only. | User wants user data stored locally by default; cloud upload happens only after tapping a sync button and must compare consistency before overwrite. |
+| 2026-06-29 | Calendar record type uses a dropdown/list selector with fixed V1 options. | This preserves future custom type extensibility while implementing only `cheki`, `syame`, and `douga` now. |
+| 2026-06-29 | Calendar person selection uses plus-button avatar chips. | User requested the same spirit as Add Idol color selection: tap circular plus to add one idol, render avatar, then show another plus. |
+| 2026-06-29 | No user-facing arbitrary extra-field editor in V1. | User mentioned future fields only as a data-model extensibility requirement, not as a current user feature. |
+| 2026-06-29 | Backend sync belongs to Cloudflare Worker, not RunPod. | User data sync is scanner-independent and must work without the image-extraction pod. |
 | 2026-06-16 | Use V1 sequential orchestration on top of existing single-image `/api/process`. | Avoids a larger backend batch-task redesign and keeps extraction internals stable. |
 | 2026-06-16 | Limit selected images to 9. | Keeps upload volume within WeChat and backend rate-limit constraints for the first batch version. |
 | 2026-06-16 | Bind count input and rotation state to the current image. | User explicitly requested per-image counts and rotations while previewing one image at a time. |
@@ -621,6 +669,7 @@ Contact email contract:
 - None.
 ## Completed Work Summary
 
+- PM assigned `CALENDAR-FE-001`, `CALENDAR-BE-001`, and `CALENDAR-REV-001` for local-first calendar records plus manual Settings sync. Frontend owns calendar UI/local storage and Settings sync button; Backend owns Cloudflare Worker user-data bundle sync with hash conflict protection; Reviewer performs lightweight diff/call-path review. Scanner/index/auth/RunPod/extraction work is explicitly out of scope unless the user later assigns it.
 - PM superseded `WEIBO-FE-001`, `WEIBO-BE-001`, and `WEIBO-REV-001`, revoked the frontend Cloudflare write-credential exception, and assigned `WEIBO-FE-002`, `WEIBO-BE-002`, and `WEIBO-REV-002` for a Cloudflare Worker/R2 backend approach.
 - PM configured the Cloudflare prerequisite for `WEIBO-BE-002`: R2 is enabled and bucket `chekinana-weibo-avatars` exists.
 - Frontend completed `WEIBO-FE-002` in `3f222d8`; Backend completed and deployed `WEIBO-BE-002` in `3f950ff`; PM smoke verification passed, so `WEIBO-REV-002` can start.
