@@ -34,6 +34,10 @@ Page({
       wx.navigateTo({ url: "/pages/izaya7-map/izaya7-map" });
       return;
     }
+    if (rawToken === "lianliankan") {
+      wx.navigateTo({ url: "/pages/lianliankan/lianliankan" });
+      return;
+    }
     if (rawToken === "calendar") {
       wx.switchTab({ url: "/pages/calendar/calendar" });
       return;
