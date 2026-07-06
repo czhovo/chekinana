@@ -2,13 +2,20 @@
 
 const { solveBoard } = require('./board-generator')
 const PRESET_BOARDS = require('./board-presets')
+const lianliankanAssets = require('../../utils/lianliankan-assets')
 
 const ROWS = 12
 const COLS = 8
 const TOTAL = ROWS * COLS
 const TILE_TYPES = 14
+const ASSET_MANIFEST_URL = 'https://chekinana.top/assets/lianliankan/v1/manifest.json'
+const ASSET_CACHE_KEY = 'lianliankan_asset_cache_v1'
+const VICTORY_AUDIO_URL = 'https://chekinana.top/assets/lianliankan/v1/audio/muguang.m4a'
+const VICTORY_AUDIO_CACHE_KEY = 'lianliankan_victory_audio_v1'
+const VICTORY_AUDIO_DOWNLOAD_ATTEMPTS = 2
+const VICTORY_AUDIO_RETRY_DELAY = 1000
 
-const TILE_IMAGE_MAP = [
+const TILE_IMAGE_FILES = [
   '',
   'pattern1r.png',
   'pattern2p.png',
@@ -26,6 +33,8 @@ const TILE_IMAGE_MAP = [
   'pattern14w.png'
 ]
 
+const DEFAULT_TILE_IMAGES = Array(TILE_TYPES + 1).fill('')
+
 const COLOR_SUFFIX_CLASS_MAP = {
   y: 'tile-fill-yellow',
   s: 'tile-fill-blue-soft',
@@ -37,13 +46,99 @@ const COLOR_SUFFIX_CLASS_MAP = {
   b: 'tile-fill-blue'
 }
 
-const TILE_BORDER_CLASS = TILE_IMAGE_MAP.map((file) => {
+const TILE_BORDER_CLASS = TILE_IMAGE_FILES.map((file) => {
   if (!file) return ''
   const match = file.match(/([a-zA-Z])(?=\.[a-zA-Z0-9]+$)/)
   if (!match) return ''
   const suffix = match[1].toLowerCase()
   return COLOR_SUFFIX_CLASS_MAP[suffix] || ''
 })
+
+function createAssetError(api, url, message) {
+  const error = new Error(message || `${api} failed`)
+  error.api = api
+  error.url = url
+  return error
+}
+
+function getErrorMessage(err, fallback) {
+  return err && err.errMsg ? err.errMsg : err && err.message ? err.message : fallback
+}
+
+function downloadFile(url, apiName = 'downloadFile') {
+  return new Promise((resolve, reject) => {
+    wx.downloadFile({
+      url,
+      success: (res) => {
+        if (res.statusCode >= 200 && res.statusCode < 300 && res.tempFilePath) {
+          resolve(res.tempFilePath)
+          return
+        }
+        reject(createAssetError(apiName, url, `status ${res.statusCode || 'unknown'}`))
+      },
+      fail: (err) => {
+        reject(createAssetError(apiName, url, getErrorMessage(err, 'download failed')))
+      }
+    })
+  })
+}
+
+function saveFile(tempFilePath, url) {
+  return new Promise((resolve, reject) => {
+    wx.saveFile({
+      tempFilePath,
+      success: (res) => {
+        if (res.savedFilePath) {
+          resolve(res.savedFilePath)
+          return
+        }
+        reject(createAssetError('saveFile', url, 'saveFile returned no path'))
+      },
+      fail: (err) => {
+        reject(createAssetError('saveFile', url, getErrorMessage(err, 'saveFile failed')))
+      }
+    })
+  })
+}
+
+function setStorage(key, data) {
+  return new Promise((resolve, reject) => {
+    wx.setStorage({
+      key,
+      data,
+      success: resolve,
+      fail: (err) => {
+        reject(new Error(err && err.errMsg ? err.errMsg : 'setStorage failed'))
+      }
+    })
+  })
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function canAccessFile(filePath) {
+  if (!filePath || typeof wx.getFileSystemManager !== 'function') {
+    return Promise.resolve(!!filePath)
+  }
+  return new Promise((resolve) => {
+    wx.getFileSystemManager().access({
+      path: filePath,
+      success: () => resolve(true),
+      fail: () => resolve(false)
+    })
+  })
+}
+
+function formatAssetError(err) {
+  const api = err && err.api ? err.api : 'asset'
+  const url = err && err.url ? err.url : ASSET_MANIFEST_URL
+  const message = err && err.message ? err.message : 'unknown error'
+  return `图片资源加载失败：${api} ${url} ${message}。点击重置重试`
+}
 
 const BOARD_POOL_KEY = 'hard'
 const BOARD_POOL_TARGET_SIZE = 5
@@ -105,6 +200,13 @@ function ensureBoardGeneratorWorker() {
 
   try {
     boardGeneratorWorker = wx.createWorker(BOARD_GENERATOR_WORKER_PATH)
+    if (!boardGeneratorWorker || typeof boardGeneratorWorker.onMessage !== 'function') {
+      boardGeneratorWorker = null
+      boardGeneratorWorkerAvailable = false
+      boardGeneratorWorkerError = 'invalid worker'
+      console.warn('[lianliankan] board generator worker unavailable: invalid worker')
+      return null
+    }
     boardGeneratorWorkerAvailable = true
     boardGeneratorWorkerError = ''
     console.info('[lianliankan] board generator worker ready')
@@ -227,7 +329,10 @@ function takeBoardEntry() {
   return null
 }
 
-function buildShuffledTileAssets() {
+function buildShuffledTileAssets(assetPaths) {
+  const tileAssetPaths = assetPaths && assetPaths.length === TILE_TYPES + 1
+    ? assetPaths
+    : DEFAULT_TILE_IMAGES
   const ids = []
   for (let type = 1; type <= TILE_TYPES; type++) ids.push(type)
   for (let i = ids.length - 1; i > 0; i--) {
@@ -241,7 +346,7 @@ function buildShuffledTileAssets() {
   const tileBorderClasses = ['']
   for (let type = 1; type <= TILE_TYPES; type++) {
     const mappedType = ids[type - 1]
-    tileImages[type] = TILE_IMAGE_MAP[mappedType]
+    tileImages[type] = tileAssetPaths[mappedType]
     tileBorderClasses[type] = TILE_BORDER_CLASS[mappedType]
   }
   return { tileImages, tileBorderClasses }
@@ -259,25 +364,44 @@ Page({
     timer: '0:00',
     pairsLeft: 0,
     lineSegments: [],
-    tileImages: TILE_IMAGE_MAP,
+    tileImages: DEFAULT_TILE_IMAGES,
     tileBorderClasses: TILE_BORDER_CLASS,
     isAnimating: false,
     isFreshBoard: false,
     isAutoSolving: false,
     isSolvingBoard: false,
-    solutionSteps: []
+    solutionSteps: [],
+    audioStatusText: '',
+    audioIsPlaying: false,
+    audioCurrentTime: 0,
+    audioDuration: 0,
+    audioProgress: 0,
+    audioCurrentLabel: '0:00',
+    audioDurationLabel: '0:00'
   },
 
   timerId: null,
   lineTimerId: null,
   solveTimerId: null,
   boardWaitTimerId: null,
+  assetTileImages: null,
+  assetLoadPromise: null,
+  lastAssetError: null,
+  victoryAudioContext: null,
+  victoryAudioPlayed: false,
+  victoryAudioLocalPath: null,
+  victoryAudioDownloadPromise: null,
+  victoryAudioDownloadError: null,
+  isAudioSeeking: false,
+  victoryAudioEnded: false,
+  isPageActive: true,
 
   onLoad() {
-    this.startGame()
+    this.loadTileAssetsAndStart()
   },
 
   onShow() {
+    this.isPageActive = true
     if (this.data.status === 'playing') this.startTimer()
     if (this.data.status === 'generating' && !this.boardWaitTimerId) this.tryStartGameFromPool()
     if (typeof wx.hideTabBar === 'function') {
@@ -286,20 +410,208 @@ Page({
   },
 
   onHide() {
+    this.isPageActive = false
     this.stopTimer()
     this.clearLineTimer()
     this.clearSolveTimer()
     this.clearBoardWaitTimer()
+    this.stopVictoryAudio({ destroy: true })
   },
 
   onUnload() {
+    this.isPageActive = false
     this.stopTimer()
     this.clearLineTimer()
     this.clearSolveTimer()
     this.clearBoardWaitTimer()
+    this.stopVictoryAudio({ destroy: true })
+  },
+
+  loadTileAssetsAndStart(options = {}) {
+    this.resetVictoryAudioState()
+    this.stopTimer()
+    this.clearLineTimer()
+    this.clearSolveTimer()
+    this.clearBoardWaitTimer()
+    if (options.clearCache) this.clearAssetCache()
+    this.assetTileImages = null
+    this.victoryAudioLocalPath = null
+    this.lastAssetError = null
+    this.setData({
+      board: this.getEmptyBoard(),
+      status: 'asset-loading',
+      statusText: '正在加载图片资源，请稍等...',
+      selected: { r: -1, c: -1 },
+      seconds: 0,
+      timer: '0:00',
+      pairsLeft: 0,
+      lineSegments: [],
+      tileImages: DEFAULT_TILE_IMAGES,
+      isAnimating: false,
+      isAutoSolving: false,
+      isSolvingBoard: false,
+      isFreshBoard: false,
+      solutionSteps: []
+    })
+
+    const promise = this.ensureTileAssets()
+    this.assetLoadPromise = promise
+    promise
+      .then((tileImages) => {
+        if (this.assetLoadPromise !== promise) return
+        this.assetTileImages = tileImages
+        this.assetLoadPromise = null
+        this.startGame()
+      })
+      .catch((err) => {
+        if (this.assetLoadPromise !== promise) return
+        console.error('[lianliankan] asset load failed', err)
+        this.assetTileImages = null
+        this.victoryAudioLocalPath = null
+        this.lastAssetError = err
+        this.assetLoadPromise = null
+        this.setData({
+          status: 'asset-error',
+          statusText: formatAssetError(err),
+          board: this.getEmptyBoard(),
+          pairsLeft: 0,
+          lineSegments: [],
+          isAnimating: false,
+          isAutoSolving: false,
+          isSolvingBoard: false
+        })
+      })
+  },
+
+  ensureTileAssets() {
+    return lianliankanAssets.ensureLianliankanTileAssets()
+  },
+
+  async resolveCachedVictoryAudio() {
+    const cachedPath = this.victoryAudioLocalPath || wx.getStorageSync(VICTORY_AUDIO_CACHE_KEY)
+    if (cachedPath && await canAccessFile(cachedPath)) {
+      this.victoryAudioLocalPath = cachedPath
+      return cachedPath
+    }
+
+    const legacyCache = wx.getStorageSync(ASSET_CACHE_KEY) || {}
+    const legacyAudio = legacyCache && legacyCache.audio
+    if (legacyAudio && await canAccessFile(legacyAudio)) {
+      this.victoryAudioLocalPath = legacyAudio
+      await setStorage(VICTORY_AUDIO_CACHE_KEY, legacyAudio)
+      return legacyAudio
+    }
+    return ''
+  },
+
+  async downloadVictoryAudioWithRetry() {
+    let lastError = null
+    for (let attempt = 1; attempt <= VICTORY_AUDIO_DOWNLOAD_ATTEMPTS; attempt++) {
+      try {
+        const tempFilePath = await downloadFile(VICTORY_AUDIO_URL, 'downloadFile')
+        const savedFilePath = await saveFile(tempFilePath, VICTORY_AUDIO_URL)
+        if (!await canAccessFile(savedFilePath)) {
+          throw createAssetError('saveFile', VICTORY_AUDIO_URL, 'saved file is not accessible')
+        }
+        return savedFilePath
+      } catch (err) {
+        lastError = err
+        console.warn('[lianliankan] victory audio download failed', {
+          attempt,
+          maxAttempts: VICTORY_AUDIO_DOWNLOAD_ATTEMPTS,
+          error: err
+        })
+        if (attempt < VICTORY_AUDIO_DOWNLOAD_ATTEMPTS) await wait(VICTORY_AUDIO_RETRY_DELAY)
+      }
+    }
+    throw lastError || createAssetError('downloadFile', VICTORY_AUDIO_URL, 'download failed')
+  },
+
+  ensureVictoryAudioDownload() {
+    if (this.victoryAudioLocalPath) return Promise.resolve(this.victoryAudioLocalPath)
+    if (this.victoryAudioDownloadPromise) return this.victoryAudioDownloadPromise
+
+    const promise = this.resolveCachedVictoryAudio()
+      .then((cachedPath) => cachedPath || this.downloadVictoryAudioWithRetry())
+      .then((savedFilePath) => {
+        this.victoryAudioLocalPath = savedFilePath
+        this.victoryAudioDownloadError = null
+        return setStorage(VICTORY_AUDIO_CACHE_KEY, savedFilePath)
+          .then(() => savedFilePath)
+      })
+      .catch((err) => {
+        this.victoryAudioDownloadError = err
+        throw err
+      })
+      .finally(() => {
+        if (this.victoryAudioDownloadPromise === promise) this.victoryAudioDownloadPromise = null
+      })
+
+    this.victoryAudioDownloadPromise = promise
+    return promise
+  },
+
+  startVictoryAudioDownload() {
+    this.ensureVictoryAudioDownload().catch((err) => {
+      console.warn('[lianliankan] victory audio background download failed', err)
+    })
+  },
+
+  queueVictoryAudioDownloadAfterRender() {
+    if (typeof wx.nextTick === 'function') {
+      wx.nextTick(() => this.startVictoryAudioDownload())
+      return
+    }
+    setTimeout(() => this.startVictoryAudioDownload(), 0)
+  },
+
+  clearAssetCache() {
+    const cached = wx.getStorageSync(ASSET_CACHE_KEY) || {}
+    const cachedImages = cached && cached.images ? cached.images : {}
+    const cachedAudio = cached && cached.audio
+    const cachedVictoryAudio = wx.getStorageSync(VICTORY_AUDIO_CACHE_KEY)
+    Object.keys(cachedImages).forEach((key) => {
+      const filePath = cachedImages[key]
+      if (!filePath) return
+      if (typeof wx.removeSavedFile === 'function') {
+        wx.removeSavedFile({
+          filePath,
+          fail() {}
+        })
+        return
+      }
+      if (typeof wx.getFileSystemManager === 'function') {
+        const fs = wx.getFileSystemManager()
+        if (filePath && typeof fs.unlink === 'function') {
+          fs.unlink({
+            filePath,
+            fail() {}
+          })
+        }
+      }
+    })
+    const cachedAudioPaths = [cachedAudio, cachedVictoryAudio].filter((filePath, index, paths) => {
+      return filePath && paths.indexOf(filePath) === index
+    })
+    cachedAudioPaths.forEach((filePath) => {
+      if (typeof wx.removeSavedFile !== 'function') return
+      wx.removeSavedFile({
+        filePath,
+        fail() {}
+      })
+    })
+    if (typeof wx.removeStorageSync === 'function') {
+      wx.removeStorageSync(ASSET_CACHE_KEY)
+      wx.removeStorageSync(VICTORY_AUDIO_CACHE_KEY)
+    }
   },
 
   startGame() {
+    if (!this.assetTileImages) {
+      this.loadTileAssetsAndStart({ clearCache: this.data.status === 'asset-error' })
+      return
+    }
+    this.resetVictoryAudioState()
     this.stopTimer()
     this.clearLineTimer()
     this.clearSolveTimer()
@@ -350,7 +662,7 @@ Page({
       return
     }
 
-    const tileAssets = buildShuffledTileAssets()
+    const tileAssets = buildShuffledTileAssets(this.assetTileImages)
     const board = entry.board
     this.setData({
       board,
@@ -368,8 +680,10 @@ Page({
       isSolvingBoard: false,
       isFreshBoard: true,
       solutionSteps: []
+    }, () => {
+      this.startTimer()
+      this.queueVictoryAudioDownloadAfterRender()
     })
-    this.startTimer()
   },
 
   queueBoardStart(delay) {
@@ -423,10 +737,260 @@ Page({
     }
   },
 
+  getVictoryAudioContext() {
+    if (this.victoryAudioContext) return this.victoryAudioContext
+    if (typeof wx.createInnerAudioContext !== 'function') {
+      console.warn('[lianliankan] victory audio unavailable: wx.createInnerAudioContext is not a function')
+      return null
+    }
+
+    const audio = wx.createInnerAudioContext()
+    audio.src = this.victoryAudioLocalPath || VICTORY_AUDIO_URL
+    audio.loop = false
+    audio.autoplay = false
+    if (typeof audio.onError === 'function') {
+      audio.onError((err) => {
+        console.warn('[lianliankan] victory audio failed', err)
+        this.setData({
+          audioIsPlaying: false,
+          audioStatusText: '音效播放失败'
+        })
+      })
+    }
+    if (typeof audio.onPlay === 'function') {
+      audio.onPlay(() => {
+        this.victoryAudioEnded = false
+        this.setData({
+          audioIsPlaying: true,
+          audioStatusText: ''
+        })
+      })
+    }
+    if (typeof audio.onPause === 'function') {
+      audio.onPause(() => {
+        this.setData({ audioIsPlaying: false })
+      })
+    }
+    if (typeof audio.onStop === 'function') {
+      audio.onStop(() => {
+        this.setData({ audioIsPlaying: false })
+      })
+    }
+    if (typeof audio.onEnded === 'function') {
+      audio.onEnded(() => {
+        const duration = this.normalizeAudioTime(audio.duration || this.data.audioDuration)
+        this.victoryAudioEnded = true
+        this.setData({
+          audioIsPlaying: false,
+          audioCurrentTime: duration,
+          audioDuration: duration,
+          audioProgress: duration > 0 ? 100 : this.data.audioProgress,
+          audioCurrentLabel: this.formatAudioTime(duration),
+          audioDurationLabel: this.formatAudioTime(duration)
+        })
+      })
+    }
+    if (typeof audio.onTimeUpdate === 'function') {
+      audio.onTimeUpdate(() => {
+        if (this.isAudioSeeking) return
+        this.updateAudioProgress(audio.currentTime, audio.duration)
+      })
+    }
+    this.victoryAudioContext = audio
+    return audio
+  },
+
+  playVictoryAudio() {
+    const audio = this.getVictoryAudioContext()
+    if (!audio) return
+
+    try {
+      audio.src = this.victoryAudioLocalPath || VICTORY_AUDIO_URL
+      if (this.victoryAudioEnded && typeof audio.seek === 'function') {
+        audio.seek(0)
+        this.victoryAudioEnded = false
+      }
+      audio.play()
+      this.setData({
+        audioIsPlaying: true,
+        audioStatusText: ''
+      })
+    } catch (e) {
+      console.warn('[lianliankan] victory audio play failed', e)
+      this.setData({
+        audioIsPlaying: false,
+        audioStatusText: '音效播放失败'
+      })
+    }
+  },
+
+  playVictoryAudioWhenReady() {
+    if (this.victoryAudioPlayed) return
+
+    if (this.victoryAudioLocalPath) {
+      this.setData({ audioStatusText: '' })
+      this.victoryAudioPlayed = true
+      this.playVictoryAudio()
+      return
+    }
+
+    this.setData({ audioStatusText: '音效下载中...' })
+    this.ensureVictoryAudioDownload()
+      .then(() => {
+        if (!this.isPageActive || this.data.status !== 'won' || this.victoryAudioPlayed) return
+        this.setData({ audioStatusText: '' })
+        this.victoryAudioPlayed = true
+        this.playVictoryAudio()
+      })
+      .catch((err) => {
+        console.warn('[lianliankan] victory audio download unavailable after win', err)
+        if (!this.isPageActive || this.data.status !== 'won' || this.victoryAudioPlayed) return
+        this.setData({ audioStatusText: '音效下载失败' })
+      })
+  },
+
+  pauseVictoryAudio() {
+    const audio = this.victoryAudioContext
+    if (!audio) return
+    try {
+      if (typeof audio.pause === 'function') audio.pause()
+      this.setData({ audioIsPlaying: false })
+    } catch (e) {
+      console.warn('[lianliankan] victory audio pause failed', e)
+    }
+  },
+
+  onAudioPlayPauseTap() {
+    if (this.data.audioIsPlaying) {
+      this.pauseVictoryAudio()
+      return
+    }
+
+    if (this.victoryAudioLocalPath) {
+      this.playVictoryAudio()
+      return
+    }
+
+    this.setData({ audioStatusText: '音效下载中...' })
+    this.ensureVictoryAudioDownload()
+      .then(() => {
+        if (!this.isPageActive || this.data.status !== 'won') return
+        this.setData({ audioStatusText: '' })
+        this.playVictoryAudio()
+      })
+      .catch((err) => {
+        console.warn('[lianliankan] victory audio download unavailable from player', err)
+        if (!this.isPageActive || this.data.status !== 'won') return
+        this.setData({ audioStatusText: '音效下载失败' })
+      })
+  },
+
+  onAudioSeekChanging(e) {
+    this.isAudioSeeking = true
+    this.updateAudioProgressFromPercent(e && e.detail ? e.detail.value : 0)
+  },
+
+  onAudioSeekChange(e) {
+    const percent = this.clampAudioProgress(e && e.detail ? e.detail.value : 0)
+    const duration = this.data.audioDuration
+    const nextTime = duration > 0 ? duration * percent / 100 : 0
+    this.isAudioSeeking = false
+    this.updateAudioProgress(nextTime, duration)
+
+    const audio = this.getVictoryAudioContext()
+    if (!audio || typeof audio.seek !== 'function' || duration <= 0) return
+    try {
+      audio.seek(nextTime)
+      this.victoryAudioEnded = percent >= 100
+    } catch (err) {
+      console.warn('[lianliankan] victory audio seek failed', err)
+    }
+  },
+
+  stopVictoryAudio(options = {}) {
+    const audio = this.victoryAudioContext
+    if (!audio) return
+
+    try {
+      if (typeof audio.stop === 'function') audio.stop()
+      this.setData({ audioIsPlaying: false })
+    } catch (e) {
+      console.warn('[lianliankan] victory audio stop failed', e)
+    }
+
+    if (options.destroy && typeof audio.destroy === 'function') {
+      try {
+        audio.destroy()
+      } catch (e) {
+        console.warn('[lianliankan] victory audio destroy failed', e)
+      }
+      this.victoryAudioContext = null
+    }
+  },
+
+  resetVictoryAudioState() {
+    this.victoryAudioPlayed = false
+    this.victoryAudioEnded = false
+    this.isAudioSeeking = false
+    this.stopVictoryAudio()
+    this.setData({
+      audioStatusText: '',
+      audioIsPlaying: false,
+      audioCurrentTime: 0,
+      audioDuration: 0,
+      audioProgress: 0,
+      audioCurrentLabel: '0:00',
+      audioDurationLabel: '0:00'
+    })
+  },
+
   formatTime(seconds) {
     const m = Math.floor(seconds / 60)
     const s = seconds % 60
     return `${m}:${s.toString().padStart(2, '0')}`
+  },
+
+  normalizeAudioTime(value) {
+    const next = Number(value)
+    if (!Number.isFinite(next) || next < 0) return 0
+    return next
+  },
+
+  clampAudioProgress(value) {
+    const next = Number(value)
+    if (!Number.isFinite(next)) return 0
+    return Math.max(0, Math.min(100, next))
+  },
+
+  formatAudioTime(seconds) {
+    const safeSeconds = Math.floor(this.normalizeAudioTime(seconds))
+    const m = Math.floor(safeSeconds / 60)
+    const s = safeSeconds % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+  },
+
+  updateAudioProgress(currentTime, duration) {
+    const safeCurrent = this.normalizeAudioTime(currentTime)
+    const safeDuration = this.normalizeAudioTime(duration || this.data.audioDuration)
+    const progress = safeDuration > 0 ? this.clampAudioProgress(safeCurrent / safeDuration * 100) : 0
+    this.setData({
+      audioCurrentTime: safeCurrent,
+      audioDuration: safeDuration,
+      audioProgress: progress,
+      audioCurrentLabel: this.formatAudioTime(safeCurrent),
+      audioDurationLabel: this.formatAudioTime(safeDuration)
+    })
+  },
+
+  updateAudioProgressFromPercent(percent) {
+    const safePercent = this.clampAudioProgress(percent)
+    const duration = this.data.audioDuration
+    const current = duration > 0 ? duration * safePercent / 100 : 0
+    this.setData({
+      audioCurrentTime: current,
+      audioProgress: safePercent,
+      audioCurrentLabel: this.formatAudioTime(current)
+    })
   },
 
   cloneBoard(board) {
@@ -496,9 +1060,12 @@ Page({
           pairsLeft,
           isAnimating: false,
           status: won ? 'won' : 'playing',
-          statusText: won ? '恭喜过关！' : ''
+          statusText: ''
         })
-        if (won) this.stopTimer()
+        if (won) {
+          this.stopTimer()
+          this.playVictoryAudioWhenReady()
+        }
       }, 500)
       return
     }
@@ -620,9 +1187,10 @@ Page({
         isSolvingBoard: false,
         isAutoSolving: false,
         status: 'won',
-        statusText: '恭喜过关！'
+        statusText: ''
       })
       this.stopTimer()
+      this.playVictoryAudioWhenReady()
       return
     }
 
@@ -645,9 +1213,12 @@ Page({
       this.setData({
         isAutoSolving: false,
         status: won ? 'won' : 'playing',
-        statusText: won ? '恭喜过关！' : ''
+        statusText: ''
       })
-      if (won) this.stopTimer()
+      if (won) {
+        this.stopTimer()
+        this.playVictoryAudioWhenReady()
+      }
       return
     }
 
@@ -694,7 +1265,8 @@ Page({
 
       if (won) {
         this.stopTimer()
-        this.setData({ isAutoSolving: false, statusText: '恭喜过关！' })
+        this.setData({ isAutoSolving: false, statusText: '' })
+        this.playVictoryAudioWhenReady()
         return
       }
 

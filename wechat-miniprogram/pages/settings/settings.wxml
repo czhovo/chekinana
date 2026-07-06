@@ -2,7 +2,11 @@
   <view class="placeholder-panel">
     <view class="placeholder-kicker">Chekinana</view>
     <view class="placeholder-title">Settings</view>
-    <view class="placeholder-text">这里会放偏好设置和账号选项。</view>
-    <button class="settings-action" bindtap="returnToAuth">重新验证 Scanner</button>
+    <view class="placeholder-text">Settings and account actions.</view>
+    <view class="settings-section">
+      <button class="settings-action secondary" bindtap="openLianliankan">Lianliankan</button>
+      <button class="settings-action secondary" bindtap="openIzaya7Map">izaya7's map</button>
+    </view>
+    <button class="settings-action" bindtap="returnToAuth">Verify Scanner again</button>
   </view>
 </view>
