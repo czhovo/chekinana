@@ -202,6 +202,11 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# macOS / Xcode user state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
 # Ruff stuff:
 .ruff_cache/
 
@@ -228,4 +233,3 @@ sam3_model/
 # Docker volumes
 certbot/
 nginx/logs/
-
