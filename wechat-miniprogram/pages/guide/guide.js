@@ -1,12 +1,13 @@
 Page({
   data: {
-    prompt: '',
-    images: []
+    images: [],
+    selectedTag: 0,
+    tags: ['标签一', '标签二', '标签三', '标签四']
   },
 
-  onPromptInput(event) {
+  selectTag(event) {
     this.setData({
-      prompt: event.detail.value
+      selectedTag: event.currentTarget.dataset.index
     })
   },
 
@@ -14,16 +15,12 @@ Page({
     wx.chooseMedia({
       count: 9,
       mediaType: ['image'],
-      sourceType: ['album', 'camera'],
+      sourceType: ['album'],
       success: (res) => {
         this.setData({
-          images: (res.tempFiles || []).map((file) => file.tempFilePath)
+          images: res.tempFiles.map((file) => file.tempFilePath)
         })
       }
     })
-  },
-
-  submitPrompt() {
-    // Placeholder only. Existing backend/API contracts remain unchanged.
   }
 })

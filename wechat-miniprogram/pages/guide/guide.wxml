@@ -1,34 +1,35 @@
-<view class="guide-page">
-  <view class="guide-space"></view>
+<view class="page">
+  <view class="content"></view>
 
-  <view class="composer-shell">
-    <view class="composer-card">
+  <view class="composer">
+    <scroll-view class="tag-list" scroll-x enable-flex>
+      <view
+        wx:for="{{tags}}"
+        wx:key="*this"
+        class="tag-button {{selectedTag === index ? 'tag-button-active' : ''}}"
+        data-index="{{index}}"
+        bindtap="selectTag"
+      >{{item}}</view>
+    </scroll-view>
+
+    <view class="composer-box">
       <textarea
         class="composer-input"
-        value="{{prompt}}"
         placeholder="Ask Chekinana..."
         placeholder-class="composer-placeholder"
-        maxlength="-1"
-        fixed
         auto-height="{{false}}"
-        bindinput="onPromptInput"
+        maxlength="-1"
       ></textarea>
-
       <view class="composer-actions">
-        <button
-          class="plain-button add-button"
-          hover-class="plain-button-hover"
+        <view
+          class="icon-button"
+          hover-class="icon-button-hover"
           bindtap="chooseImage"
-          aria-label="Add"
-        >+</button>
-        <button
-          class="plain-button send-button"
-          hover-class="send-button-hover"
-          bindtap="submitPrompt"
-          aria-label="Send"
-        >
+          aria-label="上传图片"
+        >+</view>
+        <view class="send-button" hover-class="send-button-hover">
           <image class="send-arrow" src="/assets/send-arrow.svg" mode="aspectFit" />
-        </button>
+        </view>
       </view>
     </view>
   </view>
