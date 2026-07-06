@@ -1,0 +1,36 @@
+<view class="page">
+  <view class="content"></view>
+
+  <view class="composer">
+    <scroll-view class="tag-list" scroll-x enable-flex>
+      <view
+        wx:for="{{tags}}"
+        wx:key="*this"
+        class="tag-button {{selectedTag === index ? 'tag-button-active' : ''}}"
+        data-index="{{index}}"
+        bindtap="selectTag"
+      >{{item}}</view>
+    </scroll-view>
+
+    <view class="composer-box">
+      <textarea
+        class="composer-input"
+        placeholder="Ask Chekinana..."
+        placeholder-class="composer-placeholder"
+        auto-height="{{false}}"
+        maxlength="-1"
+      ></textarea>
+      <view class="composer-actions">
+        <view
+          class="icon-button"
+          hover-class="icon-button-hover"
+          bindtap="chooseImage"
+          aria-label="上传图片"
+        >+</view>
+        <view class="send-button" hover-class="send-button-hover">
+          <image class="send-arrow" src="/assets/send-arrow.svg" mode="aspectFit" />
+        </view>
+      </view>
+    </view>
+  </view>
+</view>
