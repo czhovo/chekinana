@@ -1,0 +1,35 @@
+<view class="guide-page">
+  <view class="guide-space"></view>
+
+  <view class="composer-shell">
+    <view class="composer-card">
+      <textarea
+        class="composer-input"
+        value="{{prompt}}"
+        placeholder="Ask Chekinana..."
+        placeholder-class="composer-placeholder"
+        maxlength="-1"
+        fixed
+        auto-height="{{false}}"
+        bindinput="onPromptInput"
+      ></textarea>
+
+      <view class="composer-actions">
+        <button
+          class="plain-button add-button"
+          hover-class="plain-button-hover"
+          bindtap="chooseImage"
+          aria-label="Add"
+        >+</button>
+        <button
+          class="plain-button send-button"
+          hover-class="send-button-hover"
+          bindtap="submitPrompt"
+          aria-label="Send"
+        >
+          <image class="send-arrow" src="/assets/send-arrow.svg" mode="aspectFit" />
+        </button>
+      </view>
+    </view>
+  </view>
+</view>
