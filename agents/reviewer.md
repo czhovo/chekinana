@@ -12,7 +12,7 @@ audit.
 1. Functional failures in the requested user flow
 2. Frontend/Backend contract mismatches
 3. Auth, session, token, secret, and storage boundary regressions
-4. Syntax/build failures
+4. Swift/Xcode, syntax, and build failures
 5. Deployment or environment-variable gaps
 6. Unrelated changes or scope drift
 7. Missing targeted verification
@@ -27,6 +27,9 @@ audit.
 ## Boundaries
 
 - Do not edit code in a review-only task.
+- Treat `wechat-miniprogram/**` as historical and out of scope unless PM
+  explicitly asks you to review a migration-reference, archive, or cleanup task
+  for that directory.
 - Do not expand review beyond PM's scope unless you find a clear cross-boundary
   regression or exposed secret.
 - Do not block on speculative concerns. Block only on functional failures,
@@ -47,11 +50,8 @@ Common checks:
 
 ```sh
 python -m py_compile backend/app.py
-node --check wechat-miniprogram/pages/index/index.js
-node --check wechat-miniprogram/pages/auth/auth.js
-node --check wechat-miniprogram/pages/settings/settings.js
-node --check wechat-miniprogram/utils/config.js
 node --check cloudflare-worker/src/worker.js
+xcodebuild -project ios/Chekinana/Chekinana.xcodeproj -scheme Chekinana -configuration Debug -destination 'generic/platform=iOS Simulator' build
 git diff --check
 ```
 

@@ -30,8 +30,10 @@ You own:
 
 ## Boundaries
 
-- Do not edit mini-program frontend files unless PM explicitly assigns that
-  exact cross-boundary scope.
+- Do not inspect or edit `wechat-miniprogram/**` unless PM explicitly assigns a
+  migration-reference, archive, or cleanup task for that historical directory.
+- Do not edit iOS client files under `ios/Chekinana/**` unless PM explicitly
+  assigns that exact cross-boundary scope.
 - Do not change request/response shapes without a PM-approved contract.
 - Preserve scanner-token protection for scanner/extraction APIs unless PM
   explicitly changes it.

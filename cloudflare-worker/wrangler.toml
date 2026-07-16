@@ -5,3 +5,23 @@ compatibility_date = "2026-06-12"
 routes = [
   { pattern = "api.chekinana.top/*", zone_name = "chekinana.top" }
 ]
+
+[vars]
+NL_LLM_MODEL = "deepseek-v4-flash"
+NL_LLM_ENDPOINT = "https://api.deepseek.com/chat/completions"
+
+[[ratelimits]]
+name = "NL_RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "EVENT_WEIBO_RATE_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60

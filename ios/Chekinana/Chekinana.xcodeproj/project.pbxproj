@@ -10,7 +10,38 @@
 		1A1A1A1A1A1A1A1A1A1A1A01 /* ChekinanaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A11 /* ChekinanaApp.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A02 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A12 /* ContentView.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A03 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A13 /* Assets.xcassets */; };
+		1A1A1A1A1A1A1A1A1A1A1A04 /* ChekinanaDataModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A15 /* ChekinanaDataModel.swift */; };
+		1A1A1A1A1A1A1A1A1A1A1A05 /* ChekinanaCommandParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A16 /* ChekinanaCommandParser.swift */; };
+		1A1A1A1A1A1A1A1A1A1A1A06 /* ChekinanaCommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A17 /* ChekinanaCommandExecutor.swift */; };
+		1A1A1A1A1A1A1A1A1A1A1A07 /* ChekinanaIdolEnrichmentClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A18 /* ChekinanaIdolEnrichmentClient.swift */; };
+		1A1A1A1A1A1A1A1A1A1A1A08 /* ChekinanaAlbumPickerStateMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */; };
+		1A1A1A1A1A1A1A1A1A1A1A09 /* ChekinanaNaturalLanguageTranslator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */; };
+		3C3C3C3C3C3C3C3C3C3C3C01 /* ChekinanaChekiIndexing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */; };
+		5E5E5E5E5E5E5E5E5E5E5E01 /* ChekinanaNLInterpretClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */; };
+		5E5E5E5E5E5E5E5E5E5E5E02 /* ChekinanaConversationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */; };
+		5E5E5E5E5E5E5E5E5E5E5E03 /* ChekinanaNLInterpretClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */; };
+		5E5E5E5E5E5E5E5E5E5E5E04 /* ChekinanaConversationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */; };
+		7F7F7F7F7F7F7F7F7F7F7F01 /* ChekinanaEventCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */; };
+		4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */; };
+		2B2B2B2B2B2B2B2B2B2B2B01 /* ChekinanaNaturalLanguageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		2B2B2B2B2B2B2B2B2B2B2B20 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A1A1A1A1A1A1A1A1A1A1A41 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A1A1A1A1A1A1A1A1A1A1A40;
+			remoteInfo = Chekinana;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D20 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A1A1A1A1A1A1A1A1A1A1A41 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A1A1A1A1A1A1A1A1A1A1A40;
+			remoteInfo = Chekinana;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		1A1A1A1A1A1A1A1A1A1A1A10 /* Chekinana.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Chekinana.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -18,10 +49,41 @@
 		1A1A1A1A1A1A1A1A1A1A1A12 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A13 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A14 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A15 /* ChekinanaDataModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaDataModel.swift; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A16 /* ChekinanaCommandParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandParser.swift; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A17 /* ChekinanaCommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandExecutor.swift; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A18 /* ChekinanaIdolEnrichmentClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaIdolEnrichmentClient.swift; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAlbumPickerStateMachine.swift; sourceTree = "<group>"; };
+		1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageTranslator.swift; sourceTree = "<group>"; };
+		3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiIndexing.swift; sourceTree = "<group>"; };
+		5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNLInterpretClient.swift; sourceTree = "<group>"; };
+		5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaConversationCoordinator.swift; sourceTree = "<group>"; };
+		5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNLInterpretClientTests.swift; sourceTree = "<group>"; };
+		5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaConversationCoordinatorTests.swift; sourceTree = "<group>"; };
+		7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaEventCandidate.swift; sourceTree = "<group>"; };
+		4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandExecutorTests.swift; sourceTree = "<group>"; };
+		2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageUITests.swift; sourceTree = "<group>"; };
+		6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Chekinana.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		1A1A1A1A1A1A1A1A1A1A1A20 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2B2B2B2B2B2B2B2B2B2B2B21 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D21 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -34,7 +96,10 @@
 		1A1A1A1A1A1A1A1A1A1A1A30 = {
 			isa = PBXGroup;
 			children = (
+				6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */,
 				1A1A1A1A1A1A1A1A1A1A1A31 /* Chekinana */,
+				4D4D4D4D4D4D4D4D4D4D4D31 /* ChekinanaTests */,
+				2B2B2B2B2B2B2B2B2B2B2B31 /* ChekinanaUITests */,
 				1A1A1A1A1A1A1A1A1A1A1A32 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -44,6 +109,16 @@
 			children = (
 				1A1A1A1A1A1A1A1A1A1A1A11 /* ChekinanaApp.swift */,
 				1A1A1A1A1A1A1A1A1A1A1A12 /* ContentView.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A15 /* ChekinanaDataModel.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A16 /* ChekinanaCommandParser.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A17 /* ChekinanaCommandExecutor.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A18 /* ChekinanaIdolEnrichmentClient.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */,
+				1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */,
+				3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */,
+				5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */,
+				5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */,
+				7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */,
 				1A1A1A1A1A1A1A1A1A1A1A13 /* Assets.xcassets */,
 				1A1A1A1A1A1A1A1A1A1A1A14 /* Info.plist */,
 			);
@@ -54,8 +129,28 @@
 			isa = PBXGroup;
 			children = (
 				1A1A1A1A1A1A1A1A1A1A1A10 /* Chekinana.app */,
+				4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */,
+				2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		2B2B2B2B2B2B2B2B2B2B2B31 /* ChekinanaUITests */ = {
+			isa = PBXGroup;
+			children = (
+				2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */,
+			);
+			path = ChekinanaUITests;
+			sourceTree = "<group>";
+		};
+		4D4D4D4D4D4D4D4D4D4D4D31 /* ChekinanaTests */ = {
+			isa = PBXGroup;
+			children = (
+				4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */,
+				5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */,
+				5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */,
+			);
+			path = ChekinanaTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -78,6 +173,42 @@
 			productReference = 1A1A1A1A1A1A1A1A1A1A1A10 /* Chekinana.app */;
 			productType = "com.apple.product-type.application";
 		};
+		2B2B2B2B2B2B2B2B2B2B2B40 /* ChekinanaUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2B2B2B2B2B2B2B2B2B2B2B70 /* Build configuration list for PBXNativeTarget "ChekinanaUITests" */;
+			buildPhases = (
+				2B2B2B2B2B2B2B2B2B2B2B50 /* Sources */,
+				2B2B2B2B2B2B2B2B2B2B2B21 /* Frameworks */,
+				2B2B2B2B2B2B2B2B2B2B2B60 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2B2B2B2B2B2B2B2B2B2B2B30 /* PBXTargetDependency */,
+			);
+			name = ChekinanaUITests;
+			productName = ChekinanaUITests;
+			productReference = 2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		4D4D4D4D4D4D4D4D4D4D4D40 /* ChekinanaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4D4D4D4D4D4D4D4D4D4D4D70 /* Build configuration list for PBXNativeTarget "ChekinanaTests" */;
+			buildPhases = (
+				4D4D4D4D4D4D4D4D4D4D4D50 /* Sources */,
+				4D4D4D4D4D4D4D4D4D4D4D21 /* Frameworks */,
+				4D4D4D4D4D4D4D4D4D4D4D60 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4D4D4D4D4D4D4D4D4D4D4D30 /* PBXTargetDependency */,
+			);
+			name = ChekinanaTests;
+			productName = ChekinanaTests;
+			productReference = 4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -90,6 +221,14 @@
 				TargetAttributes = {
 					1A1A1A1A1A1A1A1A1A1A1A40 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					2B2B2B2B2B2B2B2B2B2B2B40 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 1A1A1A1A1A1A1A1A1A1A1A40;
+					};
+					4D4D4D4D4D4D4D4D4D4D4D40 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 1A1A1A1A1A1A1A1A1A1A1A40;
 					};
 				};
 			};
@@ -107,6 +246,8 @@
 			projectRoot = "";
 			targets = (
 				1A1A1A1A1A1A1A1A1A1A1A40 /* Chekinana */,
+				4D4D4D4D4D4D4D4D4D4D4D40 /* ChekinanaTests */,
+				2B2B2B2B2B2B2B2B2B2B2B40 /* ChekinanaUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -120,6 +261,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		2B2B2B2B2B2B2B2B2B2B2B60 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D60 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -129,23 +284,66 @@
 			files = (
 				1A1A1A1A1A1A1A1A1A1A1A01 /* ChekinanaApp.swift in Sources */,
 				1A1A1A1A1A1A1A1A1A1A1A02 /* ContentView.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A04 /* ChekinanaDataModel.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A05 /* ChekinanaCommandParser.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A06 /* ChekinanaCommandExecutor.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A07 /* ChekinanaIdolEnrichmentClient.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A08 /* ChekinanaAlbumPickerStateMachine.swift in Sources */,
+				1A1A1A1A1A1A1A1A1A1A1A09 /* ChekinanaNaturalLanguageTranslator.swift in Sources */,
+				3C3C3C3C3C3C3C3C3C3C3C01 /* ChekinanaChekiIndexing.swift in Sources */,
+				5E5E5E5E5E5E5E5E5E5E5E01 /* ChekinanaNLInterpretClient.swift in Sources */,
+				5E5E5E5E5E5E5E5E5E5E5E02 /* ChekinanaConversationCoordinator.swift in Sources */,
+				7F7F7F7F7F7F7F7F7F7F7F01 /* ChekinanaEventCandidate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2B2B2B2B2B2B2B2B2B2B2B50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2B2B2B2B2B2B2B2B2B2B2B01 /* ChekinanaNaturalLanguageUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */,
+				5E5E5E5E5E5E5E5E5E5E5E03 /* ChekinanaNLInterpretClientTests.swift in Sources */,
+				5E5E5E5E5E5E5E5E5E5E5E04 /* ChekinanaConversationCoordinatorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		2B2B2B2B2B2B2B2B2B2B2B30 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A1A1A1A1A1A1A1A1A1A1A40 /* Chekinana */;
+			targetProxy = 2B2B2B2B2B2B2B2B2B2B2B20 /* PBXContainerItemProxy */;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D30 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A1A1A1A1A1A1A1A1A1A1A40 /* Chekinana */;
+			targetProxy = 4D4D4D4D4D4D4D4D4D4D4D20 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
 		1A1A1A1A1A1A1A1A1A1A1A71 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = T7R6XV8X47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Chekinana/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -165,15 +363,17 @@
 		};
 		1A1A1A1A1A1A1A1A1A1A1A72 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = T7R6XV8X47;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Chekinana/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -242,7 +442,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -297,12 +497,106 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		2B2B2B2B2B2B2B2B2B2B2B71 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T7R6XV8X47;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.chekinana.ios.UITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Chekinana;
+			};
+			name = Debug;
+		};
+		2B2B2B2B2B2B2B2B2B2B2B72 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T7R6XV8X47;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.chekinana.ios.UITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Chekinana;
+			};
+			name = Release;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D71 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T7R6XV8X47;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.chekinana.ios.Tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Chekinana.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Chekinana";
+			};
+			name = Debug;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D72 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = T7R6XV8X47;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.chekinana.ios.Tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Chekinana.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Chekinana";
 			};
 			name = Release;
 		};
@@ -323,6 +617,24 @@
 			buildConfigurations = (
 				1A1A1A1A1A1A1A1A1A1A1A81 /* Debug */,
 				1A1A1A1A1A1A1A1A1A1A1A82 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2B2B2B2B2B2B2B2B2B2B2B70 /* Build configuration list for PBXNativeTarget "ChekinanaUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2B2B2B2B2B2B2B2B2B2B2B71 /* Debug */,
+				2B2B2B2B2B2B2B2B2B2B2B72 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		4D4D4D4D4D4D4D4D4D4D4D70 /* Build configuration list for PBXNativeTarget "ChekinanaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4D4D4D4D4D4D4D4D4D4D4D71 /* Debug */,
+				4D4D4D4D4D4D4D4D4D4D4D72 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

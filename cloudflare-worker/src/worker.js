@@ -1,6 +1,12 @@
+import { interpretNaturalLanguage } from "./nl-interpreter.js";
+import {
+  EVENT_ENDPOINT,
+  extractWeiboCandidateRequest,
+} from "./event-weibo-extractor.js";
+
 const RUNPOD_HTTP_PORT = 8080;
 
-function json(body, status = 200) {
+function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
@@ -8,6 +14,7 @@ function json(body, status = 200) {
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,OPTIONS",
       "access-control-allow-headers": "content-type,x-cheki-token",
+      ...extraHeaders,
     },
   });
 }
@@ -47,45 +54,62 @@ function copyHeaders(request) {
   return headers;
 }
 
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
+export async function handleRequest(request, env = {}, fetchImpl = fetch) {
+  const url = new URL(request.url);
 
-    if (request.method === "OPTIONS") {
-      return json({ ok: true });
-    }
+  if (request.method === "OPTIONS") {
+    const headers = (url.pathname === "/api/nl/interpret" || url.pathname === EVENT_ENDPOINT)
+      ? { "cache-control": "no-store" }
+      : {};
+    return json({ ok: true }, 200, headers);
+  }
 
-    const podId = normalizePodId(getRequestToken(request, url));
-    if (!podId) {
-      return json({ ok: false, error: "Token 无效或已过期" }, 401);
-    }
+  if (url.pathname === "/api/nl/interpret") {
+    const result = await interpretNaturalLanguage(request, env, { fetchImpl });
+    return json(result.body, result.status, { "cache-control": "no-store" });
+  }
 
-    const upstreamUrl = new URL(request.url);
-    upstreamUrl.protocol = "https:";
-    upstreamUrl.hostname = `${podId}-${RUNPOD_HTTP_PORT}.proxy.runpod.net`;
-    upstreamUrl.port = "";
+  if (url.pathname === EVENT_ENDPOINT) {
+    const result = await extractWeiboCandidateRequest(request, env, { fetchImpl });
+    return json(result.body, result.status, { "cache-control": "no-store" });
+  }
 
-    const upstreamRequest = new Request(upstreamUrl.toString(), {
-      method: request.method,
-      headers: copyHeaders(request),
-      body: request.body,
-      redirect: "manual",
+  const podId = normalizePodId(getRequestToken(request, url));
+  if (!podId) {
+    return json({ ok: false, error: "Token 无效或已过期" }, 401);
+  }
+
+  const upstreamUrl = new URL(request.url);
+  upstreamUrl.protocol = "https:";
+  upstreamUrl.hostname = `${podId}-${RUNPOD_HTTP_PORT}.proxy.runpod.net`;
+  upstreamUrl.port = "";
+
+  const upstreamRequest = new Request(upstreamUrl.toString(), {
+    method: request.method,
+    headers: copyHeaders(request),
+    body: request.body,
+    redirect: "manual",
+  });
+
+  try {
+    const upstreamResponse = await fetchImpl(upstreamRequest);
+    const responseHeaders = new Headers(upstreamResponse.headers);
+    responseHeaders.set("access-control-allow-origin", "*");
+    responseHeaders.set("access-control-allow-methods", "GET,POST,OPTIONS");
+    responseHeaders.set("access-control-allow-headers", "content-type,x-cheki-token");
+
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers: responseHeaders,
     });
+  } catch (error) {
+    return json({ ok: false, error: `RunPod proxy failed: ${error.message}` }, 502);
+  }
+}
 
-    try {
-      const upstreamResponse = await fetch(upstreamRequest);
-      const responseHeaders = new Headers(upstreamResponse.headers);
-      responseHeaders.set("access-control-allow-origin", "*");
-      responseHeaders.set("access-control-allow-methods", "GET,POST,OPTIONS");
-      responseHeaders.set("access-control-allow-headers", "content-type,x-cheki-token");
-
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: responseHeaders,
-      });
-    } catch (error) {
-      return json({ ok: false, error: `RunPod proxy failed: ${error.message}` }, 502);
-    }
+export default {
+  async fetch(request, env = {}) {
+    return handleRequest(request, env);
   },
 };

@@ -1,0 +1,105 @@
+[
+  {
+    "id": "percent-encoded-status",
+    "url": "https://weibo.com/1234567890/%41bC",
+    "valid": true,
+    "user": "1234567890",
+    "status": "AbC"
+  },
+  {
+    "id": "uppercase-scheme-and-host",
+    "url": "HTTPS://WEIBO.COM/CaseSensitiveUser/AbC123",
+    "valid": true,
+    "user": "CaseSensitiveUser",
+    "status": "AbC123"
+  },
+  {
+    "id": "host-latin-capital-i-with-dot",
+    "url": "https://weİbo.com/user/AbC123",
+    "valid": false
+  },
+  {
+    "id": "host-latin-dotless-i",
+    "url": "https://weıbo.com/user/AbC123",
+    "valid": false
+  },
+  {
+    "id": "unicode-user",
+    "url": "https://weibo.com/测试用户/AbC123",
+    "valid": true,
+    "user": "测试用户",
+    "status": "AbC123"
+  },
+  {
+    "id": "percent-encoded-unicode-user",
+    "url": "https://weibo.com/%E6%B5%8B%E8%AF%95%E7%94%A8%E6%88%B7/AbC123",
+    "valid": true,
+    "user": "测试用户",
+    "status": "AbC123"
+  },
+  {
+    "id": "decoded-user-slash",
+    "url": "https://weibo.com/foo%2Fbar/AbC123",
+    "valid": false
+  },
+  {
+    "id": "raw-dot-user",
+    "url": "https://weibo.com/./AbC",
+    "valid": false
+  },
+  {
+    "id": "raw-dotdot-user",
+    "url": "https://weibo.com/../AbC",
+    "valid": false
+  },
+  {
+    "id": "encoded-dotdot-user",
+    "url": "https://weibo.com/%2e%2e/AbC",
+    "valid": false
+  },
+  {
+    "id": "raw-backslash-user",
+    "url": "https://weibo.com/foo\\bar/AbC",
+    "valid": false
+  },
+  {
+    "id": "encoded-backslash-user",
+    "url": "https://weibo.com/foo%5Cbar/AbC",
+    "valid": false
+  },
+  {
+    "id": "invalid-percent-user",
+    "url": "https://weibo.com/foo%ZZbar/AbC123",
+    "valid": false
+  },
+  {
+    "id": "invalid-percent-status",
+    "url": "https://weibo.com/user/Ab%ZZ",
+    "valid": false
+  },
+  {
+    "id": "invalid-utf8-user",
+    "url": "https://weibo.com/%C0%AF/AbC123",
+    "valid": false
+  },
+  {
+    "id": "invalid-utf8-status",
+    "url": "https://weibo.com/user/%C0%AF",
+    "valid": false
+  },
+  {
+    "id": "encoded-c0-user",
+    "url": "https://weibo.com/foo%00bar/AbC123",
+    "valid": false
+  },
+  {
+    "id": "encoded-del-user",
+    "url": "https://weibo.com/foo%7Fbar/AbC123",
+    "valid": false
+  },
+  {
+    "id": "raw-c0-user",
+    "url": "https://weibo.com/foo\u0001bar/AbC123",
+    "valid": false
+  }
+]

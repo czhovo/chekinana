@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import UIKit
 
 final class StatusBarHostingController<Content: View>: UIHostingController<Content> {
@@ -23,8 +24,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
 
+#if DEBUG
+        ChekinanaDataStore.resetForUITestingIfRequested()
+#endif
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = StatusBarHostingController(rootView: ContentView())
+        window.rootViewController = StatusBarHostingController(
+            rootView: ContentView()
+                .modelContainer(ChekinanaDataStore.shared)
+        )
         self.window = window
         window.makeKeyAndVisible()
     }
