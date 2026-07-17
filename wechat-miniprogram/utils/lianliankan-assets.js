@@ -70,7 +70,7 @@ function readTextFile(filePath, apiName, url) {
 
 function saveFile(tempFilePath, url) {
   return new Promise((resolve, reject) => {
-    wx.saveFile({
+    wx.getFileSystemManager().saveFile({
       tempFilePath,
       success: (res) => {
         if (res.savedFilePath) {

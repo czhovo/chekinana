@@ -40,7 +40,21 @@
       </block>
       <view wx:else class="placeholder">
         <view class="placeholder-icon">+</view>
-        <view>选择或添加最多 9 张图片</view>
+        <view class="polaroid-reference-row">
+          <view class="polaroid-reference-item">
+            <view class="polaroid-reference-card mini">
+              <view class="polaroid-reference-image"></view>
+            </view>
+            <view class="polaroid-reference-label">mini</view>
+          </view>
+          <view class="polaroid-reference-item">
+            <view class="polaroid-reference-card wide">
+              <view class="polaroid-reference-image"></view>
+            </view>
+            <view class="polaroid-reference-label">wide</view>
+          </view>
+        </view>
+        <view class="placeholder-helper emphasis">所有的拍立得应按图示方向摆放且不要重叠</view>
         <view class="placeholder-helper">单次处理的拍立得数量不应超过50张</view>
       </view>
     </view>
@@ -116,50 +130,6 @@
     <view wx:else class="empty-results">
       <view>提取到的拍立得图片会显示在这里</view>
       <view class="empty-subtitle">点击结果图片即可保存到相册</view>
-    </view>
-
-    <view class="contact-link" bindtap="contactAuthor">联系作者</view>
-  </view>
-
-  <view wx:if="{{showContactDialog}}" class="contact-dialog-mask" catchtap="cancelContactDialog" catchtouchmove="noop">
-    <view class="contact-dialog" catchtap="noop">
-      <view class="contact-dialog-header">
-        <view>
-          <view class="contact-dialog-title">联系作者</view>
-          <view class="contact-dialog-subtitle">写下想反馈的问题或想法</view>
-        </view>
-        <view class="contact-dialog-close" catchtap="cancelContactDialog">×</view>
-      </view>
-
-      <view class="contact-field">
-        <view class="contact-label">留言内容</view>
-        <textarea
-          class="contact-message-input"
-          value="{{contactMessage}}"
-          maxlength="1000"
-          bindinput="onContactMessageInput"
-          disabled="{{contactSubmitting}}"
-          show-confirm-bar="{{false}}"
-          cursor-spacing="24"
-        ></textarea>
-      </view>
-
-      <view class="contact-field">
-        <view class="contact-label optional">联系方式（可选）</view>
-        <input
-          class="contact-info-input"
-          value="{{contactInfo}}"
-          maxlength="200"
-          bindinput="onContactInfoInput"
-          disabled="{{contactSubmitting}}"
-          confirm-type="done"
-        />
-      </view>
-
-      <view class="contact-dialog-actions">
-        <button class="contact-dialog-button" bindtap="cancelContactDialog" disabled="{{contactSubmitting}}">取消</button>
-        <button class="contact-dialog-button primary" bindtap="submitContactDialog" loading="{{contactSubmitting}}" disabled="{{contactSubmitting}}">发送</button>
-      </view>
     </view>
   </view>
 </view>

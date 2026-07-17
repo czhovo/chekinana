@@ -1,4 +1,4 @@
-﻿const { findConnectionPath } = require('./board-generator')
+const { findConnectionPath } = require('./board-generator')
 
 const { solveBoard } = require('./board-generator')
 const PRESET_BOARDS = require('./board-presets')
@@ -85,7 +85,7 @@ function downloadFile(url, apiName = 'downloadFile') {
 
 function saveFile(tempFilePath, url) {
   return new Promise((resolve, reject) => {
-    wx.saveFile({
+    wx.getFileSystemManager().saveFile({
       tempFilePath,
       success: (res) => {
         if (res.savedFilePath) {

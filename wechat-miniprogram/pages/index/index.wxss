@@ -257,11 +257,73 @@
   line-height: 82rpx;
 }
 
+.polaroid-reference-row {
+  width: 100%;
+  margin: 20rpx auto 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 34rpx;
+  transform: translateX(-8rpx);
+}
+
+.polaroid-reference-item {
+  width: 124rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.polaroid-reference-card {
+  position: relative;
+  border: 2rpx solid #c7ccd4;
+  background: #ffffff;
+  box-sizing: border-box;
+}
+
+.polaroid-reference-card.mini {
+  width: 62rpx;
+  height: 100rpx;
+}
+
+.polaroid-reference-card.wide {
+  width: 124rpx;
+  height: 100rpx;
+}
+
+.polaroid-reference-image {
+  position: absolute;
+  left: 7%;
+  top: 8%;
+  width: 86%;
+  height: 72%;
+  background: #c7ccd4;
+}
+
+.polaroid-reference-card.wide .polaroid-reference-image {
+  left: 4%;
+  top: 8%;
+  width: 92%;
+  height: 72%;
+}
+
+.polaroid-reference-label {
+  margin-top: 8rpx;
+  color: #4b5563;
+  font-size: 22rpx;
+  line-height: 1.2;
+}
+
 .placeholder-helper {
   margin-top: 10rpx;
   color: #a0a6b0;
   font-size: 24rpx;
   line-height: 1.35;
+}
+
+.placeholder-helper.emphasis {
+  color: #a0a6b0;
+  font-weight: 600;
 }
 
 .selected-image-strip {
@@ -551,160 +613,4 @@
 .empty-subtitle {
   color: #b3b8c1;
   font-size: 24rpx;
-}
-
-.contact-link {
-  margin-top: 22rpx;
-  color: #4b5563;
-  font-size: 26rpx;
-  text-align: center;
-  text-decoration: underline;
-}
-
-.contact-dialog-mask {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 20;
-  padding: 40rpx 28rpx;
-  background: rgba(17, 24, 39, 0.48);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-}
-
-.contact-dialog {
-  width: 100%;
-  max-width: 680rpx;
-  padding: 28rpx;
-  border-radius: 12rpx;
-  background: #ffffff;
-  border: 2rpx solid #e5e7eb;
-  box-sizing: border-box;
-}
-
-.contact-dialog-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20rpx;
-  margin-bottom: 24rpx;
-}
-
-.contact-dialog-title {
-  color: #202124;
-  font-size: 32rpx;
-  font-weight: 700;
-  line-height: 1.3;
-}
-
-.contact-dialog-subtitle {
-  margin-top: 6rpx;
-  color: #6b7280;
-  font-size: 24rpx;
-  line-height: 1.4;
-}
-
-.contact-dialog-close {
-  width: 52rpx;
-  height: 52rpx;
-  min-width: 52rpx;
-  color: #6b7280;
-  font-size: 44rpx;
-  line-height: 46rpx;
-  text-align: center;
-}
-
-.contact-field {
-  margin-bottom: 20rpx;
-}
-
-.contact-label {
-  margin-bottom: 10rpx;
-  color: #374151;
-  font-size: 26rpx;
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.contact-label.optional {
-  color: #4b5563;
-  font-weight: 500;
-}
-
-.contact-message-input,
-.contact-info-input {
-  width: 100%;
-  padding: 18rpx 20rpx;
-  border: 2rpx solid #d9dde5;
-  border-radius: 12rpx;
-  background: #f8fafc;
-  color: #111827;
-  font-size: 28rpx;
-  line-height: 1.45;
-  box-sizing: border-box;
-}
-
-.contact-message-input {
-  height: 220rpx;
-}
-
-.contact-info-input {
-  height: 76rpx;
-}
-
-.contact-dialog-actions {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: stretch;
-  gap: 18rpx;
-  margin-top: 26rpx;
-  box-sizing: border-box;
-}
-
-.contact-dialog-actions .contact-dialog-button,
-.contact-dialog-actions button.contact-dialog-button {
-  flex: 1 1 0%;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  height: 82rpx;
-  margin: 0;
-  padding: 0;
-  border-radius: 12rpx;
-  background: #ffffff;
-  color: #1f2937;
-  border: 2rpx solid #d9dde5;
-  font-size: 28rpx;
-  font-weight: 600;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-.contact-dialog-actions .contact-dialog-button::after,
-.contact-dialog-actions button.contact-dialog-button::after {
-  display: none;
-  border: 0;
-}
-
-.contact-dialog-actions .contact-dialog-button.primary,
-.contact-dialog-actions button.contact-dialog-button.primary {
-  background: #2563eb;
-  color: #ffffff;
-  border-color: #2563eb;
-}
-
-.contact-dialog-actions .contact-dialog-button[disabled],
-.contact-dialog-actions button.contact-dialog-button[disabled] {
-  color: #a5abb5;
-  background: #eef0f4;
-  border-color: #eef0f4;
 }

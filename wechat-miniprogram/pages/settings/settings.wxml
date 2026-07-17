@@ -3,10 +3,102 @@
     <view class="placeholder-kicker">Chekinana</view>
     <view class="placeholder-title">Settings</view>
     <view class="placeholder-text">Settings and account actions.</view>
+    <view class="settings-session">
+      <view class="settings-session-title">微信登录</view>
+      <view class="settings-session-status {{hasUserSession ? 'is-logged-in' : 'is-logged-out'}}">
+        {{hasUserSession ? '已登录' : '未登录'}}
+      </view>
+      <view class="settings-session-message settings-session-message--{{wechatLoginStatusKind}}">
+        {{wechatLoginStatus}}
+      </view>
+      <view wx:if="{{hasUserSession && userSessionUserId}}" class="settings-session-detail">
+        user_id: {{userSessionUserId}}
+      </view>
+      <view wx:if="{{hasUserSession && userSessionExpiresAt}}" class="settings-session-detail">
+        有效期: {{userSessionExpiresAt}}
+      </view>
+      <button
+        class="settings-action secondary compact"
+        loading="{{wechatLoggingIn}}"
+        disabled="{{wechatLoggingIn}}"
+        bindtap="loginWithWeChat"
+      >
+        {{wechatLoggingIn ? '登录中' : (hasUserSession ? '重新登录微信' : '微信登录')}}
+      </button>
+    </view>
+    <view class="settings-sync">
+      <view class="settings-sync-title">Data sync</view>
+      <view class="settings-sync-message settings-sync-message--{{syncStatusKind}}">
+        {{syncStatus}}
+      </view>
+      <view wx:if="{{syncCloudHash}}" class="settings-sync-detail">
+        cloudHash: {{syncCloudHash}}
+      </view>
+      <view wx:if="{{syncLastSyncedHash}}" class="settings-sync-detail">
+        lastSyncedHash: {{syncLastSyncedHash}}
+      </view>
+      <view wx:if="{{syncLastSyncedAt}}" class="settings-sync-detail">
+        lastSyncedAt: {{syncLastSyncedAt}}
+      </view>
+      <button
+        class="settings-action compact"
+        loading="{{syncSubmitting}}"
+        disabled="{{syncSubmitting}}"
+        bindtap="syncLocalUserData"
+      >
+        {{syncSubmitting ? 'Syncing' : 'Sync local data'}}
+      </button>
+    </view>
     <view class="settings-section">
       <button class="settings-action secondary" bindtap="openLianliankan">Lianliankan</button>
+      <button class="settings-action secondary" bindtap="openXiaoxiaole">Xiaoxiaole</button>
       <button class="settings-action secondary" bindtap="openIzaya7Map">izaya7's map</button>
     </view>
+    <view class="settings-contact-section">
+      <view class="contact-link" bindtap="contactAuthor">联系作者</view>
+    </view>
     <button class="settings-action" bindtap="returnToAuth">Verify Scanner again</button>
+  </view>
+
+  <view wx:if="{{showContactDialog}}" class="contact-dialog-mask" catchtap="cancelContactDialog" catchtouchmove="noop">
+    <view class="contact-dialog" catchtap="noop">
+      <view class="contact-dialog-header">
+        <view>
+          <view class="contact-dialog-title">联系作者</view>
+          <view class="contact-dialog-subtitle">写下想反馈的问题或想法</view>
+        </view>
+        <view class="contact-dialog-close" catchtap="cancelContactDialog">×</view>
+      </view>
+
+      <view class="contact-field">
+        <view class="contact-label">留言内容</view>
+        <textarea
+          class="contact-message-input"
+          value="{{contactMessage}}"
+          maxlength="1000"
+          bindinput="onContactMessageInput"
+          disabled="{{contactSubmitting}}"
+          show-confirm-bar="{{false}}"
+          cursor-spacing="24"
+        ></textarea>
+      </view>
+
+      <view class="contact-field">
+        <view class="contact-label optional">联系方式（可选）</view>
+        <input
+          class="contact-info-input"
+          value="{{contactInfo}}"
+          maxlength="200"
+          bindinput="onContactInfoInput"
+          disabled="{{contactSubmitting}}"
+          confirm-type="done"
+        />
+      </view>
+
+      <view class="contact-dialog-actions">
+        <button class="contact-dialog-button" bindtap="cancelContactDialog" disabled="{{contactSubmitting}}">取消</button>
+        <button class="contact-dialog-button primary" bindtap="submitContactDialog" loading="{{contactSubmitting}}" disabled="{{contactSubmitting}}">发送</button>
+      </view>
+    </view>
   </view>
 </view>

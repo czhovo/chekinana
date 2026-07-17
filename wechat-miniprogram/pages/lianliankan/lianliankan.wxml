@@ -18,8 +18,8 @@
     </view>
 
     <view class="board">
-      <block wx:for="{{board}}" wx:for-index="r" wx:for-item="row">
-        <block wx:for="{{row}}" wx:for-index="c" wx:for-item="tile">
+      <block wx:for="{{board}}" wx:for-index="r" wx:for-item="row" wx:key="index">
+        <block wx:for="{{row}}" wx:for-index="c" wx:for-item="tile" wx:key="index">
           <view
             class="cell {{selected.r === r && selected.c === c ? 'cell--active' : ''}} {{tile === 0 ? 'cell--empty' : ''}} {{tile > 0 ? tileBorderClasses[tile] : ''}}"
             data-index="{{r * cols + c}}"

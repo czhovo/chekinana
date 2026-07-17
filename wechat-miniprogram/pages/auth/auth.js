@@ -1,4 +1,10 @@
-const { AUTH_STORAGE_KEY, SCANNER_AUTH_PASSED_KEY, getApiBaseUrl, isLocalPreviewToken, normalizePodId } = require("../../utils/config");
+const {
+  AUTH_STORAGE_KEY,
+  SCANNER_AUTH_PASSED_KEY,
+  getApiBaseUrl,
+  isLocalPreviewToken,
+  normalizePodId
+} = require("../../utils/config");
 
 Page({
   data: {
@@ -6,13 +12,6 @@ Page({
     hideToken: true,
     verifying: false,
     errorText: ""
-  },
-
-  onLoad() {
-    const token = wx.getStorageSync(AUTH_STORAGE_KEY) || "";
-    if (token && !isLocalPreviewToken(token)) {
-      this.setData({ token });
-    }
   },
 
   onTokenInput(event) {
@@ -30,19 +29,6 @@ Page({
 
   verifyToken() {
     const rawToken = this.data.token;
-    if (rawToken === "izaya7") {
-      wx.navigateTo({ url: "/pages/izaya7-map/izaya7-map" });
-      return;
-    }
-    if (rawToken === "lianliankan") {
-      wx.navigateTo({ url: "/pages/lianliankan/lianliankan" });
-      return;
-    }
-    if (rawToken === "calendar") {
-      wx.switchTab({ url: "/pages/calendar/calendar" });
-      return;
-    }
-
     const token = normalizePodId(rawToken);
     const apiBaseUrl = getApiBaseUrl(token);
     if (!token || this.data.verifying) return;

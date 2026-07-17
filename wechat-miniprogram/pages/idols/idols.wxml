@@ -1,7 +1,169 @@
-<view class="placeholder-page with-bottom-nav">
-  <view class="placeholder-panel">
-    <view class="placeholder-kicker">Chekinana</view>
-    <view class="placeholder-title">Idols</view>
-    <view class="placeholder-text">这里会放成员相关内容。</view>
+<view class="idols-page with-bottom-nav">
+  <view class="lookup-shell">
+    <view class="lookup-heading">Weibo Lookup</view>
+    <view class="lookup-row">
+      <input
+        class="weibo-input"
+        value="{{weiboUrl}}"
+        placeholder="输入微博主页链接"
+        bindinput="onWeiboUrlInput"
+        confirm-type="search"
+        bindconfirm="onQueryTap"
+      />
+      <button class="query-button" loading="{{loading}}" disabled="{{loading}}" bindtap="onQueryTap">查询</button>
+    </view>
+
+    <view class="message status {{statusKind}}" wx:if="{{statusText}}">{{statusText}}</view>
+    <view class="message error" wx:if="{{errorText}}">{{errorText}}</view>
+    <view class="message empty" wx:if="{{emptyText}}">{{emptyText}}</view>
+
+    <view class="result-section" wx:if="{{profile}}">
+      <image class="avatar" wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" mode="aspectFill"></image>
+      <view class="profile-main">
+        <view class="profile-username" wx:if="{{profile.username}}">{{profile.username}}</view>
+        <view class="profile-meta-value" wx:if="{{profile.verification}}">{{profile.verification}}</view>
+      </view>
+      <button
+        class="add-idol-button"
+        data-record-id="{{profileMatchedRecordId}}"
+        bindtap="openIdolAddDialog"
+      >{{profileActionLabel}}</button>
+    </view>
+
+    <block wx:for="{{profileStoredRecords}}" wx:key="id">
+      <view class="result-section stored-result-section">
+        <image class="avatar" wx:if="{{item.avatarDisplayUrl}}" src="{{item.avatarDisplayUrl}}" mode="aspectFill"></image>
+        <view class="avatar" wx:else></view>
+        <view class="profile-main">
+          <view class="profile-username" wx:if="{{item.weiboUsername}}">{{item.weiboUsername}}</view>
+          <view class="profile-meta-value" wx:if="{{item.weiboVerification}}">{{item.weiboVerification}}</view>
+        </view>
+        <button class="add-idol-button" data-record-id="{{item.id}}" bindtap="openStoredIdolDialog">Modify</button>
+      </view>
+    </block>
+
+    <view class="field-list" wx:if="{{fields.length}}">
+      <block wx:for="{{fields}}" wx:key="label">
+        <view class="field-item">
+          <view class="field-label">{{item.label}}</view>
+          <view class="field-value">{{item.value}}</view>
+        </view>
+      </block>
+    </view>
+
+    <view class="idol-records-section">
+      <view class="idol-records-title">My Idols</view>
+      <view class="message status" wx:if="{{idolRecordsLoading}}">加载中</view>
+      <view class="message error" wx:if="{{idolRecordsStatusText}}">{{idolRecordsStatusText}}</view>
+      <view class="idol-record-list" wx:if="{{idolRecords.length}}">
+        <block wx:for="{{idolRecords}}" wx:key="id">
+          <view class="idol-record-card" data-record-id="{{item.id}}" bindlongpress="confirmDeleteIdolRecord">
+            <view class="idol-record-avatar-ring" style="{{item.colorRingStyle}}">
+              <image wx:if="{{item.avatarDisplayUrl}}" class="idol-record-avatar" src="{{item.avatarDisplayUrl}}" mode="aspectFill"></image>
+              <view wx:else class="idol-record-avatar idol-record-avatar-empty"></view>
+            </view>
+            <view class="idol-record-main">
+              <view class="idol-record-name">{{item.idolName}}</view>
+              <view class="idol-record-group">{{item.groupName}}</view>
+            </view>
+          </view>
+        </block>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showIdolAddDialog}}" class="idol-dialog-mask" catchtap="closeIdolAddDialog" catchtouchmove="noop">
+    <view class="idol-dialog" catchtap="noop">
+      <view class="idol-dialog-header">
+        <view class="idol-dialog-title">{{idolDialogTitle}}</view>
+      </view>
+
+      <view class="idol-dialog-body">
+        <view class="idol-form-row">
+          <view class="idol-avatar-picker" bindtap="chooseIdolAvatar">
+            <image
+              wx:if="{{idolAddAvatarUrl}}"
+              class="idol-avatar-image"
+              src="{{idolAddAvatarUrl}}"
+              mode="aspectFill"
+            ></image>
+            <view wx:else class="idol-avatar-placeholder">
+              <view class="idol-avatar-head"></view>
+              <view class="idol-avatar-body"></view>
+            </view>
+          </view>
+
+          <view class="idol-input-stack">
+            <view class="idol-input-box">
+              <view class="idol-input-label">Idol name</view>
+              <input
+                class="idol-input"
+                value="{{idolAddName}}"
+                bindinput="onIdolNameInput"
+                confirm-type="done"
+              />
+            </view>
+
+            <view class="idol-input-box">
+              <view class="idol-input-label">Group name</view>
+              <input
+                class="idol-input"
+                value="{{idolAddGroupName}}"
+                bindinput="onGroupNameInput"
+                confirm-type="done"
+              />
+            </view>
+          </view>
+        </view>
+
+        <view class="idol-color-grid">
+          <block wx:for="{{idolAddColorOptions}}" wx:key="id">
+            <button
+              class="idol-color-button {{item.selected ? 'selected' : ''}} {{item.isOther ? 'other' : ''}}"
+              data-index="{{index}}"
+              bindtap="toggleIdolColor"
+            >
+              <view
+                wx:if="{{!item.isOther}}"
+                class="idol-color-swatch"
+                style="background: {{item.value}};"
+              ></view>
+              <view wx:if="{{item.selected && !item.isOther}}" class="idol-color-check"></view>
+              <text wx:if="{{item.isOther}}">{{item.label}}</text>
+            </button>
+          </block>
+        </view>
+
+        <view class="idol-dialog-actions">
+          <button class="idol-cancel-button" bindtap="closeIdolAddDialog" disabled="{{idolAddSaving}}">Cancel</button>
+          <button class="idol-save-button" bindtap="submitIdolDialog" loading="{{idolAddSaving}}" disabled="{{idolAddSaving}}">Save</button>
+        </view>
+      </view>
+    </view>
+
+    <view wx:if="{{idolAddCustomPanelOpen}}" class="idol-color-picker-mask" catchtap="closeIdolColorPicker" catchtouchmove="noop">
+      <view class="idol-color-picker-dialog" catchtap="noop">
+        <view class="idol-custom-preview" style="background: rgb({{idolAddCustomColor.r}}, {{idolAddCustomColor.g}}, {{idolAddCustomColor.b}});"></view>
+        <view class="idol-rgb-row">
+          <view class="idol-rgb-label">R</view>
+          <slider class="idol-rgb-slider" min="0" max="255" step="1" value="{{idolAddCustomColor.r}}" data-channel="r" bindchange="onCustomColorSliderChange" />
+          <input class="idol-rgb-input" type="number" value="{{idolAddCustomColor.r}}" data-channel="r" bindinput="onCustomColorInput" />
+        </view>
+        <view class="idol-rgb-row">
+          <view class="idol-rgb-label">G</view>
+          <slider class="idol-rgb-slider" min="0" max="255" step="1" value="{{idolAddCustomColor.g}}" data-channel="g" bindchange="onCustomColorSliderChange" />
+          <input class="idol-rgb-input" type="number" value="{{idolAddCustomColor.g}}" data-channel="g" bindinput="onCustomColorInput" />
+        </view>
+        <view class="idol-rgb-row">
+          <view class="idol-rgb-label">B</view>
+          <slider class="idol-rgb-slider" min="0" max="255" step="1" value="{{idolAddCustomColor.b}}" data-channel="b" bindchange="onCustomColorSliderChange" />
+          <input class="idol-rgb-input" type="number" value="{{idolAddCustomColor.b}}" data-channel="b" bindinput="onCustomColorInput" />
+        </view>
+        <view class="idol-color-picker-actions">
+          <button class="idol-picker-cancel-button" bindtap="closeIdolColorPicker">Cancel</button>
+          <button class="idol-custom-add-button" bindtap="addCustomColor">Add</button>
+        </view>
+      </view>
+    </view>
   </view>
 </view>

@@ -1,7 +1,7 @@
 <view class="calendar-page with-bottom-nav">
   <view class="calendar-card">
     <view class="calendar-header">
-      <view class="month-button" bindtap="showPreviousMonth" aria-label="上一个月">
+      <view class="month-button" bindtap="showPreviousMonth" aria-label="上一月">
         <text class="month-arrow">‹</text>
       </view>
 
@@ -19,7 +19,7 @@
         </view>
       </picker>
 
-      <view class="month-button" bindtap="showNextMonth" aria-label="下一个月">
+      <view class="month-button" bindtap="showNextMonth" aria-label="下一月">
         <text class="month-arrow">›</text>
       </view>
     </view>
@@ -56,12 +56,130 @@
     <view class="selected-date-header">
       <view class="selected-date-title">{{selectedDateText}}</view>
       <view class="selected-date-actions">
-        <view class="date-action-hitbox">
+        <view class="date-action-hitbox" bindtap="openAddRecordDialog">
           <view class="date-action add-action">+</view>
         </view>
       </view>
     </view>
 
-    <view class="selected-records"></view>
+    <view class="selected-records">
+      <view
+        wx:for="{{selectedDateRecords}}"
+        wx:key="id"
+        class="calendar-record-card"
+        data-record-id="{{item.id}}"
+        bindtap="openRecordDetail"
+      >
+        <view class="record-avatars">
+          <view wx:if="{{!item.idolSnapshots.length}}" class="record-avatar-placeholder"></view>
+          <view wx:for="{{item.idolSnapshots}}" wx:for-item="idol" wx:key="id" class="record-avatar-wrap">
+            <image wx:if="{{idol.avatarUrl}}" class="record-avatar" src="{{idol.avatarUrl}}" mode="aspectFill"></image>
+            <view wx:else class="record-avatar-color" style="{{idol.colorRingStyle}}"></view>
+          </view>
+        </view>
+        <view class="record-card-body">
+          <view class="record-card-title">{{item.type}} x{{item.quantity}}</view>
+          <view wx:if="{{item.note}}" class="record-card-note">{{item.note}}</view>
+        </view>
+      </view>
+
+      <view wx:if="{{!selectedDateRecords.length}}" class="records-empty">No records</view>
+    </view>
+  </view>
+
+  <view wx:if="{{showRecordDialog}}" class="modal-mask" catchtap="closeRecordDialog">
+    <view class="record-dialog" catchtap="noop">
+      <view class="dialog-title">{{recordDialogTitle}}</view>
+
+      <view class="form-row">
+        <view class="form-label">Type</view>
+        <picker range="{{recordTypes}}" value="{{recordTypeIndex}}" bindchange="onRecordTypeChange">
+          <view class="form-picker">{{recordTypes[recordTypeIndex]}}</view>
+        </picker>
+      </view>
+
+      <view class="form-row">
+        <view class="form-label">Quantity</view>
+        <input class="form-input" type="number" value="{{recordQuantity}}" bindinput="onRecordQuantityInput" />
+      </view>
+
+      <view class="form-row">
+        <view class="form-label">Idols</view>
+        <view class="selected-idols">
+          <view
+            wx:for="{{recordSelectedIdols}}"
+            wx:key="id"
+            class="selected-idol"
+            data-idol-id="{{item.id}}"
+            bindtap="removeSelectedIdol"
+          >
+            <image wx:if="{{item.avatarUrl}}" class="selected-idol-avatar" src="{{item.avatarUrl}}" mode="aspectFill"></image>
+            <view wx:else class="selected-idol-avatar color-avatar" style="{{item.colorRingStyle}}"></view>
+          </view>
+          <view class="idol-add-button" bindtap="openIdolPicker">+</view>
+        </view>
+      </view>
+
+      <view class="form-row">
+        <view class="form-label">Note</view>
+        <textarea class="form-textarea" value="{{recordNote}}" bindinput="onRecordNoteInput" auto-height maxlength="200" />
+      </view>
+
+      <view class="dialog-actions">
+        <button class="dialog-button secondary" bindtap="closeRecordDialog">Cancel</button>
+        <button class="dialog-button primary" bindtap="saveRecordDialog">Save</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showIdolPicker}}" class="modal-mask top-mask" catchtap="closeIdolPicker">
+    <view class="idol-picker-dialog" catchtap="noop">
+      <view class="dialog-title">Select Idols</view>
+      <view class="idol-picker-list">
+        <view
+          wx:for="{{availableIdols}}"
+          wx:key="id"
+          class="idol-picker-item {{item.selected ? 'is-selected' : ''}}"
+          data-idol-id="{{item.id}}"
+          bindtap="toggleIdolSelection"
+        >
+          <image wx:if="{{item.avatarUrl}}" class="picker-avatar" src="{{item.avatarUrl}}" mode="aspectFill"></image>
+          <view wx:else class="picker-avatar color-avatar" style="{{item.colorRingStyle}}"></view>
+          <view class="picker-idol-text">
+            <view class="picker-idol-name">{{item.idolName}}</view>
+            <view class="picker-idol-group">{{item.groupName}}</view>
+          </view>
+          <view class="picker-check">{{item.selected ? '✓' : ''}}</view>
+        </view>
+        <view wx:if="{{!availableIdols.length}}" class="records-empty">No saved idols</view>
+      </view>
+      <view class="dialog-actions">
+        <button class="dialog-button secondary" bindtap="closeIdolPicker">Cancel</button>
+        <button class="dialog-button primary" bindtap="confirmIdolSelection">Done</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showRecordDetail}}" class="modal-mask" catchtap="closeRecordDetail">
+    <view class="record-dialog" catchtap="noop">
+      <view class="dialog-title">Record Detail</view>
+      <view class="detail-line">{{detailRecord.date}}</view>
+      <view class="detail-line">{{detailRecord.type}} x{{detailRecord.quantity}}</view>
+      <view class="detail-idols">
+        <view wx:for="{{detailRecord.idolSnapshots}}" wx:key="id" class="detail-idol">
+          <image wx:if="{{item.avatarUrl}}" class="detail-avatar" src="{{item.avatarUrl}}" mode="aspectFill"></image>
+          <view wx:else class="detail-avatar color-avatar" style="{{item.colorRingStyle}}"></view>
+          <view class="detail-idol-name">{{item.idolName}}</view>
+        </view>
+      </view>
+      <view wx:if="{{detailRecord.note}}" class="detail-note">{{detailRecord.note}}</view>
+      <view class="detail-meta">Created {{detailRecord.createdAt}}</view>
+      <view class="detail-meta">Updated {{detailRecord.updatedAt}}</view>
+      <view class="dialog-actions three-actions">
+        <button class="dialog-button secondary" bindtap="closeRecordDetail">Close</button>
+        <button class="dialog-button secondary" bindtap="modifyDetailRecord">Modify</button>
+        <button class="dialog-button danger" bindtap="deleteDetailRecord">Delete</button>
+      </view>
+    </view>
   </view>
 </view>

@@ -1,9 +1,13 @@
-const { AUTH_STORAGE_KEY, SCANNER_AUTH_PASSED_KEY, getApiBaseUrl, isLocalPreviewToken } = require("../../utils/config");
+const {
+  AUTH_STORAGE_KEY,
+  SCANNER_AUTH_PASSED_KEY,
+  getApiBaseUrl,
+  getUserSessionHeader,
+  isLocalPreviewToken
+} = require("../../utils/config");
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLL_COUNT = 180;
 const MAX_SELECTED_IMAGES = 9;
-const CONTACT_MESSAGE_MAX_LENGTH = 1000;
-const CONTACT_INFO_MAX_LENGTH = 200;
 const UPLOAD_TIMEOUT_MS = 15000;
 const UPLOAD_MAX_RETRIES = 3;
 const RESULT_DOWNLOAD_MAX_CONCURRENCY = 3;
@@ -39,10 +43,6 @@ Page({
     postprocessMode: DEFAULT_POSTPROCESS_MODE,
     expectedPolaroidCount: "",
     showCountInput: false,
-    showContactDialog: false,
-    contactMessage: "",
-    contactInfo: "",
-    contactSubmitting: false,
     failedImageIndexes: [],
     statusText: "请选择一张包含拍立得的图片",
     statusKind: "idle"
@@ -93,7 +93,10 @@ Page({
 
   getAuthHeader() {
     const token = this.getAuthToken();
-    return token ? { "X-Cheki-Token": token } : {};
+    return Object.assign(
+      token ? { "X-Cheki-Token": token } : {},
+      getUserSessionHeader()
+    );
   },
 
   verifyCachedToken(token) {
@@ -1617,15 +1620,6 @@ Page({
     wx.showToast({ title: message || "处理失败", icon: "none" });
   },
 
-  contactAuthor() {
-    this.setData({
-      showContactDialog: true,
-      contactMessage: "",
-      contactInfo: "",
-      contactSubmitting: false
-    });
-  },
-
   createSelectedImage(path) {
     return {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1674,84 +1668,6 @@ Page({
   },
 
   noop() {},
-
-  onContactMessageInput(event) {
-    this.setData({
-      contactMessage: String(event.detail.value || "").slice(0, CONTACT_MESSAGE_MAX_LENGTH)
-    });
-  },
-
-  onContactInfoInput(event) {
-    this.setData({
-      contactInfo: String(event.detail.value || "").slice(0, CONTACT_INFO_MAX_LENGTH)
-    });
-  },
-
-  cancelContactDialog() {
-    if (this.data.contactSubmitting) return;
-    this.resetContactDialogState();
-  },
-
-  resetContactDialogState() {
-    this.setData({
-      showContactDialog: false,
-      contactMessage: "",
-      contactInfo: "",
-      contactSubmitting: false
-    });
-  },
-
-  submitContactDialog() {
-    if (this.data.contactSubmitting) return;
-
-    const message = (this.data.contactMessage || "").trim();
-    const contact = (this.data.contactInfo || "").trim();
-    if (!message) {
-      wx.showToast({ title: "请输入内容", icon: "none" });
-      return;
-    }
-
-    this.sendContactMessage(message, contact);
-  },
-
-  sendContactMessage(message, contact) {
-    const apiBaseUrl = this.getApiBaseUrl();
-    const token = this.getAuthToken();
-    if (!apiBaseUrl || isLocalPreviewToken(token)) {
-      wx.showToast({ title: "请先使用有效 Token", icon: "none" });
-      return;
-    }
-
-    this.setData({ contactSubmitting: true });
-    wx.request({
-      url: `${apiBaseUrl}/api/contact`,
-      method: "POST",
-      header: Object.assign({
-        "content-type": "application/json"
-      }, this.getAuthHeader()),
-      data: { message, contact },
-      success: (res) => {
-        const ok = res.statusCode >= 200
-          && res.statusCode < 300
-          && res.data
-          && (res.data.ok === true || res.data.status === "sent");
-        if (ok) {
-          this.resetContactDialogState();
-          wx.showToast({ title: "已发送", icon: "success" });
-          return;
-        }
-        this.setData({ contactSubmitting: false });
-        wx.showToast({
-          title: (res.data && (res.data.error || res.data.message)) || "发送失败，请稍后重试",
-          icon: "none"
-        });
-      },
-      fail: () => {
-        this.setData({ contactSubmitting: false });
-        wx.showToast({ title: "发送失败，请稍后重试", icon: "none" });
-      }
-    });
-  },
 
   downloadAllResults() {
     const images = this.data.extractedImages || [];

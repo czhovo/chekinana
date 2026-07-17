@@ -1,0 +1,87 @@
+<view class="xiaoxiaole-page">
+  <view class="top-panel">
+    <view class="fighter player">
+      <view class="fighter-head">
+        <text class="fighter-name">玩家</text>
+        <text class="fighter-value">{{playerHp}} / 1000</text>
+      </view>
+      <view class="bar hp"><view class="bar-fill" style="width: {{playerHpPercent}}%;"></view></view>
+      <view class="fighter-head spirit-row">
+        <text class="fighter-name">精神力</text>
+        <text class="fighter-value">{{playerSpirit}} / 1000</text>
+      </view>
+      <view class="bar spirit"><view class="bar-fill" style="width: {{playerSpiritPercent}}%;"></view></view>
+    </view>
+
+    <view class="score-box">
+      <text class="score-label">SCORE</text>
+      <text class="score-value">{{score}}</text>
+      <text class="turn-label">T{{turn}} · 连锁{{comboText}}</text>
+    </view>
+
+    <view class="fighter npc">
+      <view class="fighter-head">
+        <text class="fighter-name">NPC</text>
+        <text class="fighter-value">{{npcHp}} / 20000</text>
+      </view>
+      <view class="bar npc-hp"><view class="bar-fill" style="width: {{npcHpPercent}}%;"></view></view>
+      <view class="npc-countdown">技能倒计时 {{npcCountdown}}</view>
+    </view>
+  </view>
+
+  <view class="skills-row">
+    <button
+      wx:for="{{skills}}"
+      wx:key="id"
+      class="skill-btn {{item.disabled || isAnimating ? 'disabled' : ''}}"
+      disabled="{{item.disabled || isAnimating}}"
+      data-index="{{index}}"
+      bindtap="handleSkillTap"
+    >
+      <text class="skill-name">{{item.name}}</text>
+      <text class="skill-desc">{{item.desc}}</text>
+      <text class="skill-cost">{{item.cost}}SP {{item.cooldownText}}</text>
+    </button>
+  </view>
+
+  <view class="board-wrap">
+    <view class="board">
+      <view
+        wx:for="{{board}}"
+        wx:key="id"
+        class="tile {{item.className}}"
+        data-index="{{index}}"
+        bindtouchstart="handleTileTouchStart"
+        bindtouchmove="handleTileTouchMove"
+        bindtouchend="handleTileTouchEnd"
+        bindtouchcancel="handleTileTouchEnd"
+        bindlongpress="handleTileLongPress"
+      >
+        <image wx:if="{{item.imageSrc}}" class="tile-icon" src="{{item.imageSrc}}" mode="aspectFit"></image>
+        <text wx:else class="tile-label">{{item.label}}</text>
+        <text wx:if="{{item.levelText}}" class="tile-badge">{{item.levelText}}</text>
+        <text wx:if="{{item.specialText}}" class="tile-badge special-badge">{{item.specialText}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="info-panel">
+    <view class="settlement-line">本次结算：{{settlementText}}</view>
+    <view class="npc-skill-title">NPC技能效果</view>
+    <view class="npc-skill-list">
+      <view wx:for="{{npcSkills}}" wx:key="name" class="npc-skill-item {{item.active ? 'active' : ''}}">
+        <text class="npc-skill-name">{{item.name}}</text>
+        <text class="npc-skill-effect">{{item.effect}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{gameOver}}" class="result-mask">
+    <view class="result-panel">
+      <text class="result-title">{{resultTitle}}</text>
+      <text class="result-grade">评级 {{resultGrade}}</text>
+      <text class="result-score">最终分数 {{score}}</text>
+      <button class="restart-btn" bindtap="handleRestart">再来一局</button>
+    </view>
+  </view>
+</view>
