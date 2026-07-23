@@ -20,8 +20,19 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ChekinanaScannerPodID</key>
 	<string>$(CHEKINANA_SCANNER_POD_ID)</string>
+	<key>ChekinanaScannerBaseURL</key>
+	<string>$(CHEKINANA_SCANNER_BASE_URL)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Chekinana uses your local network only when a Debug build connects to a Scanner service on your LAN.</string>
+#ifdef CHEKINANA_DEBUG_LOCAL_NETWORK
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+#endif
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Chekinana saves selected cheki images to your photo library.</string>
 	<key>UIApplicationSceneManifest</key>

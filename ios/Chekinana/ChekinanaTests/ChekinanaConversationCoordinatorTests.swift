@@ -276,11 +276,133 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(
             ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["listidol", "scancheki"],
+                configuredPodID: configuredValue,
+                dateAnnotationEnabled: true
+            ),
+            .ready([
+                "listidol",
+                "scancheki pod=\(configuredValue) date_annotation=true",
+            ])
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
                 ["scancheki pod=model-supplied"],
                 configuredPodID: configuredValue
             ),
             .rejected(.invalidScannerPlan)
         )
+    }
+
+    func testScannerBaseURLConfigurationFallbackNormalizationAndBuildPolicy() throws {
+        let productionURL = ChekinanaScannerConfiguration.productionBaseURL
+        for rawValue in [nil, "", "   ", "$(CHEKINANA_SCANNER_BASE_URL)"] as [String?] {
+            XCTAssertEqual(
+                ChekinanaScannerConfiguration.resolveBaseURL(
+                    rawValue,
+                    allowsInsecureLocalHTTP: false
+                ),
+                .resolved(productionURL)
+            )
+        }
+
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.resolveBaseURL(
+                "  https://scanner.example.test:9443/  ",
+                allowsInsecureLocalHTTP: false
+            ),
+            .resolved(try XCTUnwrap(URL(string: "https://scanner.example.test:9443")))
+        )
+
+        let debugLANURLs = [
+            "http://localhost:8787",
+            "http://scanner-pc:8787",
+            "http://scanner-pc.local:8787",
+            "http://10.2.3.4:8787",
+            "http://127.0.0.1:8787",
+            "http://172.16.0.1:8787",
+            "http://172.31.4.5:8787",
+            "http://192.168.50.20:8787",
+            "http://169.254.10.20:8787",
+            "http://[::1]:8787",
+            "http://[fd00::20]:8787",
+            "http://[fe80::20]:8787",
+        ]
+        for value in debugLANURLs {
+            guard case .resolved = ChekinanaScannerConfiguration.resolveBaseURL(
+                value,
+                allowsInsecureLocalHTTP: true
+            ) else {
+                return XCTFail("expected Debug LAN URL to be accepted: \(value)")
+            }
+            XCTAssertEqual(
+                ChekinanaScannerConfiguration.resolveBaseURL(
+                    value,
+                    allowsInsecureLocalHTTP: false
+                ),
+                .invalid,
+                "Release policy must reject HTTP: \(value)"
+            )
+        }
+
+#if DEBUG
+        XCTAssertTrue(ChekinanaScannerConfiguration.currentBuildAllowsInsecureLocalHTTP)
+#else
+        XCTAssertFalse(ChekinanaScannerConfiguration.currentBuildAllowsInsecureLocalHTTP)
+#endif
+    }
+
+    func testScannerBaseURLConfigurationRejectsUnsafeOrMalformedValues() {
+        let invalidValues = [
+            "http://8.8.8.8:8787",
+            "http://example.com:8787",
+            "http://0x08080808:8787",
+            "http://134744072:8787",
+            "http://010.010.010.010:8787",
+            "http://127.1:8787",
+            "http://0x7f.0.0.1:8787",
+            "http://2130706433:8787",
+            "http://172.32.0.1:8787",
+            "http://[2001:4860:4860::8888]:8787",
+            "http://[fe80::gg]:8787",
+            "http://[fe80::1.example.local]:8787",
+            "http://[fe80:::1]:8787",
+            "http://192.168.1.50:8787/api",
+            "https://scanner.example.test/api",
+            "https://user@scanner.example.test",
+            "https://scanner.example.test?mode=test",
+            "https://scanner.example.test#fragment",
+            "ftp://192.168.1.50",
+            "not a URL",
+        ]
+        for value in invalidValues {
+            XCTAssertEqual(
+                ChekinanaScannerConfiguration.resolveBaseURL(
+                    value,
+                    allowsInsecureLocalHTTP: true
+                ),
+                .invalid,
+                value
+            )
+        }
+    }
+
+    func testInvalidScannerBaseURLRejectsTypedScanBeforePhotoReadMessage() {
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki"],
+                configuredPodID: "scanner-test-123",
+                baseURLResolution: .invalid
+            ),
+            .rejected(.invalidScannerConfiguration)
+        )
+        let message =
+            ChekinanaTypedCommandPreparationFailure.invalidScannerConfiguration.userMessage
+        XCTAssertEqual(
+            message,
+            "扫描服务地址配置无效；未读取照片，也未发起扫描请求。"
+        )
+        XCTAssertFalse(message.contains("http"))
     }
 
     func testMissingOrMalformedScannerConfigurationRejectsBeforeExecutionWithoutDisclosure() {

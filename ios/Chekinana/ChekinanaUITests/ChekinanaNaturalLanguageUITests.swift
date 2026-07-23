@@ -78,6 +78,15 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         XCTAssertTrue(open.isHittable)
         XCTAssertGreaterThanOrEqual(open.frame.width, 44)
         XCTAssertGreaterThanOrEqual(open.frame.height, 44)
+        XCTAssertTrue((open.value as? String)?.contains("2026.07.04") == true)
+        let dateStatuses = app.staticTexts.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.cheki.date-annotation."
+            )
+        )
+        XCTAssertEqual(dateStatuses.count, 1)
+        XCTAssertEqual(dateStatuses.firstMatch.label, "手写日期：2026.07.04")
 
         let selectButtons = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.cheki.select.")

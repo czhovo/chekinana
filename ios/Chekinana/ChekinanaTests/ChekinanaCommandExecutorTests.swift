@@ -1,3 +1,4 @@
+import Foundation
 import SwiftData
 import UIKit
 import XCTest
@@ -22,6 +23,385 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(images.allSatisfy { UIImage(data: $0.data) != nil })
     }
 #endif
+
+    func testScannerDateAnnotationDefaultsOffAndOverlayGeometry() throws {
+        XCTAssertFalse(ChekinanaScannerDateAnnotationDefaults.isEnabled)
+
+        let edgeBox = try XCTUnwrap(ChekinanaChekiDateBoundingBox(
+            x1: 0,
+            y1: 0,
+            x2: 1_000,
+            y2: 1_000
+        ))
+        XCTAssertEqual(
+            ChekinanaChekiDateOverlayGeometry.annotationRect(
+                boundingBox: edgeBox,
+                imageSize: CGSize(width: 100, height: 100),
+                containerSize: CGSize(width: 100, height: 100)
+            ),
+            CGRect(x: 0, y: 0, width: 100, height: 100)
+        )
+        XCTAssertEqual(
+            ChekinanaChekiDateOverlayGeometry.annotationRect(
+                boundingBox: edgeBox,
+                imageSize: CGSize(width: 200, height: 100),
+                containerSize: CGSize(width: 100, height: 100)
+            ),
+            CGRect(x: 0, y: 25, width: 100, height: 50)
+        )
+        XCTAssertEqual(
+            ChekinanaChekiDateOverlayGeometry.annotationRect(
+                boundingBox: edgeBox,
+                imageSize: CGSize(width: 100, height: 200),
+                containerSize: CGSize(width: 100, height: 100)
+            ),
+            CGRect(x: 25, y: 0, width: 50, height: 100)
+        )
+        let insetBox = try XCTUnwrap(ChekinanaChekiDateBoundingBox(
+            x1: 100,
+            y1: 200,
+            x2: 900,
+            y2: 800
+        ))
+        XCTAssertEqual(
+            ChekinanaChekiDateOverlayGeometry.annotationRect(
+                boundingBox: insetBox,
+                imageSize: CGSize(width: 200, height: 100),
+                containerSize: CGSize(width: 100, height: 100)
+            ),
+            CGRect(x: 10, y: 35, width: 80, height: 30)
+        )
+        XCTAssertNil(ChekinanaChekiDateOverlayGeometry.annotationRect(
+            boundingBox: edgeBox,
+            imageSize: .zero,
+            containerSize: CGSize(width: 100, height: 100)
+        ))
+    }
+
+    func testScannerDateAnnotationHeaderParserStrictStates() throws {
+        func response(_ headers: [String: String]) -> HTTPURLResponse {
+            HTTPURLResponse(
+                url: URL(string: "https://api.chekinana.top/api/result/task/result")!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            )!
+        }
+
+        let full = ChekinanaScannerDateAnnotationHeaderParser.parse(
+            response: response([
+                "x-cheki-date-status": "detected",
+                "X-Cheki-Date-Text": "2026.07.04",
+                "X-Cheki-Date-Precision": "full_date",
+                "X-Cheki-Date-Bbox": "100,200,900,800",
+            ]),
+            isEnabled: true
+        )
+        guard case .detected(let fullAnnotation) = full else {
+            return XCTFail("expected full-date annotation")
+        }
+        XCTAssertEqual(fullAnnotation.text, "2026.07.04")
+        XCTAssertEqual(fullAnnotation.precision, .fullDate)
+        XCTAssertEqual(fullAnnotation.boundingBox.x1, 100)
+
+        let monthDay = ChekinanaScannerDateAnnotationHeaderParser.parse(
+            response: response([
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "02.29",
+                "X-Cheki-Date-Precision": "month_day",
+                "X-Cheki-Date-Bbox": "0,0,1000,1000",
+            ]),
+            isEnabled: true
+        )
+        guard case .detected(let monthDayAnnotation) = monthDay else {
+            return XCTFail("expected month-day annotation")
+        }
+        XCTAssertEqual(monthDayAnnotation.text, "02.29")
+        XCTAssertEqual(monthDayAnnotation.precision, .monthDay)
+
+        XCTAssertEqual(
+            ChekinanaScannerDateAnnotationHeaderParser.parse(
+                response: response(["X-Cheki-Date-Status": "not_detected"]),
+                isEnabled: true
+            ),
+            .notDetected
+        )
+        XCTAssertEqual(
+            ChekinanaScannerDateAnnotationHeaderParser.parse(
+                response: response([
+                    "X-Cheki-Date-Status": "unavailable",
+                    "X-Cheki-Date-Error": "upstream_unavailable",
+                ]),
+                isEnabled: true
+            ),
+            .unavailable
+        )
+        XCTAssertEqual(
+            ChekinanaScannerDateAnnotationHeaderParser.parse(
+                response: response([
+                    "X-Cheki-Date-Status": "detected",
+                    "X-Cheki-Date-Text": "2026.07.04",
+                    "X-Cheki-Date-Precision": "full_date",
+                    "X-Cheki-Date-Bbox": "100,200,900,800",
+                ]),
+                isEnabled: false
+            ),
+            .notRequested
+        )
+
+        let malformedHeaders: [[String: String]] = [
+            ["X-Cheki-Date-Status": "unknown"],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "2026.02.29",
+                "X-Cheki-Date-Precision": "full_date",
+                "X-Cheki-Date-Bbox": "100,200,900,800",
+            ],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "07.04",
+                "X-Cheki-Date-Precision": "full_date",
+                "X-Cheki-Date-Bbox": "100,200,900,800",
+            ],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "07.04",
+                "X-Cheki-Date-Precision": "month_day",
+                "X-Cheki-Date-Bbox": "100.0,200,900,800",
+            ],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "07.04",
+                "X-Cheki-Date-Precision": "month_day",
+                "X-Cheki-Date-Bbox": "100,200,900",
+            ],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "07.04",
+                "X-Cheki-Date-Precision": "month_day",
+                "X-Cheki-Date-Bbox": "100,200,1001,800",
+            ],
+            [
+                "X-Cheki-Date-Status": "detected",
+                "X-Cheki-Date-Text": "07.04",
+                "X-Cheki-Date-Precision": "month_day",
+                "X-Cheki-Date-Bbox": "900,200,100,800",
+            ],
+            [
+                "X-Cheki-Date-Status": "not_detected",
+                "X-Cheki-Date-Bbox": "100,200,900,800",
+            ],
+        ]
+        for headers in malformedHeaders {
+            XCTAssertEqual(
+                ChekinanaScannerDateAnnotationHeaderParser.parse(
+                    response: response(headers),
+                    isEnabled: true
+                ),
+                .unavailable,
+                "\(headers)"
+            )
+        }
+    }
+
+    func testScannerResultDownloadToggleURLTokenFailOpenAndNoRetry() async throws {
+        var requestCount = 0
+        let imageData = scannerPNGData(color: .orange)
+        ChekinanaScannerDateMockURLProtocol.handler = { request in
+            requestCount += 1
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://api.chekinana.top/api/result/task-a/result-a"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "X-Cheki-Token"),
+                "scanner-test-token"
+            )
+            return (
+                imageData,
+                [
+                    "X-Cheki-Date-Status": "detected",
+                    "X-Cheki-Date-Text": "2026.07.04",
+                    "X-Cheki-Date-Precision": "full_date",
+                    "X-Cheki-Date-Bbox": "100,200,900,800",
+                ]
+            )
+        }
+        defer { ChekinanaScannerDateMockURLProtocol.handler = nil }
+        let client = ChekinanaScannerClient(session: scannerDateMockSession())
+        let off = try await client.downloadResult(
+            taskID: "task-a",
+            resultID: "result-a",
+            options: scannerOptions(dateAnnotationEnabled: false)
+        )
+        XCTAssertEqual(off.data, imageData)
+        XCTAssertEqual(off.dateAnnotationState, .notRequested)
+        XCTAssertEqual(requestCount, 1)
+
+        requestCount = 0
+        ChekinanaScannerDateMockURLProtocol.handler = { request in
+            requestCount += 1
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://api.chekinana.top/api/result/task-b/result-b?date_annotation=1"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "X-Cheki-Token"),
+                "scanner-test-token"
+            )
+            return (
+                imageData,
+                [
+                    "X-Cheki-Date-Status": "detected",
+                    "X-Cheki-Date-Text": "07.04",
+                    "X-Cheki-Date-Precision": "month_day",
+                    // Malformed bbox must fail open without a second request.
+                    "X-Cheki-Date-Bbox": "100.0,200,900,800",
+                ]
+            )
+        }
+        let failOpen = try await client.downloadResult(
+            taskID: "task-b",
+            resultID: "result-b",
+            options: scannerOptions(dateAnnotationEnabled: true)
+        )
+        XCTAssertEqual(failOpen.data, imageData)
+        XCTAssertEqual(failOpen.dateAnnotationState, .unavailable)
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testScannerClientKeepsAnnotationWithMatchingResultID() async throws {
+        let firstImage = scannerPNGData(color: .red)
+        let secondImage = scannerPNGData(color: .blue)
+        var resultRequests: [String] = []
+        ChekinanaScannerDateMockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            switch path {
+            case "/api/process":
+                return (Data(#"{"task_id":"task-one"}"#.utf8), [:])
+            case "/api/status/task-one":
+                return (
+                    Data(#"{"status":"completed","results":[{"id":"first","type":"polaroid"},{"id":"second","type":"polaroid"}]}"#.utf8),
+                    [:]
+                )
+            case "/api/result/task-one/first":
+                resultRequests.append("first")
+                return (
+                    firstImage,
+                    [
+                        "X-Cheki-Date-Status": "detected",
+                        "X-Cheki-Date-Text": "2026.07.04",
+                        "X-Cheki-Date-Precision": "full_date",
+                        "X-Cheki-Date-Bbox": "100,200,900,800",
+                    ]
+                )
+            case "/api/result/task-one/second":
+                resultRequests.append("second")
+                return (
+                    secondImage,
+                    ["X-Cheki-Date-Status": "not_detected"]
+                )
+            default:
+                XCTFail("unexpected scanner URL: \(request.url?.absoluteString ?? "-")")
+                return (Data(), [:])
+            }
+        }
+        defer { ChekinanaScannerDateMockURLProtocol.handler = nil }
+
+        let result = try await ChekinanaScannerClient(
+            session: scannerDateMockSession()
+        ).process(
+            testImage(7),
+            options: scannerOptions(dateAnnotationEnabled: true)
+        )
+
+        XCTAssertEqual(resultRequests, ["first", "second"])
+        XCTAssertEqual(result.images.map(\.data), [firstImage, secondImage])
+        guard case .detected(let annotation) = result.images[0].dateAnnotationState else {
+            return XCTFail("first result lost its annotation")
+        }
+        XCTAssertEqual(annotation.text, "2026.07.04")
+        XCTAssertEqual(result.images[1].dateAnnotationState, .notDetected)
+    }
+
+    func testScannerClientUsesInjectedLANBaseURLForEveryRouteAndKeepsDateQuery() async throws {
+        let imageData = scannerPNGData(color: .cyan)
+        var requestedURLs: [String] = []
+        ChekinanaScannerDateMockURLProtocol.handler = { request in
+            requestedURLs.append(try XCTUnwrap(request.url?.absoluteString))
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "X-Cheki-Token"),
+                "scanner-test-token"
+            )
+            switch request.url?.path {
+            case "/api/process":
+                XCTAssertEqual(request.httpMethod, "POST")
+                return (Data(#"{"task_id":"lan-task"}"#.utf8), [:])
+            case "/api/status/lan-task":
+                return (
+                    Data(#"{"status":"completed","results":[{"id":"lan-result","type":"polaroid"}]}"#.utf8),
+                    [:]
+                )
+            case "/api/result/lan-task/lan-result":
+                XCTAssertEqual(request.url?.query, "date_annotation=1")
+                return (imageData, ["X-Cheki-Date-Status": "not_detected"])
+            default:
+                XCTFail("unexpected scanner URL")
+                return (Data(), [:])
+            }
+        }
+        defer { ChekinanaScannerDateMockURLProtocol.handler = nil }
+
+        let client = ChekinanaScannerClient(
+            baseURL: try XCTUnwrap(URL(string: "http://192.168.50.20:8787")),
+            session: scannerDateMockSession()
+        )
+        let result = try await client.process(
+            testImage(4),
+            options: scannerOptions(dateAnnotationEnabled: true)
+        )
+
+        XCTAssertEqual(requestedURLs, [
+            "http://192.168.50.20:8787/api/process",
+            "http://192.168.50.20:8787/api/status/lan-task",
+            "http://192.168.50.20:8787/api/result/lan-task/lan-result?date_annotation=1",
+        ])
+        XCTAssertEqual(result.images.map(\.data), [imageData])
+        XCTAssertEqual(result.images.first?.dateAnnotationState, .notDetected)
+    }
+
+    func testScannerClientInvalidConfiguredBaseURLFailsClosedBeforeRequest() async {
+        var requestWasMade = false
+        ChekinanaScannerDateMockURLProtocol.handler = { _ in
+            requestWasMade = true
+            return (Data(), [:])
+        }
+        defer { ChekinanaScannerDateMockURLProtocol.handler = nil }
+
+        let client = ChekinanaScannerClient(
+            infoDictionary: [
+                ChekinanaScannerConfiguration.baseURLInfoDictionaryKey:
+                    "http://example.com:8787",
+            ],
+            allowsInsecureLocalHTTP: true,
+            session: scannerDateMockSession()
+        )
+
+        do {
+            _ = try await client.downloadResult(
+                taskID: "task",
+                resultID: "result",
+                options: scannerOptions(dateAnnotationEnabled: true)
+            )
+            XCTFail("invalid configured base URL should fail closed")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "scanner base URL configuration is invalid"
+            )
+        }
+        XCTAssertFalse(requestWasMade)
+    }
 
     func testChekiPreviewLoaderPriorityFallbackAndUnavailableOutcomes() async throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { context in
@@ -285,6 +665,139 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(temporaryImages.allSatisfy { UIImage(data: $0.data) != nil })
         XCTAssertTrue(temporaryImages.allSatisfy { !sourceImages.map(\.data).contains($0.data) })
         XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+    }
+
+    func testScannerDateAnnotationPropagatesThroughConfirmationWithoutChangingImageOrGrouping() async throws {
+        let sourceResult = scannerPNGData(color: .purple)
+        let originalSourceResult = sourceResult
+        let reencodedSourceResult = await ChekinanaImageWorker.reencodedJPEGData(
+            from: sourceResult
+        )
+        let expectedSavedBytes = try XCTUnwrap(reencodedSourceResult)
+        let boundingBox = try XCTUnwrap(ChekinanaChekiDateBoundingBox(
+            x1: 120,
+            y1: 650,
+            x2: 880,
+            y2: 920
+        ))
+        let annotation = try XCTUnwrap(ChekinanaChekiDateAnnotation(
+            text: "07.04",
+            precision: .monthDay,
+            boundingBox: boundingBox
+        ))
+        let fixture = try makeFixture { _, options in
+            XCTAssertTrue(options.dateAnnotationEnabled)
+            return ChekinanaScannerProcessResult(
+                images: [
+                    ChekinanaScannerResultImage(
+                        data: sourceResult,
+                        dateAnnotationState: .detected(annotation)
+                    ),
+                ],
+                warningCount: 0
+            )
+        }
+        defer { cleanupManagedImages(in: fixture.context) }
+        let idol = Idol(name: "A")
+        let event = Event(name: "E", date: Date(timeIntervalSince1970: 1_700_000_000))
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        try fixture.context.save()
+
+        let scanResponse = await fixture.executor.execute(
+            "scancheki pod=testpod123 date_annotation=true",
+            pendingChekiImages: [testImage(1)]
+        )
+        guard case .chekiScannedCards(_, _, let scannedCards) = scanResponse,
+              let scannedCard = scannedCards.first else {
+            return XCTFail("expected one temporary scanner card")
+        }
+        XCTAssertEqual(scannedCard.dateAnnotationState, .detected(annotation))
+        let temporary = try fixture.ledger.resolveTemporaryCheki(shortID(scannedCard.id))
+        XCTAssertEqual(temporary.dateAnnotationState, .detected(annotation))
+        XCTAssertEqual(temporary.image.data, expectedSavedBytes)
+
+        let pendingResponse = await fixture.executor.execute(
+            "addscancheki \(shortID(temporary.id)) idol=\(shortID(idol.id)) event=\(shortID(event.id))"
+        )
+        guard case .pendingChekiCards(_, let pendingCards, _) = pendingResponse,
+              let pendingCard = pendingCards.first,
+              let confirmationCode = pendingCard.confirmationCode else {
+            return XCTFail("expected pending annotated Cheki")
+        }
+        XCTAssertEqual(pendingCard.dateAnnotationState, .detected(annotation))
+        try requireSuccess(await fixture.executor.execute("confirm \(confirmationCode)"))
+
+        let saved = try XCTUnwrap(
+            fixture.context.fetch(FetchDescriptor<Cheki>()).first
+        )
+        XCTAssertEqual(saved.handwrittenDateText, "07.04")
+        XCTAssertEqual(saved.handwrittenDateBboxX1, 120)
+        XCTAssertEqual(saved.handwrittenDateBboxY1, 650)
+        XCTAssertEqual(saved.handwrittenDateBboxX2, 880)
+        XCTAssertEqual(saved.handwrittenDateBboxY2, 920)
+        XCTAssertEqual(saved.handwrittenDateAnnotation, annotation)
+        XCTAssertEqual(saved.event?.id, event.id)
+        XCTAssertNil(saved.eventDate)
+        XCTAssertEqual(saved.idx, 1)
+        let savedURL = try XCTUnwrap(ChekiImageRefResolver.managedChekiFileURL(
+            for: saved.imageRef,
+            chekiID: saved.id
+        ))
+        XCTAssertEqual(try Data(contentsOf: savedURL), expectedSavedBytes)
+        XCTAssertEqual(sourceResult, originalSourceResult)
+    }
+
+    func testNonDetectedAndUnavailableAnnotationsNeverPersistDateFields() async throws {
+        for state in [
+            ChekinanaChekiDateAnnotationState.notDetected,
+            .unavailable,
+        ] {
+            let resultImage = scannerPNGData(color: .brown)
+            let fixture = try makeFixture { _, _ in
+                ChekinanaScannerProcessResult(
+                    images: [
+                        ChekinanaScannerResultImage(
+                            data: resultImage,
+                            dateAnnotationState: state
+                        ),
+                    ],
+                    warningCount: 0
+                )
+            }
+            let idol = Idol(name: "A")
+            let event = Event(name: "E")
+            fixture.context.insert(idol)
+            fixture.context.insert(event)
+            try fixture.context.save()
+
+            let scanResponse = await fixture.executor.execute(
+                "scancheki pod=testpod123 date_annotation=true",
+                pendingChekiImages: [testImage(1)]
+            )
+            guard case .chekiScannedCards(_, _, let scanCards) = scanResponse,
+                  let scanCard = scanCards.first else {
+                return XCTFail("expected temporary scanner result")
+            }
+            XCTAssertEqual(scanCard.dateAnnotationState, state)
+            let pendingResponse = await fixture.executor.execute(
+                "addscancheki \(shortID(scanCard.id)) idol=\(shortID(idol.id)) event=\(shortID(event.id))"
+            )
+            guard case .pendingChekiCards(_, let pendingCards, _) = pendingResponse,
+                  let code = pendingCards.first?.confirmationCode else {
+                return XCTFail("expected pending Cheki")
+            }
+            try requireSuccess(await fixture.executor.execute("confirm \(code)"))
+            let saved = try XCTUnwrap(
+                fixture.context.fetch(FetchDescriptor<Cheki>()).first
+            )
+            XCTAssertNil(saved.handwrittenDateText)
+            XCTAssertNil(saved.handwrittenDateBboxX1)
+            XCTAssertNil(saved.handwrittenDateBboxY1)
+            XCTAssertNil(saved.handwrittenDateBboxX2)
+            XCTAssertNil(saved.handwrittenDateBboxY2)
+            cleanupManagedImages(in: fixture.context)
+        }
     }
 
     func testScanFailureDoesNotFallbackToSourcesOrInsertPartialResults() async throws {
@@ -1058,6 +1571,25 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ChekinanaPendingChekiImage(data: Data([marker]), filenameExtension: "png")
     }
 
+    private func scannerOptions(
+        dateAnnotationEnabled: Bool
+    ) -> ChekinanaScannerOptions {
+        ChekinanaScannerOptions(
+            podID: "scanner-test-token",
+            expectedPolaroids: nil,
+            scannerSize: .auto,
+            postprocessMode: .off,
+            whiteBalance: true,
+            dateAnnotationEnabled: dateAnnotationEnabled
+        )
+    }
+
+    private func scannerDateMockSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaScannerDateMockURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
     private func scannerPNGData(color: UIColor) -> Data {
         UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { context in
             color.setFill()
@@ -1134,6 +1666,37 @@ private final class ChekinanaEventCandidateMockURLProtocol: URLProtocol, @unchec
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class ChekinanaScannerDateMockURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler:
+        ((URLRequest) throws -> (data: Data, headers: [String: String]))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let result = try handler(request)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: result.headers
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: result.data)
             client?.urlProtocolDidFinishLoading(self)
         } catch {
             client?.urlProtocol(self, didFailWithError: error)

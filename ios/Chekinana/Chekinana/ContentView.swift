@@ -55,6 +55,10 @@ enum ChekinanaGreetingLanguage {
     }
 }
 
+enum ChekinanaScannerDateAnnotationDefaults {
+    static let isEnabled = false
+}
+
 #if DEBUG
 @MainActor
 enum ChekinanaMediaUITestFixture {
@@ -82,7 +86,18 @@ enum ChekinanaMediaUITestFixture {
     }
 
     static func previewCard() -> ChekinanaChekiCard {
-        ChekinanaChekiCard(
+        let boundingBox = ChekinanaChekiDateBoundingBox(
+            x1: 120,
+            y1: 680,
+            x2: 880,
+            y2: 900
+        )!
+        let annotation = ChekinanaChekiDateAnnotation(
+            text: "2026.07.04",
+            precision: .fullDate,
+            boundingBox: boundingBox
+        )!
+        return ChekinanaChekiCard(
             id: UUID(),
             imageRef: nil,
             createdAt: Date(),
@@ -90,7 +105,8 @@ enum ChekinanaMediaUITestFixture {
             thumbnailImageData: pendingChekiImages()[0].data,
             idx: 1,
             idolNames: ["Preview Idol"],
-            eventName: "Preview Event"
+            eventName: "Preview Event",
+            dateAnnotationState: .detected(annotation)
         )
     }
 }
@@ -184,6 +200,8 @@ struct ContentView: View {
     @State private var activeNLRequest: PendingNaturalLanguageRequest?
     @State private var pendingNLRetry: PendingNaturalLanguageRequest?
     @State private var selectedChekiID: UUID?
+    @State private var isScannerDateAnnotationEnabled =
+        ChekinanaScannerDateAnnotationDefaults.isEnabled
     @FocusState private var isPromptFocused: Bool
 
     var body: some View {
@@ -880,36 +898,59 @@ struct ContentView: View {
     }
 
     private var selectedPhotosSummary: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "photo.on.rectangle")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Color(.secondaryLabel))
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color(.secondaryLabel))
 
-            Text("已选择 \(selectedItems.count) 张照片")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(.secondaryLabel))
-                .lineLimit(1)
-                .accessibilityLabel("已选择照片")
-                .accessibilityValue("\(selectedItems.count)")
-                .accessibilityIdentifier("chekinana.photos.summary")
+                Text("已选择 \(selectedItems.count) 张照片")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color(.secondaryLabel))
+                    .lineLimit(1)
+                    .accessibilityLabel("已选择照片")
+                    .accessibilityValue("\(selectedItems.count)")
+                    .accessibilityIdentifier("chekinana.photos.summary")
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
 
-            Button {
-                selectedItems = []
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color(.systemGray2))
-                    .frame(width: 24, height: 24)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+                Button {
+                    selectedItems = []
+                    isScannerDateAnnotationEnabled =
+                        ChekinanaScannerDateAnnotationDefaults.isEnabled
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(Color(.systemGray2))
+                        .frame(width: 24, height: 24)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+                .accessibilityLabel("清空已选照片")
             }
-            .buttonStyle(.plain)
+
+            Divider()
+                .padding(.horizontal, 10)
+
+            Toggle(isOn: $isScannerDateAnnotationEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("识别并标注手写日期")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.black)
+                    Text("开启后，每个提取结果会发送到 Qwen 日期识别。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(.secondaryLabel))
+                }
+            }
+            .toggleStyle(.switch)
             .disabled(isSubmitting)
-            .accessibilityLabel("清空已选照片")
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .accessibilityHint("仅影响 Scanner 提取结果；默认关闭")
+            .accessibilityIdentifier("chekinana.scanner.date-annotation")
         }
-        .padding(.horizontal, 10)
         .frame(minHeight: 44)
         .background(Color(.systemGray6))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1604,7 +1645,9 @@ struct ContentView: View {
     private func executeTypedCommands(_ commands: [String]) {
         switch ChekinanaScannerConfiguration.prepareTypedCommands(
             commands,
-            configuredPodID: ChekinanaScannerConfiguration.configuredPodID()
+            configuredPodID: ChekinanaScannerConfiguration.configuredPodID(),
+            baseURLResolution: ChekinanaScannerConfiguration.configuredBaseURL(),
+            dateAnnotationEnabled: isScannerDateAnnotationEnabled
         ) {
         case .ready(let preparedCommands):
             executeCommands(preparedCommands)
@@ -1646,6 +1689,8 @@ struct ContentView: View {
             }
             if output.consumesSelectedPhotos {
                 selectedItems = []
+                isScannerDateAnnotationEnabled =
+                    ChekinanaScannerDateAnnotationDefaults.isEnabled
             }
             if case .text(let text) = output, text.hasPrefix("已删除这张切") {
                 selectedChekiID = nil
@@ -2688,6 +2733,93 @@ struct ChekinanaChekiPreviewPresentationState: Equatable, Sendable {
     }
 }
 
+enum ChekinanaChekiDateOverlayGeometry {
+    static func fittedImageRect(
+        imageSize: CGSize,
+        containerSize: CGSize
+    ) -> CGRect? {
+        guard imageSize.width.isFinite,
+              imageSize.height.isFinite,
+              containerSize.width.isFinite,
+              containerSize.height.isFinite,
+              imageSize.width > 0,
+              imageSize.height > 0,
+              containerSize.width > 0,
+              containerSize.height > 0 else {
+            return nil
+        }
+        let scale = min(
+            containerSize.width / imageSize.width,
+            containerSize.height / imageSize.height
+        )
+        let fittedSize = CGSize(
+            width: imageSize.width * scale,
+            height: imageSize.height * scale
+        )
+        return CGRect(
+            x: (containerSize.width - fittedSize.width) / 2,
+            y: (containerSize.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+    }
+
+    static func annotationRect(
+        boundingBox: ChekinanaChekiDateBoundingBox,
+        imageSize: CGSize,
+        containerSize: CGSize
+    ) -> CGRect? {
+        guard let imageRect = fittedImageRect(
+            imageSize: imageSize,
+            containerSize: containerSize
+        ) else {
+            return nil
+        }
+        let x1 = imageRect.minX + imageRect.width * CGFloat(boundingBox.x1) / 1_000
+        let y1 = imageRect.minY + imageRect.height * CGFloat(boundingBox.y1) / 1_000
+        let x2 = imageRect.minX + imageRect.width * CGFloat(boundingBox.x2) / 1_000
+        let y2 = imageRect.minY + imageRect.height * CGFloat(boundingBox.y2) / 1_000
+        return CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1)
+    }
+}
+
+private struct ChekinanaChekiDateOverlay: View {
+    let annotation: ChekinanaChekiDateAnnotation
+    let imageSize: CGSize
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let rect = ChekinanaChekiDateOverlayGeometry.annotationRect(
+                boundingBox: annotation.boundingBox,
+                imageSize: imageSize,
+                containerSize: proxy.size
+            ) {
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .stroke(Color.green, lineWidth: 2)
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
+
+                    Text(annotation.text)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 2)
+                        .background(Color.green)
+                        .clipShape(RoundedRectangle(cornerRadius: 2))
+                        .fixedSize()
+                        .offset(
+                            x: max(2, min(rect.minX, proxy.size.width - 64)),
+                            y: max(2, rect.minY - 17)
+                        )
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct ChekiCardView: View {
     let cheki: ChekinanaChekiCard
     let isSelected: Bool
@@ -2730,6 +2862,40 @@ private struct ChekiCardView: View {
         ChekinanaChekiPreviewSource(cheki: cheki)
     }
 
+    private var dateAnnotationStatusText: String? {
+        switch cheki.dateAnnotationState {
+        case .notRequested:
+            nil
+        case .detected(let annotation):
+            "手写日期：\(annotation.text)"
+        case .notDetected:
+            "未识别到日期"
+        case .unavailable:
+            "日期识别不可用"
+        }
+    }
+
+    private var dateAnnotationStatusColor: Color {
+        if case .detected = cheki.dateAnnotationState {
+            return .green
+        }
+        return Color(.secondaryLabel)
+    }
+
+    private var dateAnnotationAccessibilityValue: String {
+        switch cheki.dateAnnotationState {
+        case .notRequested:
+            return "未启用手写日期识别"
+        case .detected(let annotation):
+            let box = annotation.boundingBox
+            return "识别到手写日期 \(annotation.text)，标注区域 \(box.x1)，\(box.y1)，\(box.x2)，\(box.y2)"
+        case .notDetected:
+            return "已识别，未检测到手写日期"
+        case .unavailable:
+            return "手写日期识别不可用，图片仍可使用"
+        }
+    }
+
     private var previewIsPresented: Binding<Bool> {
         Binding(
             get: { previewState.isPresented },
@@ -2755,6 +2921,15 @@ private struct ChekiCardView: View {
                         Image(decorative: renderedThumbnail.cgImage, scale: 1, orientation: .up)
                             .resizable()
                             .scaledToFit()
+                        if case .detected(let annotation) = cheki.dateAnnotationState {
+                            ChekinanaChekiDateOverlay(
+                                annotation: annotation,
+                                imageSize: CGSize(
+                                    width: renderedThumbnail.cgImage.width,
+                                    height: renderedThumbnail.cgImage.height
+                                )
+                            )
+                        }
                     } else {
                         Image(systemName: "photo")
                             .font(.system(size: 24, weight: .regular))
@@ -2779,6 +2954,7 @@ private struct ChekiCardView: View {
             .contentShape(Rectangle())
             .accessibilityLabel("查看 Cheki 大图")
             .accessibilityHint("打开全屏图片预览，不会选择或修改这张切")
+            .accessibilityValue(dateAnnotationAccessibilityValue)
             .accessibilityIdentifier("chekinana.cheki.preview.open.\(cheki.id.uuidString.lowercased())")
 
             if let associationText {
@@ -2793,6 +2969,16 @@ private struct ChekiCardView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Color(.secondaryLabel))
                     .lineLimit(2)
+            }
+
+            if let dateAnnotationStatusText {
+                Text(dateAnnotationStatusText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(dateAnnotationStatusColor)
+                    .lineLimit(2)
+                    .accessibilityIdentifier(
+                        "chekinana.cheki.date-annotation.\(cheki.id.uuidString.lowercased())"
+                    )
             }
 
             if cheki.confirmationCode == nil, cheki.idx != nil, let onSelect {

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwiftData
 
 enum ChekinanaTypedCommandPreparation: Equatable, Sendable {
@@ -8,20 +9,38 @@ enum ChekinanaTypedCommandPreparation: Equatable, Sendable {
 
 enum ChekinanaTypedCommandPreparationFailure: Equatable, Sendable {
     case scannerNotConfigured
+    case invalidScannerConfiguration
     case invalidScannerPlan
 
     var userMessage: String {
         switch self {
         case .scannerNotConfigured:
             "扫描服务尚未配置；未读取照片，也未发起扫描请求。"
+        case .invalidScannerConfiguration:
+            "扫描服务地址配置无效；未读取照片，也未发起扫描请求。"
         case .invalidScannerPlan:
             "扫描请求未通过本地安全校验；未读取照片，也未发起扫描请求。"
         }
     }
 }
 
+enum ChekinanaScannerBaseURLResolution: Equatable, Sendable {
+    case resolved(URL)
+    case invalid
+}
+
 enum ChekinanaScannerConfiguration {
     static let infoDictionaryKey = "ChekinanaScannerPodID"
+    static let baseURLInfoDictionaryKey = "ChekinanaScannerBaseURL"
+    static let productionBaseURL = URL(string: "https://api.chekinana.top")!
+
+    static var currentBuildAllowsInsecureLocalHTTP: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
 
     static func configuredPodID(bundle: Bundle = .main) -> String? {
         configuredPodID(infoDictionary: bundle.infoDictionary)
@@ -34,9 +53,70 @@ enum ChekinanaScannerConfiguration {
         return normalizedPodID(rawValue)
     }
 
+    static func configuredBaseURL(
+        bundle: Bundle = .main
+    ) -> ChekinanaScannerBaseURLResolution {
+        configuredBaseURL(
+            infoDictionary: bundle.infoDictionary,
+            allowsInsecureLocalHTTP: currentBuildAllowsInsecureLocalHTTP
+        )
+    }
+
+    static func configuredBaseURL(
+        infoDictionary: [String: Any]?,
+        allowsInsecureLocalHTTP: Bool
+    ) -> ChekinanaScannerBaseURLResolution {
+        let rawValue = infoDictionary?[baseURLInfoDictionaryKey] as? String
+        return resolveBaseURL(
+            rawValue,
+            allowsInsecureLocalHTTP: allowsInsecureLocalHTTP
+        )
+    }
+
+    static func resolveBaseURL(
+        _ rawValue: String?,
+        allowsInsecureLocalHTTP: Bool
+    ) -> ChekinanaScannerBaseURLResolution {
+        guard let rawValue else {
+            return .resolved(productionBaseURL)
+        }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !isUnresolvedBuildSetting(value) else {
+            return .resolved(productionBaseURL)
+        }
+        guard var components = URLComponents(string: value),
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.percentEncodedPath.isEmpty || components.percentEncodedPath == "/",
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host,
+              !host.isEmpty,
+              components.port.map({ (1...65_535).contains($0) }) ?? true,
+              scheme == "https"
+                || (
+                    scheme == "http"
+                    && allowsInsecureLocalHTTP
+                    && isPrivateLANHost(host)
+                ) else {
+            return .invalid
+        }
+
+        components.scheme = scheme
+        components.host = host.lowercased()
+        components.percentEncodedPath = ""
+        guard let url = components.url else {
+            return .invalid
+        }
+        return .resolved(url)
+    }
+
     static func prepareTypedCommands(
         _ commands: [String],
-        configuredPodID: String?
+        configuredPodID: String?,
+        baseURLResolution: ChekinanaScannerBaseURLResolution = .resolved(productionBaseURL),
+        dateAnnotationEnabled: Bool = false
     ) -> ChekinanaTypedCommandPreparation {
         var prepared: [String] = []
         prepared.reserveCapacity(commands.count)
@@ -55,15 +135,126 @@ enum ChekinanaScannerConfiguration {
             guard normalized == "scancheki" else {
                 return .rejected(.invalidScannerPlan)
             }
+            guard case .resolved = baseURLResolution else {
+                return .rejected(.invalidScannerConfiguration)
+            }
             guard let podID = configuredPodID.flatMap(normalizedPodID) else {
                 return .rejected(.scannerNotConfigured)
             }
             // `normalizedPodID` restricts this value to an unquoted parser-safe
             // token. This command is internal and is never echoed to the user.
-            prepared.append("scancheki pod=\(podID)")
+            let annotationArgument = dateAnnotationEnabled
+                ? " date_annotation=true"
+                : ""
+            prepared.append("scancheki pod=\(podID)\(annotationArgument)")
         }
 
         return .ready(prepared)
+    }
+
+    private static func isUnresolvedBuildSetting(_ value: String) -> Bool {
+        value.hasPrefix("$(") && value.hasSuffix(")")
+    }
+
+    private static func isPrivateLANHost(_ rawHost: String) -> Bool {
+        var host = rawHost.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") {
+            host.removeFirst()
+            host.removeLast()
+        }
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+
+        if host == "localhost" || host.hasSuffix(".localhost") {
+            return true
+        }
+        if let octets = strictIPv4Octets(host) {
+            return octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (16...31).contains(octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+        }
+        if host.contains(":") {
+            return isPrivateIPv6Literal(host)
+        }
+
+        guard !resemblesLegacyIPv4Address(host),
+              isValidLocalHostname(host) else {
+            return false
+        }
+        return (!host.contains(".") && host.contains(where: \.isLetter))
+            || host.hasSuffix(".local")
+    }
+
+    private static func strictIPv4Octets(_ host: String) -> [Int]? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else {
+            return nil
+        }
+        let octets = parts.compactMap { part -> Int? in
+            guard !part.isEmpty,
+                  part.utf8.allSatisfy({ (48...57).contains($0) }),
+                  part.count == 1 || part.first != "0",
+                  let value = Int(part),
+                  (0...255).contains(value) else {
+                return nil
+            }
+            return value
+        }
+        return octets.count == 4 ? octets : nil
+    }
+
+    private static func isPrivateIPv6Literal(_ host: String) -> Bool {
+        guard let address = IPv6Address(host) else {
+            return false
+        }
+        let bytes = [UInt8](address.rawValue)
+        guard bytes.count == 16 else {
+            return false
+        }
+
+        let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 }
+            && bytes.last == 1
+        let isUniqueLocal = bytes[0] & 0xfe == 0xfc
+        let isLinkLocal = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80
+        return isLoopback || isUniqueLocal || isLinkLocal
+    }
+
+    private static func resemblesLegacyIPv4Address(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...4).contains(parts.count), parts.allSatisfy({ !$0.isEmpty }) else {
+            return false
+        }
+        return parts.allSatisfy { part in
+            let lowered = part.lowercased()
+            if lowered.hasPrefix("0x") {
+                let digits = lowered.dropFirst(2)
+                return !digits.isEmpty && digits.allSatisfy(\.isHexDigit)
+            }
+            return lowered.utf8.allSatisfy { (48...57).contains($0) }
+        }
+    }
+
+    private static func isValidLocalHostname(_ host: String) -> Bool {
+        guard !host.isEmpty, host.utf8.count <= 253 else {
+            return false
+        }
+        return host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+            label in
+            guard !label.isEmpty,
+                  label.utf8.count <= 63,
+                  label.first?.isASCII == true,
+                  label.first?.isLetter == true || label.first?.isNumber == true,
+                  label.last?.isASCII == true,
+                  label.last?.isLetter == true || label.last?.isNumber == true else {
+                return false
+            }
+            return label.allSatisfy {
+                $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-")
+            }
+        }
     }
 
     private static func normalizedPodID(_ rawValue: String) -> String? {

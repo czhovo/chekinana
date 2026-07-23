@@ -13,6 +13,130 @@ forwards those requests to:
 https://<pod-id>-8080.proxy.runpod.net
 ```
 
+## Explicit local Scanner mode
+
+Local Windows GPU testing can replace only the Scanner upstream while keeping
+the same Worker routes. This mode is disabled by default and must be enabled
+only through local Worker environment values:
+
+```text
+CHEKINANA_SCANNER_LOCAL_MODE=true
+CHEKINANA_SCANNER_LOCAL_UPSTREAM=http://127.0.0.1:8080
+CHEKINANA_SCANNER_LOCAL_TOKEN=<local test secret>
+```
+
+The upstream accepts only an explicit `http://127.0.0.1:<port>` origin with no
+userinfo, path, query, or fragment. The local token must arrive in
+`X-Cheki-Token`; it is compared through fixed-length SHA-256 digests and is
+removed from headers, query parameters, and supported request bodies before the
+request reaches Python. Invalid, missing, or conflicting local configuration
+fails closed with the fixed `local_scanner_configuration_invalid` error.
+Unsupported local request bodies return `local_scanner_request_invalid`, and
+local connection failures return `local_scanner_upstream_unavailable`; neither
+response includes configuration or network details.
+
+Local proxying also removes `Forwarded`, `X-Forwarded-*`, `X-Real-IP`,
+Cloudflare client-IP headers, and related client-source headers. Local date
+annotation always charges the fixed `local-scanner` limiter key, so a LAN client
+cannot rotate forwarding headers to bypass the shared 5-per-60-second limit.
+
+The Python backend must separately set
+`CHEKINANA_TRUST_LOOPBACK_PROXY=true` and bind `HOST=127.0.0.1`. That backend
+mode trusts only the actual IPv4 loopback peer, never forwarding headers. Only
+Wrangler listens on the LAN. Do not add any of the local variables to
+`wrangler.toml` or a deployed Worker environment.
+
+Leaving all three local Scanner variables absent preserves the existing
+production `X-Cheki-Token` to RunPod behavior. The complete Windows setup,
+firewall, test, iOS Debug, and cleanup procedure is in
+[`docs/windows-lan-gpu-backend.md`](../docs/windows-lan-gpu-backend.md).
+
+## Optional handwritten-date annotation for one Scanner result
+
+The existing single-result download can opt into one Qwen date-recognition
+step:
+
+```text
+GET /api/result/<task-id>/<result-id>?date_annotation=1
+X-Cheki-Token: <scanner token>
+```
+
+Only that exact two-segment result route, a `GET`, and exactly one
+`date_annotation=1` query value enable annotation. The legacy
+`/api/result/<task-id>` route and all ordinary result, process, status, cancel,
+NL, and Event requests keep their existing behavior. The Worker removes the
+Worker-only `date_annotation` query before forwarding the result request to
+RunPod.
+
+The response status, content type, and body remain the original RunPod image
+response. Existing upstream headers are preserved apart from the Worker's
+existing CORS handling and the annotation-specific headers below:
+
+```text
+X-Cheki-Date-Status: detected
+X-Cheki-Date-Text: 2026.07.04
+X-Cheki-Date-Precision: full_date
+X-Cheki-Date-Bbox: 100,700,450,820
+```
+
+`X-Cheki-Date-Precision` is `full_date` for `YYYY.MM.DD` and `month_day` for
+`MM.DD`. Coordinates are four integers in Qwen's normalized `[0,1000]`
+coordinate space. A reliable no-date result is:
+
+```text
+X-Cheki-Date-Status: not_detected
+```
+
+Configuration, rate-limit, image-read, Qwen, timeout, and strict model-output
+failures never replace or remove the image. They return the original image plus:
+
+```text
+X-Cheki-Date-Status: unavailable
+X-Cheki-Date-Error: <fixed-code>
+```
+
+The fixed unavailable codes are `image_unavailable`,
+`unsupported_image_type`, `image_too_large`, `image_read_timeout`,
+`image_read_failed`, `rate_limit_unavailable`, `rate_limited`,
+`service_unavailable`, `qwen_timeout`, `qwen_unavailable`,
+`invalid_model_output`, and `internal_error`.
+
+All opted-in responses use `Cache-Control: no-store`, and the date headers are
+listed in `Access-Control-Expose-Headers`. Model reasoning and upstream error
+bodies are never returned. The Worker's shared preflight handler returns HTTP
+200 for an `OPTIONS` request and exposes the same CORS contract without calling
+RunPod or Qwen.
+
+The Worker reads at most 16 MiB from a cloned status-200 JPEG, PNG, or WebP
+result. Partial and other non-200 responses are returned unchanged without a
+model call. The original response stream remains the client response. The
+Worker sends one image Data URL and the fixed handwritten-date prompt to
+`qwen3.7-plus`, with thinking disabled and `max_tokens` set to 1024. There is
+no automatic retry. The image read has a 10-second deadline, and the single
+Qwen request and response have one 45-second deadline. Images, Data URLs, model
+output, Scanner tokens, task IDs, result IDs, cookies, and Pod details are
+neither logged nor stored by this feature.
+
+Required Worker secrets:
+
+```powershell
+npx wrangler secret put CHEKI_DATE_QWEN_API_KEY
+npx wrangler secret put CHEKI_DATE_QWEN_BASE_URL
+```
+
+`CHEKI_DATE_QWEN_BASE_URL` is the private HTTPS OpenAI-compatible base URL; the
+Worker appends `/chat/completions`. Do not put either value in source,
+`wrangler.toml`, logs, test fixtures, or documentation. The non-secret model
+name is configured as `CHEKI_DATE_QWEN_MODEL`.
+
+The dedicated Cloudflare rate-limiter binding `CHEKI_DATE_RATE_LIMITER` is
+configured in `wrangler.toml` with account-local namespace `1003` and a policy
+of 5 annotation attempts per 60 seconds per client IP. That binding and policy
+have been deployed with the Worker. Production must continue to provide the
+two Qwen secrets above; their values remain untracked. If the limiter binding
+is absent, invalid, denies the request, or throws, the Worker does not call
+Qwen and returns the image with `X-Cheki-Date-Status: unavailable`.
+
 ## Event candidate from a public Weibo URL
 
 `POST /api/event/weibo-candidate` is an independent, non-scanner route. It
@@ -305,6 +429,8 @@ cd cloudflare-worker
 npm ci
 npm test
 node --check src/worker.js
+node --check src/cheki-date-annotator.js
+node --check src/cheki-date-prompt.js
 node --check src/nl-interpreter.js
 node --check src/event-weibo-extractor.js
 ```

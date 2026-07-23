@@ -521,7 +521,9 @@ private extension ChekinanaNaturalLanguageTranslator {
                     throw TranslationError.invalidCommand("\(name) 不接受参数")
                 }
             case "scancheki":
-                let allowed: Set<String> = ["pod", "expected", "scanner_size", "postprocess", "wb"]
+                let allowed: Set<String> = [
+                    "pod", "expected", "scanner_size", "postprocess", "wb", "date_annotation",
+                ]
                 guard split.positional.count <= 1,
                       keys.isSubset(of: allowed),
                       !(split.positional.count == 1 && keys.contains("pod")),

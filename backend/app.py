@@ -4,7 +4,7 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback, smtplib
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback, smtplib, ipaddress
 from datetime import datetime
 from collections import defaultdict
 from email.message import EmailMessage
@@ -41,6 +41,10 @@ elif RUNPOD_POD_ID:
 else:
     ACCESS_TOKEN_SOURCE = "generated"
 CONTACT_EMAIL_TO = os.environ.get("CONTACT_EMAIL_TO", "").strip()
+LOOPBACK_PROXY_MODE_VALUE = os.environ.get("CHEKINANA_TRUST_LOOPBACK_PROXY", "")
+if LOOPBACK_PROXY_MODE_VALUE not in ("", "false", "true"):
+    raise RuntimeError("Invalid loopback proxy mode configuration")
+TRUST_LOOPBACK_PROXY = LOOPBACK_PROXY_MODE_VALUE == "true"
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -147,7 +151,6 @@ def fit_quadrilateral(points):
 # IP / 速率限制
 # ===================================================================
 def is_ip_allowed(ip: str) -> bool:
-    import ipaddress
     try:
         client = ipaddress.ip_address(ip)
         for entry in ALLOWED_IPS:
@@ -193,6 +196,26 @@ def get_request_token() -> str:
 
 def is_token_valid(token: str) -> bool:
     return bool(token) and hmac.compare_digest(token, ACCESS_TOKEN)
+
+def is_trusted_loopback_proxy_request() -> bool:
+    if not TRUST_LOOPBACK_PROXY:
+        return False
+    try:
+        remote = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    return remote.version == 4 and remote == ipaddress.ip_address("127.0.0.1")
+
+
+def effective_client_ip() -> str:
+    if is_trusted_loopback_proxy_request():
+        return request.remote_addr or "127.0.0.1"
+    return get_client_ip()
+
+
+def validate_bind_host(host: str) -> None:
+    if TRUST_LOOPBACK_PROXY and host != "127.0.0.1":
+        raise RuntimeError("Loopback proxy mode requires HOST=127.0.0.1")
 
 
 def send_contact_email(message_text: str, contact_info: str, client_ip: str) -> tuple[bool, str]:
@@ -964,7 +987,7 @@ def security_headers(response):
 
 @app.before_request
 def access_control():
-    ip = get_client_ip()
+    ip = effective_client_ip()
     if not is_ip_allowed(ip):
         return jsonify({"error": "拒绝访问"}), 403
     if request.path in ("/api/process", "/api/contact") and request.method == "POST" and not check_rate_limit(ip):
@@ -973,7 +996,9 @@ def access_control():
         return None
     if request.path in ("/api/health", "/api/auth/verify"):
         return None
-    if request.path.startswith("/api/") and not is_token_valid(get_request_token()):
+    if (request.path.startswith("/api/")
+            and not is_trusted_loopback_proxy_request()
+            and not is_token_valid(get_request_token())):
         return jsonify({"error": "Token 无效或已过期"}), 401
 
 @app.route("/")
@@ -991,7 +1016,7 @@ def health():
 
 @app.route("/api/auth/verify", methods=["POST"])
 def verify_token():
-    if not is_token_valid(get_request_token()):
+    if not is_trusted_loopback_proxy_request() and not is_token_valid(get_request_token()):
         return jsonify({"ok": False, "error": "Token 无效或已过期"}), 401
     return jsonify({"ok": True, "status": "ok"})
 
@@ -1066,7 +1091,7 @@ def contact_author():
 # ---- 提交任务 ----
 @app.route("/api/process", methods=["POST"])
 def submit_task():
-    ip = get_client_ip()
+    ip = effective_client_ip()
     print(f"🟢 提交 | IP: {ip}", flush=True)
     upload_attempt_id = get_upload_attempt_id()
     if upload_attempt_id and is_upload_attempt_canceled(upload_attempt_id):
@@ -1247,15 +1272,21 @@ if __name__ == "__main__":
 
     try:
         from waitress import serve
-        host = os.environ.get("HOST", "0.0.0.0")
+        host = os.environ.get("HOST", "0.0.0.0").strip() or "0.0.0.0"
+        validate_bind_host(host)
         port = int(os.environ.get("PORT", "8080"))
         threads = int(os.environ.get("THREADS", "6"))
         print(f"🚀 http://{host}:{port} (threads={threads})", flush=True)
         print(f"📋 白名单: {ALLOWED_IPS}", flush=True)
-        print(f"🔐 访问 Token ({ACCESS_TOKEN_SOURCE}): {ACCESS_TOKEN}", flush=True)
+        if TRUST_LOOPBACK_PROXY:
+            print("🔐 仅信任本机 loopback Worker 代理", flush=True)
+        else:
+            print(f"🔐 访问 Token ({ACCESS_TOKEN_SOURCE}): {ACCESS_TOKEN}", flush=True)
         threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
         serve(app, host=host, port=port, threads=threads)
     except ImportError:
+        host = os.environ.get("HOST", "0.0.0.0").strip() or "0.0.0.0"
+        validate_bind_host(host)
         port = int(os.environ.get("PORT", "8080"))
         threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
-        app.run(host="0.0.0.0", port=port, debug=False)
+        app.run(host=host, port=port, debug=False)

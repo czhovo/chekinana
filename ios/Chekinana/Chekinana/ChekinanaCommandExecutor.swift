@@ -48,6 +48,7 @@ struct ChekinanaChekiCard: Identifiable, Equatable {
     let eventName: String?
     let eventDateText: String?
     let note: String?
+    let dateAnnotationState: ChekinanaChekiDateAnnotationState
 
     init(
         id: UUID,
@@ -59,7 +60,8 @@ struct ChekinanaChekiCard: Identifiable, Equatable {
         idolNames: [String] = [],
         eventName: String? = nil,
         eventDateText: String? = nil,
-        note: String? = nil
+        note: String? = nil,
+        dateAnnotationState: ChekinanaChekiDateAnnotationState = .notRequested
     ) {
         self.id = id
         self.imageRef = imageRef
@@ -71,6 +73,7 @@ struct ChekinanaChekiCard: Identifiable, Equatable {
         self.eventName = eventName
         self.eventDateText = eventDateText
         self.note = note
+        self.dateAnnotationState = dateAnnotationState
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -83,6 +86,7 @@ struct ChekinanaChekiCard: Identifiable, Equatable {
             && lhs.eventName == rhs.eventName
             && lhs.eventDateText == rhs.eventDateText
             && lhs.note == rhs.note
+            && lhs.dateAnnotationState == rhs.dateAnnotationState
     }
 }
 
@@ -162,6 +166,7 @@ final class ChekinanaConfirmationLedger {
         let userAppears: Bool?
         let size: ChekiSize?
         let note: String
+        let dateAnnotationState: ChekinanaChekiDateAnnotationState
         let createdAt: Date
     }
 
@@ -244,6 +249,7 @@ final class ChekinanaConfirmationLedger {
         let id: UUID
         let image: ChekinanaPendingChekiImage
         let thumbnailImageData: Data?
+        let dateAnnotationState: ChekinanaChekiDateAnnotationState
         let createdAt: Date
     }
 
@@ -397,9 +403,13 @@ final class ChekinanaConfirmationLedger {
 
     func insertTemporaryChekis(
         _ images: [ChekinanaPendingChekiImage],
-        thumbnailImageData: [Data?]
+        thumbnailImageData: [Data?],
+        dateAnnotationStates: [ChekinanaChekiDateAnnotationState]? = nil
     ) throws -> TemporaryChekiInsertion {
         precondition(images.count == thumbnailImageData.count)
+        let annotationStates = dateAnnotationStates
+            ?? Array(repeating: .notRequested, count: images.count)
+        precondition(images.count == annotationStates.count)
         let initialIDs = Set(temporaryChekis.keys)
         let initialBytes = temporaryChekiBytes
         let incomingBytes = images.reduce(0) { partial, image in
@@ -456,6 +466,7 @@ final class ChekinanaConfirmationLedger {
                 id: id,
                 image: image,
                 thumbnailImageData: thumbnailImageData[index],
+                dateAnnotationState: annotationStates[index],
                 createdAt: Date()
             )
             temporaryChekis[id] = value
@@ -1065,6 +1076,7 @@ struct ChekinanaCommandExecutor {
                     userAppears: payload.userAppears,
                     size: payload.size,
                     note: payload.note,
+                    dateAnnotationState: payload.dateAnnotationState,
                     createdAt: payload.createdAt
                 )
                 if let temporaryChekiID = payload.temporaryChekiID {
@@ -1803,6 +1815,7 @@ struct ChekinanaCommandExecutor {
                 userAppears: fields.userAppears,
                 size: fields.size,
                 note: fields.note,
+                dateAnnotationState: .notRequested,
                 createdAt: createdAt
             )))
             cards.append(ChekinanaChekiCard(
@@ -1814,7 +1827,8 @@ struct ChekinanaCommandExecutor {
                 idolNames: idols.map(\.name),
                 eventName: event?.name,
                 eventDateText: fields.eventDate.map(calendarDateString),
-                note: fields.note
+                note: fields.note,
+                dateAnnotationState: .notRequested
             ))
         }
         let failureSuffix = failedCount == 0 ? "" : "；另有 \(failedCount) 张照片无法读取"
@@ -1865,6 +1879,7 @@ struct ChekinanaCommandExecutor {
                     userAppears: fields.userAppears,
                     size: fields.size,
                     note: fields.note,
+                    dateAnnotationState: temporary.dateAnnotationState,
                     createdAt: createdAt
                 )))
                 cards.append(.init(
@@ -1876,7 +1891,8 @@ struct ChekinanaCommandExecutor {
                     idolNames: idols.map(\.name),
                     eventName: event?.name,
                     eventDateText: fields.eventDate.map(calendarDateString),
-                    note: fields.note
+                    note: fields.note,
+                    dateAnnotationState: temporary.dateAnnotationState
                 ))
             }
             return .pendingChekiCards(
@@ -1926,7 +1942,9 @@ struct ChekinanaCommandExecutor {
         usage: [String],
         pendingImages: [ChekinanaPendingChekiImage]
     ) async -> ChekinanaCommandResponse {
-        let allowedArguments = Set(["pod", "expected", "scanner_size", "postprocess", "wb"])
+        let allowedArguments = Set([
+            "pod", "expected", "scanner_size", "postprocess", "wb", "date_annotation",
+        ])
         guard command.arguments.keys.allSatisfy(allowedArguments.contains),
               !(command.target != nil && command.arguments["pod"] != nil) else {
             return invalidUsage(usage)
@@ -1940,14 +1958,17 @@ struct ChekinanaCommandExecutor {
             }
 
             var scannedImages: [ChekinanaPendingChekiImage] = []
+            var dateAnnotationStates: [ChekinanaChekiDateAnnotationState] = []
             var warningCount = 0
             for pendingImage in pendingImages {
                 try Task.checkCancellation()
                 let result = try await scannerProcess(pendingImage, options)
                 try Task.checkCancellation()
-                for imageData in result.images {
+                for resultImage in result.images {
                     try Task.checkCancellation()
-                    guard let jpegData = await ChekinanaImageWorker.reencodedJPEGData(from: imageData),
+                    guard let jpegData = await ChekinanaImageWorker.reencodedJPEGData(
+                        from: resultImage.data
+                    ),
                           !jpegData.isEmpty else {
                         throw ChekinanaScanChekiError.invalidResultImage
                     }
@@ -1956,6 +1977,7 @@ struct ChekinanaCommandExecutor {
                         data: jpegData,
                         filenameExtension: "jpg"
                     ))
+                    dateAnnotationStates.append(resultImage.dateAnnotationState)
                 }
                 warningCount += result.warningCount
             }
@@ -1970,7 +1992,8 @@ struct ChekinanaCommandExecutor {
             try Task.checkCancellation()
             let insertion = try confirmationLedger.insertTemporaryChekis(
                 scannedImages,
-                thumbnailImageData: thumbnails
+                thumbnailImageData: thumbnails,
+                dateAnnotationStates: dateAnnotationStates
             )
             let cards = insertion.inserted.map { temporary in
                 ChekinanaChekiCard(
@@ -1978,7 +2001,8 @@ struct ChekinanaCommandExecutor {
                     imageRef: nil,
                     createdAt: temporary.createdAt,
                     confirmationCode: nil,
-                    thumbnailImageData: temporary.thumbnailImageData
+                    thumbnailImageData: temporary.thumbnailImageData,
+                    dateAnnotationState: temporary.dateAnnotationState
                 )
             }
             return .chekiScannedCards(
@@ -2155,7 +2179,10 @@ struct ChekinanaCommandExecutor {
                 idolNames: idols.map(\.name),
                 eventName: event?.name,
                 eventDateText: eventDate.map(calendarDateString),
-                note: note
+                note: note,
+                dateAnnotationState: cheki.handwrittenDateAnnotation.map {
+                    .detected($0)
+                } ?? .notRequested
             )
             return .pendingChekiCards(
                 "已准备修改这张切。",
@@ -2255,13 +2282,19 @@ struct ChekinanaCommandExecutor {
         let postprocessMode = try parseScannerPostprocessMode(command.arguments["postprocess"])
         let expected = try parseScannerExpected(command.arguments["expected"])
         let whiteBalance = try parseScannerBool(command.arguments["wb"], defaultValue: true, argumentName: "wb")
+        let dateAnnotationEnabled = try parseScannerBool(
+            command.arguments["date_annotation"],
+            defaultValue: false,
+            argumentName: "date_annotation"
+        )
 
         return ChekinanaScannerOptions(
             podID: podID,
             expectedPolaroids: expected,
             scannerSize: scannerSize,
             postprocessMode: postprocessMode,
-            whiteBalance: whiteBalance
+            whiteBalance: whiteBalance,
+            dateAnnotationEnabled: dateAnnotationEnabled
         )
     }
 
@@ -2389,7 +2422,10 @@ struct ChekinanaCommandExecutor {
             idolNames: cheki.idols.map(\.name),
             eventName: cheki.event?.name,
             eventDateText: cheki.eventDate.map(calendarDateString),
-            note: cheki.note
+            note: cheki.note,
+            dateAnnotationState: cheki.handwrittenDateAnnotation.map {
+                .detected($0)
+            } ?? .notRequested
         )
     }
 
@@ -2404,6 +2440,7 @@ struct ChekinanaCommandExecutor {
         userAppears: Bool?,
         size: ChekiSize?,
         note: String,
+        dateAnnotationState: ChekinanaChekiDateAnnotationState,
         createdAt: Date
     ) async throws -> ChekinanaCommandResponse {
         var savedImageURL: URL?
@@ -2428,6 +2465,12 @@ struct ChekinanaCommandExecutor {
                 userAppears: userAppears,
                 size: size,
                 imageRef: savedImage.ref,
+                handwrittenDateAnnotation: {
+                    guard case .detected(let annotation) = dateAnnotationState else {
+                        return nil
+                    }
+                    return annotation
+                }(),
                 note: note,
                 createdAt: createdAt
             )
@@ -3871,11 +3914,32 @@ struct ChekinanaScannerOptions {
     let scannerSize: ChekinanaScannerSize
     let postprocessMode: ChekinanaScannerPostprocessMode
     let whiteBalance: Bool
+    let dateAnnotationEnabled: Bool
+}
+
+struct ChekinanaScannerResultImage {
+    let data: Data
+    let dateAnnotationState: ChekinanaChekiDateAnnotationState
 }
 
 struct ChekinanaScannerProcessResult {
-    let images: [Data]
+    let images: [ChekinanaScannerResultImage]
     let warningCount: Int
+
+    init(images: [Data], warningCount: Int) {
+        self.images = images.map {
+            ChekinanaScannerResultImage(
+                data: $0,
+                dateAnnotationState: .notRequested
+            )
+        }
+        self.warningCount = warningCount
+    }
+
+    init(images: [ChekinanaScannerResultImage], warningCount: Int) {
+        self.images = images
+        self.warningCount = warningCount
+    }
 }
 
 private struct ChekinanaScannerResultItem: Decodable {
@@ -3937,23 +4001,140 @@ private struct ChekinanaScannerStatusResponse: Decodable {
     }
 }
 
-private struct ChekinanaScannerClient {
-    private let baseURL = URL(string: "https://api.chekinana.top")!
-    private let session = URLSession.shared
+enum ChekinanaScannerDateAnnotationHeaderParser {
+    private static let statusHeader = "X-Cheki-Date-Status"
+    private static let textHeader = "X-Cheki-Date-Text"
+    private static let precisionHeader = "X-Cheki-Date-Precision"
+    private static let boundingBoxHeader = "X-Cheki-Date-Bbox"
+    private static let errorHeader = "X-Cheki-Date-Error"
+
+    static func parse(
+        response: HTTPURLResponse,
+        isEnabled: Bool
+    ) -> ChekinanaChekiDateAnnotationState {
+        guard isEnabled else {
+            return .notRequested
+        }
+
+        let status = response.value(forHTTPHeaderField: statusHeader)
+        let text = response.value(forHTTPHeaderField: textHeader)
+        let precisionText = response.value(forHTTPHeaderField: precisionHeader)
+        let boundingBoxText = response.value(forHTTPHeaderField: boundingBoxHeader)
+        let error = response.value(forHTTPHeaderField: errorHeader)
+
+        switch status {
+        case "detected":
+            guard error == nil,
+                  let text,
+                  let precisionText,
+                  let precision = ChekinanaChekiDateAnnotation.Precision(
+                    rawValue: precisionText
+                  ),
+                  let boundingBoxText,
+                  let boundingBox = parseBoundingBox(boundingBoxText),
+                  let annotation = ChekinanaChekiDateAnnotation(
+                    text: text,
+                    precision: precision,
+                    boundingBox: boundingBox
+                  ) else {
+                return .unavailable
+            }
+            return .detected(annotation)
+        case "not_detected":
+            guard text == nil,
+                  precisionText == nil,
+                  boundingBoxText == nil,
+                  error == nil else {
+                return .unavailable
+            }
+            return .notDetected
+        case "unavailable":
+            guard text == nil,
+                  precisionText == nil,
+                  boundingBoxText == nil else {
+                return .unavailable
+            }
+            // The fixed backend error value is intentionally not exposed to
+            // UI or persisted data.
+            _ = error
+            return .unavailable
+        default:
+            return .unavailable
+        }
+    }
+
+    private static func parseBoundingBox(
+        _ value: String
+    ) -> ChekinanaChekiDateBoundingBox? {
+        guard value.range(
+            of: #"^\d{1,4},\d{1,4},\d{1,4},\d{1,4}$"#,
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              let x1 = Int(parts[0]),
+              let y1 = Int(parts[1]),
+              let x2 = Int(parts[2]),
+              let y2 = Int(parts[3]) else {
+            return nil
+        }
+        return ChekinanaChekiDateBoundingBox(x1: x1, y1: y1, x2: x2, y2: y2)
+    }
+}
+
+struct ChekinanaScannerClient {
+    static let productionBaseURL = ChekinanaScannerConfiguration.productionBaseURL
+
+    private let baseURLResolution: ChekinanaScannerBaseURLResolution
+    private let session: URLSession
     private let decoder = JSONDecoder()
+
+    init(
+        session: URLSession = .shared
+    ) {
+        baseURLResolution = ChekinanaScannerConfiguration.configuredBaseURL()
+        self.session = session
+    }
+
+    init(
+        baseURL: URL,
+        session: URLSession = .shared
+    ) {
+        baseURLResolution = .resolved(baseURL)
+        self.session = session
+    }
+
+    init(
+        infoDictionary: [String: Any]?,
+        allowsInsecureLocalHTTP: Bool,
+        session: URLSession = .shared
+    ) {
+        baseURLResolution = ChekinanaScannerConfiguration.configuredBaseURL(
+            infoDictionary: infoDictionary,
+            allowsInsecureLocalHTTP: allowsInsecureLocalHTTP
+        )
+        self.session = session
+    }
 
     func process(
         _ image: ChekinanaPendingChekiImage,
         options: ChekinanaScannerOptions
     ) async throws -> ChekinanaScannerProcessResult {
+        _ = try baseURL()
         let taskID = try await upload(image, options: options)
         let status = try await pollStatus(taskID: taskID, options: options)
         let polaroids = status.results.filter { $0.type == "polaroid" }
-        var images: [Data] = []
+        var images: [ChekinanaScannerResultImage] = []
 
         for polaroid in polaroids {
-            let data = try await downloadResult(taskID: taskID, resultID: polaroid.id, options: options)
-            images.append(data)
+            let image = try await downloadResult(
+                taskID: taskID,
+                resultID: polaroid.id,
+                options: options
+            )
+            images.append(image)
         }
 
         var warningCount = 0
@@ -3968,6 +4149,7 @@ private struct ChekinanaScannerClient {
         _ image: ChekinanaPendingChekiImage,
         options: ChekinanaScannerOptions
     ) async throws -> String {
+        let baseURL = try baseURL()
         let url = baseURL
             .appendingPathComponent("api")
             .appendingPathComponent("process")
@@ -3994,6 +4176,7 @@ private struct ChekinanaScannerClient {
         taskID: String,
         options: ChekinanaScannerOptions
     ) async throws -> ChekinanaScannerStatusResponse {
+        let baseURL = try baseURL()
         let url = baseURL
             .appendingPathComponent("api")
             .appendingPathComponent("status")
@@ -4029,16 +4212,30 @@ private struct ChekinanaScannerClient {
         throw ChekinanaScanChekiError.pollTimedOut
     }
 
-    private func downloadResult(
+    func downloadResult(
         taskID: String,
         resultID: String,
         options: ChekinanaScannerOptions
-    ) async throws -> Data {
-        let url = baseURL
+    ) async throws -> ChekinanaScannerResultImage {
+        let baseURL = try baseURL()
+        let baseResultURL = baseURL
             .appendingPathComponent("api")
             .appendingPathComponent("result")
             .appendingPathComponent(taskID)
             .appendingPathComponent(resultID)
+        let url: URL
+        if options.dateAnnotationEnabled {
+            var components = URLComponents(
+                url: baseResultURL,
+                resolvingAgainstBaseURL: false
+            )
+            components?.queryItems = [URLQueryItem(name: "date_annotation", value: "1")]
+            url = components?.url ?? baseResultURL
+        } else {
+            // Preserve the pre-annotation result URL byte-for-byte when the
+            // user-facing switch is disabled.
+            url = baseResultURL
+        }
         var request = URLRequest(url: url)
         request.setValue(options.podID, forHTTPHeaderField: "X-Cheki-Token")
 
@@ -4049,7 +4246,26 @@ private struct ChekinanaScannerClient {
             throw ChekinanaScanChekiError.emptyResultImage
         }
 
-        return data
+        let annotationState: ChekinanaChekiDateAnnotationState
+        if let httpResponse = response as? HTTPURLResponse {
+            annotationState = ChekinanaScannerDateAnnotationHeaderParser.parse(
+                response: httpResponse,
+                isEnabled: options.dateAnnotationEnabled
+            )
+        } else {
+            annotationState = options.dateAnnotationEnabled ? .unavailable : .notRequested
+        }
+        return ChekinanaScannerResultImage(
+            data: data,
+            dateAnnotationState: annotationState
+        )
+    }
+
+    private func baseURL() throws -> URL {
+        guard case .resolved(let url) = baseURLResolution else {
+            throw ChekinanaScanChekiError.invalidBaseURLConfiguration
+        }
+        return url
     }
 
     private func validateHTTPResponse(_ response: URLResponse) throws {
@@ -4352,6 +4568,7 @@ private enum ChekinanaDownloadChekiError: LocalizedError {
 
 private enum ChekinanaScanChekiError: LocalizedError {
     case missingPod
+    case invalidBaseURLConfiguration
     case invalidArgumentValue(String, String)
     case missingTaskID
     case backendFailure(String?)
@@ -4366,6 +4583,8 @@ private enum ChekinanaScanChekiError: LocalizedError {
         switch self {
         case .missingPod:
             return "pod is required. Use scancheki pod=<pod_id> or scancheki <pod_id> after selecting photos"
+        case .invalidBaseURLConfiguration:
+            return "scanner base URL configuration is invalid"
         case .invalidArgumentValue(let argumentName, let value):
             return "invalid \(argumentName): \(value)"
         case .missingTaskID:
