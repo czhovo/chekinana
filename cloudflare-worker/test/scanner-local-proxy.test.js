@@ -238,9 +238,11 @@ test("removes the local token header and multipart token field before proxying",
   formData.append("image", new Blob([IMAGE_BYTES], { type: "image/png" }), "source.png");
   const response = await handleRequest(scannerRequest("/api/process", {
     method: "POST",
+    headers: { expect: "100-continue" },
     body: formData,
   }), LOCAL_ENV, async (value) => {
     assert.equal(value.headers.get("x-cheki-token"), null);
+    assert.equal(value.headers.get("expect"), null);
     const forwarded = await value.formData();
     assert.equal(forwarded.get("token"), null);
     assert.equal(forwarded.get("wb"), "1");
@@ -253,6 +255,49 @@ test("removes the local token header and multipart token field before proxying",
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { status: "queued" });
+});
+
+test("removes Expect while proxying one large multipart task exactly once", async () => {
+  const largeImageBytes = new Uint8Array((5 * 1024 * 1024) + 17);
+  for (let index = 0; index < largeImageBytes.length; index += 1) {
+    largeImageBytes[index] = index % 251;
+  }
+  const completeTaskId = "0123456789abcdef0123456789abcdef";
+  const formData = new FormData();
+  formData.append("token", LOCAL_TOKEN);
+  formData.append(
+    "image",
+    new Blob([largeImageBytes], { type: "image/jpeg" }),
+    "large-source.jpg",
+  );
+  let calls = 0;
+
+  const response = await handleRequest(scannerRequest("/api/process", {
+    method: "POST",
+    headers: { expect: "100-continue" },
+    body: formData,
+  }), LOCAL_ENV, async (value) => {
+    calls += 1;
+    assert.equal(value.headers.get("x-cheki-token"), null);
+    assert.equal(value.headers.get("expect"), null);
+    const forwarded = await value.formData();
+    assert.equal(forwarded.get("token"), null);
+    const image = forwarded.get("image");
+    assert.equal(image.name, "large-source.jpg");
+    assert.equal(image.type, "image/jpeg");
+    assert.deepEqual(
+      new Uint8Array(await image.arrayBuffer()),
+      largeImageBytes,
+    );
+    return Response.json({ task_id: completeTaskId, status: "queued" });
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    task_id: completeTaskId,
+    status: "queued",
+  });
 });
 
 test("removes top-level local token fields from JSON and form bodies", async (t) => {

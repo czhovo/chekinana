@@ -222,6 +222,7 @@ async function prepareLocalBody(request, headers) {
 async function localUpstreamRequest(request, url, configuration) {
   const headers = copyHeaders(request);
   headers.delete("x-cheki-token");
+  headers.delete("expect");
   for (const name of LOCAL_CLIENT_SOURCE_HEADERS) headers.delete(name);
   const preparedBody = await prepareLocalBody(request, headers);
   if (preparedBody.error) return null;
