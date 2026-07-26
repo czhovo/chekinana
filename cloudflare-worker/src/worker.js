@@ -3,7 +3,10 @@ import {
   EVENT_ENDPOINT,
   extractWeiboCandidateRequest,
 } from "./event-weibo-extractor.js";
-import { annotateChekiDateResponse } from "./cheki-date-annotator.js";
+import {
+  annotateChekiDateResponse,
+  chekiDateRateLimitDecision,
+} from "./cheki-date-annotator.js";
 
 const RUNPOD_HTTP_PORT = 8080;
 const LOCAL_SCANNER_MODE = "CHEKINANA_SCANNER_LOCAL_MODE";
@@ -38,6 +41,15 @@ const DATE_RESPONSE_HEADERS = [
   "x-cheki-date-bbox",
   "x-cheki-date-error",
 ];
+const INTERNAL_DATE_ENDPOINT = "/api/internal/scanner/date-annotations";
+const INTERNAL_DATE_BODY_MAX_BYTES = 16 * 1024;
+const INTERNAL_DATE_BODY_TIMEOUT_MS = 5_000;
+const INTERNAL_DATE_MAX_RESULTS = 64;
+const INTERNAL_DATE_CONCURRENCY = 8;
+const INTERNAL_DATE_MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+const DATE_STATUS_ERROR = "date_annotation_unavailable";
+const INTERNAL_DATE_REQUEST_ERROR = "scanner_date_request_invalid";
+const TASK_ID_PATTERN = /^[a-f0-9]{32}$/u;
 
 function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -290,6 +302,275 @@ function applyDateAnnotationHeaders(headers, annotation) {
   exposeDateHeaders(headers);
 }
 
+function isArtifactId(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+async function readBoundedRequestJson(request, maximum, timeoutMs) {
+  const contentType = (request.headers.get("content-type") || "")
+    .split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") return null;
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null
+    && (!/^\d+$/u.test(declaredLength.trim())
+      || Number(declaredLength) <= 0
+      || Number(declaredLength) > maximum)) {
+    return null;
+  }
+  if (!request.body || typeof request.body.getReader !== "function") return null;
+
+  let reader;
+  try {
+    reader = request.body.getReader();
+  } catch {
+    return null;
+  }
+  const timeoutSentinel = Symbol("timeout");
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timeoutSentinel), timeoutMs);
+  });
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const readPromise = Promise.resolve().then(() => reader.read()).then(
+        (value) => ({ kind: "read", value }),
+        () => ({ kind: "invalid" }),
+      );
+      const outcome = await Promise.race([readPromise, timeoutPromise]);
+      if (outcome === timeoutSentinel) {
+        try {
+          await reader.cancel("internal date request deadline exceeded");
+        } catch {
+          // Best effort after a stalled stream.
+        }
+        return null;
+      }
+      if (outcome.kind !== "read") return null;
+      const part = outcome.value;
+      if (part.done) break;
+      if (!(part.value instanceof Uint8Array)) return null;
+      total += part.value.byteLength;
+      if (total > maximum) {
+        try {
+          await reader.cancel("internal date request too large");
+        } catch {
+          // Best effort after a stream failure.
+        }
+        return null;
+      }
+      chunks.push(part.value);
+    }
+  } finally {
+    clearTimeout(timer);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled stream may already be detached.
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+}
+
+function parseInternalDateRequest(payload) {
+  if (payload === null
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+    || Object.keys(payload).sort().join(",") !== "results,task_id"
+    || typeof payload.task_id !== "string"
+    || !TASK_ID_PATTERN.test(payload.task_id)
+    || !Array.isArray(payload.results)
+    || payload.results.length < 1
+    || payload.results.length > INTERNAL_DATE_MAX_RESULTS) {
+    return null;
+  }
+  const logicalIds = new Set();
+  const artifactIds = new Set();
+  const results = [];
+  for (const value of payload.results) {
+    if (value === null
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== "artifact_id,id"
+      || !isArtifactId(value.id)
+      || !isArtifactId(value.artifact_id)
+      || logicalIds.has(value.id)
+      || artifactIds.has(value.artifact_id)) {
+      return null;
+    }
+    logicalIds.add(value.id);
+    artifactIds.add(value.artifact_id);
+    results.push({ id: value.id, artifactId: value.artifact_id });
+  }
+  return { taskId: payload.task_id, results };
+}
+
+async function authorizeInternalScanner(request, url, configuration) {
+  if (configuration.kind === "local") {
+    const providedToken = request.headers.get("x-cheki-token") || "";
+    return await timingSafeTokenEqual(configuration.token, providedToken)
+      ? { kind: "local" }
+      : null;
+  }
+  const podId = normalizePodId(getRequestToken(request, url));
+  return podId ? { kind: "production", podId } : null;
+}
+
+function internalArtifactRequest(
+  request,
+  url,
+  configuration,
+  authorization,
+  taskId,
+  artifactId,
+) {
+  const headers = copyHeaders(request);
+  headers.delete("content-type");
+  headers.delete("expect");
+  let artifactUrl;
+  if (authorization.kind === "local") {
+    headers.delete("x-cheki-token");
+    for (const name of LOCAL_CLIENT_SOURCE_HEADERS) headers.delete(name);
+    artifactUrl = new URL(configuration.upstream);
+  } else {
+    artifactUrl = new URL(
+      `https://${authorization.podId}-${RUNPOD_HTTP_PORT}.proxy.runpod.net`,
+    );
+    const queryToken = url.searchParams.get("token");
+    if (queryToken) artifactUrl.searchParams.set("token", queryToken);
+  }
+  artifactUrl.pathname = `/api/result/${encodeURIComponent(taskId)}/${artifactId}`;
+  return new Request(artifactUrl.toString(), {
+    method: "GET",
+    headers,
+    redirect: "manual",
+  });
+}
+
+function internalDateFailure() {
+  return json(
+    { status: "failed", error: DATE_STATUS_ERROR },
+    502,
+    { "cache-control": "no-store" },
+  );
+}
+
+async function handleInternalDateRequest(
+  request,
+  url,
+  configuration,
+  env,
+  fetchImpl,
+) {
+  const authorization = await authorizeInternalScanner(
+    request,
+    url,
+    configuration,
+  );
+  if (!authorization) {
+    return json({ ok: false, error: "Token 无效或已过期" }, 401);
+  }
+  if (request.method !== "POST") {
+    return json(
+      { ok: false, error: INTERNAL_DATE_REQUEST_ERROR },
+      405,
+      { "cache-control": "no-store" },
+    );
+  }
+  const payload = parseInternalDateRequest(
+    await readBoundedRequestJson(
+      request,
+      INTERNAL_DATE_BODY_MAX_BYTES,
+      INTERNAL_DATE_BODY_TIMEOUT_MS,
+    ),
+  );
+  if (!payload) {
+    return json(
+      { ok: false, error: INTERNAL_DATE_REQUEST_ERROR },
+      400,
+      { "cache-control": "no-store" },
+    );
+  }
+
+  const rateLimit = await chekiDateRateLimitDecision(request, env);
+  if (rateLimit !== "allowed") return internalDateFailure();
+
+  const annotations = [];
+  for (
+    let offset = 0;
+    offset < payload.results.length;
+    offset += INTERNAL_DATE_CONCURRENCY
+  ) {
+    const wave = payload.results.slice(
+      offset,
+      offset + INTERNAL_DATE_CONCURRENCY,
+    );
+    const byteBudget = {
+      usedBytes: 0,
+      maximumBytes: wave.length * INTERNAL_DATE_MAX_IMAGE_BYTES,
+    };
+    const waveAnnotations = await Promise.all(wave.map(async (result) => {
+      try {
+        const imageResponse = await fetchImpl(
+          internalArtifactRequest(
+            request,
+            url,
+            configuration,
+            authorization,
+            payload.taskId,
+            result.artifactId,
+          ),
+        );
+        const annotation = await annotateChekiDateResponse(
+          request,
+          imageResponse,
+          env,
+          {
+            fetchImpl,
+            bboxCoordinates: "pixels",
+            skipRateLimit: true,
+            consumeResponseBody: true,
+            maxImageBytes: INTERNAL_DATE_MAX_IMAGE_BYTES,
+            byteBudget,
+          },
+        );
+        return { id: result.id, annotation };
+      } catch {
+        return {
+          id: result.id,
+          annotation: { status: "unavailable" },
+        };
+      }
+    }));
+    if (waveAnnotations.some(({ annotation }) => (
+      annotation.status !== "detected"
+      && annotation.status !== "not_detected"
+    ))) return internalDateFailure();
+    annotations.push(...waveAnnotations);
+  }
+
+  return json({
+    status: "done",
+    results: annotations.map(({ id, annotation }) => ({
+      id,
+      date: annotation.status === "detected" ? annotation.text : null,
+      bbox: annotation.status === "detected" ? annotation.bbox : null,
+    })),
+  }, 200, { "cache-control": "no-store" });
+}
+
 export async function handleRequest(request, env = {}, fetchImpl = fetch) {
   const url = new URL(request.url);
   const dateAnnotationRequested = requestsDateAnnotation(request, url);
@@ -319,6 +600,15 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
   const scannerConfiguration = parseLocalScannerConfiguration(env);
   if (scannerConfiguration.kind === "invalid") {
     return localScannerConfigurationError();
+  }
+  if (url.pathname === INTERNAL_DATE_ENDPOINT) {
+    return handleInternalDateRequest(
+      request,
+      url,
+      scannerConfiguration,
+      env,
+      fetchImpl,
+    );
   }
 
   let upstreamRequest;
