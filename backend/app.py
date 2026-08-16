@@ -17,6 +17,19 @@ from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from scipy.spatial import ConvexHull
 
+try:
+    from .date_annotation_callback import (
+        CALLBACK_BASE_ENV,
+        CALLBACK_TOKEN_ENV,
+        request_task_date_annotations,
+    )
+except ImportError:
+    from date_annotation_callback import (
+        CALLBACK_BASE_ENV,
+        CALLBACK_TOKEN_ENV,
+        request_task_date_annotations,
+    )
+
 # ===================================================================
 # 配置加载
 # ===================================================================
@@ -45,6 +58,11 @@ LOOPBACK_PROXY_MODE_VALUE = os.environ.get("CHEKINANA_TRUST_LOOPBACK_PROXY", "")
 if LOOPBACK_PROXY_MODE_VALUE not in ("", "false", "true"):
     raise RuntimeError("Invalid loopback proxy mode configuration")
 TRUST_LOOPBACK_PROXY = LOOPBACK_PROXY_MODE_VALUE == "true"
+if TRUST_LOOPBACK_PROXY and (
+    not os.environ.get(CALLBACK_BASE_ENV, "").strip()
+    or not os.environ.get(CALLBACK_TOKEN_ENV, "").strip()
+):
+    raise RuntimeError("Local date callback configuration missing")
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -383,6 +401,33 @@ def parse_bool(value, default=False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def parse_ink_mode(value) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip()
+    if normalized == "0":
+        return False
+    if normalized == "1":
+        return True
+    raise ValueError("invalid_ink")
+
+
+def extract_ink_image(*args, **kwargs):
+    try:
+        from .polaroid_recognition import extract_ink_image as implementation
+    except ImportError:
+        from polaroid_recognition import extract_ink_image as implementation
+    return implementation(*args, **kwargs)
+
+
+def classify_pattern(*args, **kwargs):
+    try:
+        from .polaroid_recognition import classify_pattern as implementation
+    except ImportError:
+        from polaroid_recognition import classify_pattern as implementation
+    return implementation(*args, **kwargs)
+
+
 def parse_positive_int(*values) -> int:
     for value in values:
         if value is None:
@@ -702,13 +747,19 @@ def extract_polaroid_candidate(
     return image_bytes
 
 
-def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
+def add_intermediate(
+    task_id: str,
+    rtype: str,
+    img_data: bytes,
+    label: str,
+) -> int | None:
     """向任务添加一个中间结果"""
     with task_lock:
         t = task_store.get(task_id)
-        if not t: return
+        if not t:
+            return None
         if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
-            return
+            return None
         if "results" not in t:
             t["results"] = []
         rid = len(t["results"])
@@ -716,6 +767,131 @@ def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
             "id": rid, "type": rtype, "label": label,
             "image_bytes": img_data, "mimetype": "image/png",
         })
+        return rid
+
+
+def add_recognition_result(
+    task_id: str,
+    logical_id: int,
+    polaroid_result_id: int,
+    ink_result_id: int | None,
+    pattern: str,
+):
+    with task_lock:
+        t = task_store.get(task_id)
+        if not t:
+            return
+        if t.get("cancel_requested") or t.get("status") == CANCELED_STATUS:
+            return
+        if "recognition_results" not in t:
+            t["recognition_results"] = []
+        t["recognition_results"].append({
+            "id": logical_id,
+            "polaroid_result_id": polaroid_result_id,
+            "ink_result_id": ink_result_id,
+            "date": None,
+            "bbox": None,
+            "pattern": pattern,
+            "type": "polaroid",
+            "label": f"拍立得 #{logical_id + 1}",
+        })
+
+
+def add_processed_polaroid(
+    task_id: str,
+    logical_id: int,
+    rectified: np.ndarray,
+    *,
+    ink_enabled: bool,
+    processor,
+    model,
+    device,
+) -> tuple[int, int | None, str]:
+    polaroid_bytes = img_to_png_bytes(rectified)
+    if not polaroid_bytes:
+        raise RuntimeError("polaroid_encoding_failed")
+
+    ink_result_id = None
+    inference_image = rectified
+    if ink_enabled:
+        ink_image = extract_ink_image(
+            rectified,
+            processor,
+            model,
+            device,
+        )
+        ink_bytes = img_to_png_bytes(ink_image)
+        if not ink_bytes:
+            raise RuntimeError("ink_encoding_failed")
+        inference_image = ink_image
+
+    pattern = classify_pattern(
+        inference_image,
+        use_ink=ink_enabled,
+        device=device,
+    )
+    polaroid_result_id = add_intermediate(
+        task_id,
+        "polaroid",
+        polaroid_bytes,
+        f"拍立得 #{logical_id + 1}",
+    )
+    if polaroid_result_id is None:
+        raise RuntimeError("task_canceled")
+    if ink_enabled:
+        ink_result_id = add_intermediate(
+            task_id,
+            "ink",
+            ink_bytes,
+            f"墨迹 #{logical_id + 1}",
+        )
+        if ink_result_id is None:
+            raise RuntimeError("task_canceled")
+    add_recognition_result(
+        task_id,
+        logical_id,
+        polaroid_result_id,
+        ink_result_id,
+        pattern,
+    )
+    return polaroid_result_id, ink_result_id, pattern
+
+
+def annotate_task_results(task_id: str):
+    with task_lock:
+        task = task_store.get(task_id)
+        if not task:
+            raise RuntimeError("date_annotation_unavailable")
+        recognition_results = [
+            dict(result)
+            for result in task.get("recognition_results", [])
+        ]
+    if not recognition_results:
+        return
+    annotations = request_task_date_annotations(
+        task_id,
+        recognition_results,
+        ACCESS_TOKEN,
+    )
+    annotations_by_id = {
+        annotation["id"]: annotation
+        for annotation in annotations
+    }
+    with task_lock:
+        task = task_store.get(task_id)
+        if not task:
+            raise RuntimeError("date_annotation_unavailable")
+        current_results = task.get("recognition_results", [])
+        current_ids = {result.get("id") for result in current_results}
+        if (
+            len(current_results) != len(annotations_by_id)
+            or current_ids != set(annotations_by_id)
+        ):
+            raise RuntimeError("date_annotation_unavailable")
+        for result in current_results:
+            annotation = annotations_by_id[result["id"]]
+            result["date"] = annotation["date"]
+            result["bbox"] = annotation["bbox"]
 
 
 def mark_task_canceled(task_id: str, *, drop_raw_data: bool = False) -> bool:
@@ -947,6 +1123,8 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         requested_polaroids = int(task_store.get(task_id, {}).get("requested_polaroids", 0) or 0)
         rotation_degrees = int(task_store.get(task_id, {}).get("rotation_degrees", 0) or 0)
         requested_polaroid_size = parse_polaroid_size(task_store.get(task_id, {}).get("polaroid_size"))
+        ink_enabled = bool(task_store.get(task_id, {}).get("ink", False))
+        recognition_enabled = "recognition_results" in task_store.get(task_id, {})
 
     # --- 步骤 0: 加载图片 ---
     if cancel_if_requested(task_id):
@@ -1050,21 +1228,85 @@ def do_process_extraction(raw_data: bytes, task_id: str):
             return
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
         try:
-            image_bytes = extract_polaroid_candidate(
-                img_np,
-                verts,
-                requested_polaroid_size,
-                white_balance_enabled,
-                denoise_enabled,
-                postprocess_mode,
-                task_id,
-                pidx + 1,
-            )
-            if cancel_if_requested(task_id):
-                return
-            add_intermediate(task_id, "polaroid", image_bytes, f"拍立得 #{pidx+1}")
+            if recognition_enabled:
+                output_polaroid_size = resolve_polaroid_size(requested_polaroid_size, verts)
+                geometry = get_polaroid_geometry(output_polaroid_size)
+                output_width = geometry["width"]
+                output_height = geometry["height"]
+                print(f"   size={output_polaroid_size}", flush=True)
+                src = verts.astype(np.float32)
+                dst = np.array(
+                    [[0, 0], [output_width, 0], [output_width, output_height], [0, output_height]],
+                    dtype=np.float32,
+                )
+                transform = cv2.getPerspectiveTransform(src, dst)
+                rectified = cv2.warpPerspective(
+                    img_np,
+                    transform,
+                    (output_width, output_height),
+                    flags=cv2.INTER_CUBIC,
+                )
+                if white_balance_enabled:
+                    rectified, wb_info = apply_fixed_border_white_balance(rectified, geometry)
+                    if wb_info["applied"]:
+                        print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
+                    else:
+                        print(f"   ⚠ 白平衡 #{pidx+1}: {wb_info['reason']}", flush=True)
+                if denoise_enabled:
+                    rectified, denoise_info = denoise_extracted_polaroid(rectified)
+                    if denoise_info["applied"]:
+                        print(f"   ✓ 降噪 #{pidx+1}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
+                    else:
+                        print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
+                if cancel_if_requested(task_id):
+                    return
+                if postprocess_mode == POSTPROCESS_MODE_SHARPEN:
+                    rectified, sharpen_info = sharpen_extracted_polaroid(rectified)
+                    if sharpen_info["applied"]:
+                        print(f"   sharpen #{pidx+1}: {sharpen_info['method']} amount={sharpen_info['amount']}", flush=True)
+                    else:
+                        print(f"   sharpen #{pidx+1}: {sharpen_info['reason']}", flush=True)
+                with task_lock:
+                    task_store[task_id]["phase"] = "recognizing"
+                _, ink_result_id, pattern = add_processed_polaroid(
+                    task_id,
+                    pidx,
+                    rectified,
+                    ink_enabled=ink_enabled,
+                    processor=processor,
+                    model=model,
+                    device=device,
+                )
+                print(
+                    f"   ✓ 拍立得 #{pidx+1} 提取完成 "
+                    f"(ink={ink_result_id is not None}, pattern={pattern})",
+                    flush=True,
+                )
+                with task_lock:
+                    task_store[task_id]["phase"] = "extracting"
+            else:
+                image_bytes = extract_polaroid_candidate(
+                    img_np,
+                    verts,
+                    requested_polaroid_size,
+                    white_balance_enabled,
+                    denoise_enabled,
+                    postprocess_mode,
+                    task_id,
+                    pidx + 1,
+                )
+                if cancel_if_requested(task_id):
+                    return
+                result_id = add_intermediate(
+                    task_id,
+                    "polaroid",
+                    image_bytes,
+                    f"拍立得 #{pidx+1}",
+                )
+                if result_id is None:
+                    raise RuntimeError("task_canceled")
+                print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
             successful_count += 1
-            print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
         except Exception as exc:
             if cancel_if_requested(task_id):
                 return
@@ -1084,6 +1326,12 @@ def do_process_extraction(raw_data: bytes, task_id: str):
     final_warning = "；".join(
         message for message in (detection_warning, failure_warning) if message
     )
+    if recognition_enabled and successful_count:
+        with task_lock:
+            task_store[task_id]["phase"] = "recognizing_date"
+        annotate_task_results(task_id)
+        if cancel_if_requested(task_id):
+            return
     with task_lock:
         task_store[task_id]["status"] = "done" if successful_count else "failed"
         task_store[task_id]["phase"] = "complete"
@@ -1312,6 +1560,11 @@ def submit_task():
     if not ok:
         return jsonify({"error": err}), 400
 
+    try:
+        ink_enabled = parse_ink_mode(request.form.get("ink"))
+    except ValueError:
+        return jsonify({"error": "invalid_ink"}), 400
+
     white_balance = parse_bool(request.form.get("wb"), default=True)
     legacy_denoise = parse_bool(request.form.get("denoise"), default=True)
     postprocess_mode = parse_postprocess_mode(request.form.get("postprocess_mode"), legacy_denoise)
@@ -1333,6 +1586,7 @@ def submit_task():
             "status": "queued", "phase": "waiting", "filename": file.filename,
             "size": len(raw), "raw_data": raw, "created_at": now, "ip": ip,
             "results": [], "white_balance": white_balance, "denoise": denoise,
+            "recognition_results": [], "ink": ink_enabled,
             "postprocess_mode": postprocess_mode,
             "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
             "upload_attempt_id": upload_attempt_id,
@@ -1358,7 +1612,7 @@ def submit_task():
     queue_event.set()
     if not direct:
         start_sam3_prewarm()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, direct={direct}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, direct={direct}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size}, ink={ink_enabled})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",
@@ -1370,6 +1624,7 @@ def submit_task():
         "rotation_degrees": rotation_degrees,
         "expected_polaroids": requested_polaroids,
         "upload_attempt_id": upload_attempt_id,
+        "ink": 1 if ink_enabled else 0,
     })
 
 # ---- 查询状态（含中间结果列表） ----
@@ -1382,10 +1637,25 @@ def task_status(task_id):
 
         status = t["status"]
         phase = t.get("phase", "")
-        results_meta = [
-            {"id": r["id"], "type": r["type"], "label": r["label"]}
-            for r in t.get("results", [])
-        ]
+        if "recognition_results" in t:
+            results_meta = [
+                {
+                    "id": r["id"],
+                    "polaroid_result_id": r["polaroid_result_id"],
+                    "ink_result_id": r["ink_result_id"],
+                    "date": r["date"],
+                    "bbox": r["bbox"],
+                    "pattern": r["pattern"],
+                    "type": r["type"],
+                    "label": r["label"],
+                }
+                for r in t["recognition_results"]
+            ]
+        else:
+            results_meta = [
+                {"id": r["id"], "type": r["type"], "label": r["label"]}
+                for r in t.get("results", [])
+            ]
         total_polaroids = t.get("total_polaroids", 0)
         expected_polaroids = t.get("expected_polaroids", total_polaroids)
         requested_polaroids = t.get("requested_polaroids", 0)
@@ -1401,6 +1671,7 @@ def task_status(task_id):
         elapsed = t.get("elapsed", 0)
         error = t.get("error", "")
         upload_attempt_id = t.get("upload_attempt_id", "")
+        ink_enabled = bool(t.get("ink", False))
         current_active_task_id = get_active_task_id()
 
     pos = 0
@@ -1433,6 +1704,7 @@ def task_status(task_id):
         "elapsed": elapsed,
         "error": error,
         "upload_attempt_id": upload_attempt_id,
+        "ink": 1 if ink_enabled else 0,
     })
 
 # ---- 获取某一步的结果图片 ----

@@ -10,6 +10,7 @@ const MAX_SECRET_CHARS = 4_096;
 const MIN_IMAGE_PIXELS = 65_536;
 const MAX_IMAGE_PIXELS = 2_621_440;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 
 function unavailable(error) {
   return { status: "unavailable", error };
@@ -37,6 +38,36 @@ function normalizeString(value, maximum) {
   return normalized;
 }
 
+function clientIP(request) {
+  const cloudflareIP = request.headers.get("cf-connecting-ip");
+  if (cloudflareIP) return cloudflareIP.trim().slice(0, 128);
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",", 1)[0].trim().slice(0, 128);
+  return "unknown";
+}
+
+function rateLimitKey(request, env) {
+  if (env?.CHEKINANA_SCANNER_LOCAL_MODE === "true") {
+    return "local-scanner";
+  }
+  return clientIP(request);
+}
+
+export async function chekiDateRateLimitDecision(request, env) {
+  if (!env?.CHEKI_DATE_RATE_LIMITER
+    || typeof env.CHEKI_DATE_RATE_LIMITER.limit !== "function") {
+    return "unavailable";
+  }
+  try {
+    const result = await env.CHEKI_DATE_RATE_LIMITER.limit({
+      key: rateLimitKey(request, env),
+    });
+    if (!result || typeof result.success !== "boolean") return "unavailable";
+    return result.success ? "allowed" : "denied";
+  } catch {
+    return "unavailable";
+  }
+}
 function qwenEndpoint(env) {
   const raw = normalizeString(env?.CHEKI_DATE_QWEN_BASE_URL, 4_096);
   if (!raw) return null;
@@ -164,6 +195,28 @@ function bytesToBase64(bytes) {
     )));
   }
   return parts.join("");
+}
+
+function pngDimensions(bytes) {
+  if (bytes.length < 24) return null;
+  for (let index = 0; index < PNG_SIGNATURE.length; index += 1) {
+    if (bytes[index] !== PNG_SIGNATURE[index]) return null;
+  }
+  if (String.fromCharCode(...bytes.subarray(12, 16)) !== "IHDR") return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(16, false);
+  const height = view.getUint32(20, false);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function pixelBBox(normalized, width, height) {
+  const [x1, y1, x2, y2] = normalized;
+  return [
+    Math.floor(x1 * width / 1_000),
+    Math.floor(y1 * height / 1_000),
+    Math.min(width, Math.ceil(x2 * width / 1_000)),
+    Math.min(height, Math.ceil(y2 * height / 1_000)),
+  ];
 }
 
 function validCalendarDate(year, month, day) {
@@ -410,17 +463,36 @@ export async function annotateChekiDateResponse(
     return unavailable("unsupported_image_type");
   }
 
-  const declaredLengthError = declaredImageLengthError(upstreamResponse.headers);
-  if (declaredLengthError) return unavailable(declaredLengthError);
+  const declaredLength = upstreamResponse.headers.get("content-length");
+  const requestedMaximum = options.maxImageBytes;
+  const maximumImageBytes = Number.isInteger(requestedMaximum)
+    && requestedMaximum > 0
+    && requestedMaximum <= MAX_IMAGE_BYTES
+    ? requestedMaximum
+    : MAX_IMAGE_BYTES;
+  if (declaredLength !== null
+    && (!/^\d+$/u.test(declaredLength.trim())
+      || Number(declaredLength) <= 0
+      || Number(declaredLength) > maximumImageBytes)) {
+    return unavailable(
+      /^\d+$/u.test(declaredLength.trim()) && Number(declaredLength) > maximumImageBytes
+        ? "image_too_large"
+        : "image_read_failed",
+    );
+  }
 
   const configuration = qwenConfiguration(env);
   if (!configuration) return unavailable("service_unavailable");
 
   let annotationResponse;
-  try {
-    annotationResponse = upstreamResponse.clone();
-  } catch {
-    return unavailable("image_read_failed");
+  if (options.consumeResponseBody) {
+    annotationResponse = upstreamResponse;
+  } else {
+    try {
+      annotationResponse = upstreamResponse.clone();
+    } catch {
+      return unavailable("image_read_failed");
+    }
   }
   const requestedImageTimeout = options.imageReadTimeoutMs;
   const imageReadTimeoutMs = Number.isFinite(requestedImageTimeout)
@@ -429,19 +501,34 @@ export async function annotateChekiDateResponse(
     : DEFAULT_IMAGE_READ_TIMEOUT_MS;
   const imageResult = await readLimitedBytes(
     annotationResponse,
-    MAX_IMAGE_BYTES,
+    maximumImageBytes,
     imageReadTimeoutMs,
   );
   if (imageResult.kind === "too_large") return unavailable("image_too_large");
   if (imageResult.kind === "timeout") return unavailable("image_read_timeout");
   if (imageResult.kind !== "ok") return unavailable("image_read_failed");
+  const byteBudget = options.byteBudget;
+  if (byteBudget !== undefined) {
+    if (!byteBudget
+      || !Number.isInteger(byteBudget.maximumBytes)
+      || byteBudget.maximumBytes <= 0
+      || !Number.isInteger(byteBudget.usedBytes)
+      || byteBudget.usedBytes < 0) {
+      return unavailable("image_read_failed");
+    }
+    const nextTotal = byteBudget.usedBytes + imageResult.bytes.byteLength;
+    if (nextTotal > byteBudget.maximumBytes) {
+      return unavailable("image_total_too_large");
+    }
+    byteBudget.usedBytes = nextTotal;
+  }
 
   const requestedQwenTimeout = options.qwenTimeoutMs;
   const qwenTimeoutMs = Number.isFinite(requestedQwenTimeout)
     && requestedQwenTimeout > 0
     ? requestedQwenTimeout
     : DEFAULT_QWEN_TIMEOUT_MS;
-  return callQwen(
+  const annotation = await callQwen(
     imageResult.bytes,
     mediaType,
     configuration,
@@ -449,6 +536,22 @@ export async function annotateChekiDateResponse(
     qwenTimeoutMs,
     request.signal,
   );
+  if (annotation.status !== "detected"
+    || options.bboxCoordinates !== "pixels") {
+    return annotation;
+  }
+  const dimensions = mediaType === "image/png"
+    ? pngDimensions(imageResult.bytes)
+    : null;
+  if (!dimensions) return unavailable("image_dimensions_invalid");
+  return {
+    ...annotation,
+    bbox: pixelBBox(
+      annotation.bbox,
+      dimensions.width,
+      dimensions.height,
+    ),
+  };
 }
 
 export async function annotateChekiDateImageRequest(

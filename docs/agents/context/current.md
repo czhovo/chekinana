@@ -1,6 +1,6 @@
 ## Current Goal
 
-完成并交付本轮 Worker 生产部署、Hidden Idol、Review 即时刷新与同日 Event 自动关联；后续优先补 iOS 未运行的 focused/UI 覆盖，不操作真机数据。
+将当前 Chekinana 产品源码、测试、资源与必要文档安全同步到 GitHub `origin/main`，保留并整合远端已有的拍立得识别提交。
 
 ## Latest User Instructions
 
@@ -11,12 +11,12 @@
 - 新 Cheki 在未显式指定 Event 时，自动关联 canonical 同日唯一 Event。
 - Assistant 不新增 birthday 行；addidol API birthday 只修解析/保存链。
 - Scanner/GPU 空闲自动关闭延长到4分钟；Event详情图片可全屏查看；Import Cheki尺寸与方向独立处理。
+- 将现有 App 代码推送到 GitHub；不上传 `.codex/`、`outputs/`、真实 secrets 或本机数据。
 
 ## Repository State
 
 - Checkout: repository root
-- Branch: `main`，共享 dirty worktree；必须保留全部其他改动。
-- 未 commit/push。
+- Branch: `main`；本地产品改动已提交，正在整合 `origin/main` 的单个旧提交，完成复审后推送。
 - Cloudflare Worker production version 80 已于上海时间 2026-08-13 04:21 部署并承接 100% 流量。
 - 物理 iPhone 保持此前恢复的 old clean app；本轮 iOS 新代码未安装真机，未修改设备数据。
 - 磁盘当前约 26 GiB 可用，无需清理用户/共享缓存。
@@ -35,6 +35,7 @@
 - Import Cheki先EXIF归正再应用input quarterTurns，各一次；mini/wide按方向无关比例推断并等比aspect-fit。Mini P/L 1200×1908/1908×1200；Wide P/L 1908×2400/2400×1908；unknown保持方向且ledger size nil。
 - Event图片viewer按UUID打开，支持分页、1–4x缩放、下拉或Close关闭，不改存储。
 - GPU startup public status在preparing时可带`progress:{current,total:3}`：1检查/启动控制，2等待Pod，3已RUNNING等待strict health；其它状态不带progress。iOS显示Preparing x/3，旧/畸形字段回退普通Preparing。
+- 本地 Backend/Worker 拍立得识别合同保持 `image + ink=0|1` 异步流程，status 可带图像 artifact、date/pixel bbox 与 pattern；pattern 只允许 `pattern1`–`pattern6` 或 `unassigned`。
 
 ## Authoritative References And Routing
 
@@ -45,6 +46,7 @@
 - Trigger: 真机birthday转换。不得直接重试；current V4无法打开active V4 store，须先在真实store副本证明reopen兼容。
 - Carry forward: Scan Input/Review均逆时针旋转；无媒体Shame/Douga真机删除仍未执行。
 - Trigger: Import Cheki尺寸/方向。阅读ProductShell LocalImport processor/media loader/Review preview及CommandExecutor temporary ledger；禁止固定portrait拉伸或固定mini。
+- Trigger: 修改/审查拍立得识别 API、pattern 映射、result download 或对应 Frontend。完整阅读 `docs/agents/prompts/frontend-polaroid-recognition-v1.md`；保持 pixel bbox、`ink=0|1`、`pattern1`–`pattern6|unassigned` 合同。
 
 ## Scope And Non-Goals
 
