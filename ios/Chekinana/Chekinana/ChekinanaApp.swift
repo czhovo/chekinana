@@ -12,6 +12,59 @@ final class StatusBarHostingController<Content: View>: UIHostingController<Conte
     }
 }
 
+private struct ChekinanaLocalizedRootView: View {
+    @StateObject private var languageStore = ChekinanaLanguageStore.shared
+    let content: AnyView
+
+    var body: some View {
+        content
+            .environment(\.locale, languageStore.displayLocale)
+            .environment(\.chekinanaLanguageRevision, languageStore.revision)
+            .environmentObject(languageStore)
+    }
+}
+
+private struct ChekinanaDataStoreRecoveryView: View {
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(.purple)
+                .accessibilityHidden(true)
+
+            Text(ChekinanaL10n.text(
+                "datastore.recovery.title",
+                fallback: "Your library could not be opened"
+            ))
+            .font(.title3.weight(.semibold))
+            .multilineTextAlignment(.center)
+
+            Text(ChekinanaL10n.text(
+                "datastore.recovery.message",
+                fallback: "Your saved data was not cleared or replaced. Retry opening the same library."
+            ))
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+
+            Button(action: onRetry) {
+                Text(ChekinanaL10n.text("common.retry", fallback: "Retry"))
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .accessibilityIdentifier("datastore.retry")
+        }
+        .padding(28)
+        .frame(maxWidth: 460)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("datastore.recovery")
+    }
+}
+
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
@@ -24,16 +77,77 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
 
-#if DEBUG
-        ChekinanaDataStore.resetForUITestingIfRequested()
-#endif
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = StatusBarHostingController(
-            rootView: ContentView()
-                .modelContainer(ChekinanaDataStore.shared)
-        )
         self.window = window
+        installRoot(in: window)
         window.makeKeyAndVisible()
+    }
+
+    private func installRoot(in window: UIWindow) {
+        switch ChekinanaDataStore.open() {
+        case .success(let container):
+            installProductRoot(in: window, container: container)
+        case .failure:
+            installRecoveryRoot(in: window)
+        }
+    }
+
+    private func installRecoveryRoot(in window: UIWindow) {
+        let recovery = ChekinanaDataStoreRecoveryView { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.installRoot(in: window)
+        }
+        window.rootViewController = StatusBarHostingController(
+            rootView: ChekinanaLocalizedRootView(content: AnyView(recovery))
+        )
+    }
+
+    private func installProductRoot(
+        in window: UIWindow,
+        container: ModelContainer
+    ) {
+#if DEBUG
+        do {
+            try ChekinanaDataStore.resetForUITestingIfRequested(in: container)
+        } catch {
+            installRecoveryRoot(in: window)
+            return
+        }
+#endif
+        let launchContext = ModelContext(container)
+        try? ChekinanaEventMediaJournal.recover(modelContext: launchContext)
+        ChekinanaGalleryMediaStore.cleanupRestoreRecoveries()
+        ChekinanaGalleryMediaStore.cleanupCommittedDeletions()
+        ChekinanaGalleryMediaStore.cleanupOrphanedImports()
+        ChekinanaGalleryMediaStore.cleanupStagedImports()
+        ChekinanaCapturedPhotoStore.cleanupStaleFiles()
+#if DEBUG
+        ChekinanaProductUITestFixture.seedIfRequested(in: container)
+#endif
+        ChekinanaPresetSeedPolicy.resetForUITestingIfRequested()
+        if ChekinanaPresetSeedPolicy.shouldSeed() {
+            do {
+                try ChekinanaPresetIdolSeeder.ensureSeeds(in: launchContext)
+            } catch {
+                // The app remains usable when a launch-time seed cannot be saved;
+                // native Idol screens expose missing-pattern state explicitly.
+            }
+        }
+        let rootView: AnyView
+#if DEBUG
+        if ProcessInfo.processInfo.environment["CHEKINANA_UI_LAUNCH_ID"] != nil
+            || ProcessInfo.processInfo.environment["CHEKINANA_UI_OPEN_ASSISTANT"] == "1" {
+            rootView = AnyView(ContentView())
+        } else {
+            rootView = AnyView(ChekinanaProductShell())
+        }
+#else
+        rootView = AnyView(ChekinanaProductShell())
+#endif
+        window.rootViewController = StatusBarHostingController(
+            rootView: ChekinanaLocalizedRootView(content: rootView)
+                .modelContainer(container)
+        )
     }
 }
 

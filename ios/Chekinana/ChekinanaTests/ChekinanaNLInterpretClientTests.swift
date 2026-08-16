@@ -18,7 +18,7 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
             expectation.fulfill()
             return (
                 200,
-                Data(#"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["用户输入的名字"],"date":"2026-07-16","user":"?"}}]}"#.utf8)
+                Data(#"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["用户输入的名字"],"date":"2026-07-16"}}]}"#.utf8)
             )
         }
         let client = makeClient()
@@ -27,7 +27,7 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
                 intent: .addcheki,
                 slots: .init(idols: ["用户输入的名字"])
             ),
-            missing: [.eventOrDate]
+            missing: [.date]
         )
 
         let result = try await client.interpret(
@@ -57,7 +57,7 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
         let encodedDraft = try XCTUnwrap(object["draft"] as? [String: Any])
         XCTAssertEqual(Set(encodedDraft.keys), ["intent", "slots", "missing"])
         XCTAssertEqual(encodedDraft["intent"] as? String, "addcheki")
-        XCTAssertEqual(encodedDraft["missing"] as? [String], ["event_or_date"])
+        XCTAssertEqual(encodedDraft["missing"] as? [String], ["date"])
         let encodedSlots = try XCTUnwrap(encodedDraft["slots"] as? [String: Any])
         XCTAssertEqual(Set(encodedSlots.keys), ["idols"])
         XCTAssertEqual(encodedSlots["idols"] as? [String], ["用户输入的名字"])
@@ -276,13 +276,13 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
                 firstBody = requestBodyData(request)
                 return (
                     200,
-                    Data(#"{"version":1,"kind":"clarify","draft":{"intent":"addcheki","slots":{"idols":["A"]}},"missing":["event_or_date"]}"#.utf8)
+                    Data(#"{"version":1,"kind":"clarify","draft":{"intent":"addevent","slots":{"name":"E"}},"missing":["date"]}"#.utf8)
                 )
             }
             secondBody = requestBodyData(request)
             return (
                 200,
-                Data(#"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["A"],"date":"2026-07-16"}}]}"#.utf8)
+                Data(#"{"version":1,"kind":"plan","operations":[{"intent":"addevent","slots":{"name":"E","date":"2026-07-16"}}]}"#.utf8)
             )
         }
         let client = makeClient()
@@ -314,19 +314,19 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let draft = try XCTUnwrap(object["draft"] as? [String: Any])
         XCTAssertEqual(Set(draft.keys), ["intent", "slots", "missing"])
-        XCTAssertEqual(draft["missing"] as? [String], ["event_or_date"])
+        XCTAssertEqual(draft["missing"] as? [String], ["date"])
     }
 
     func testContinuationRejectsChangedIntentExistingSlotsAndUnrequestedSlots() async {
         let draft = ChekinanaNLRequestDraft(
-            operation: .init(intent: .addcheki, slots: .init(idols: ["A"])),
-            missing: [.eventOrDate]
+            operation: .init(intent: .addevent, slots: .init(name: "E")),
+            missing: [.date]
         )
         let invalidResponses = [
             #"{"version":1,"kind":"plan","operations":[{"intent":"showidol","slots":{"target":"A"}}]}"#,
             #"{"version":1,"kind":"clarify","draft":{"intent":"addidol","slots":{}},"missing":["idol"]}"#,
-            #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["B"],"date":"2026-07-16"}}]}"#,
-            #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["A"],"date":"2026-07-16","note":"invented"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"addevent","slots":{"name":"Other","date":"2026-07-16"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"addevent","slots":{"name":"E","date":"2026-07-16","note":"invented"}}]}"#,
         ]
         for json in invalidResponses {
             ChekinanaMockURLProtocol.handler = { _ in (200, Data(json.utf8)) }
@@ -373,16 +373,32 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
             .init(intent: .addcheki, slots: .init(date: "2026-07-16", idols: ["Ａ", "a"])),
             .init(intent: .addcheki, slots: .init(date: "2026-07-16", idols: [String(repeating: "i", count: 201)])),
             .init(intent: .addcheki, slots: .init(date: "2026-07-16", idols: ["A"], note: String(repeating: "n", count: 501))),
-            .init(intent: .listcheki, slots: .init(date: "2026-07-16", event: "E")),
+            .init(intent: .listcheki, slots: .init(date: "2026-13-40", event: "E")),
         ]
         for operation in invalidOperations {
             XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan([operation]), operation.intent.rawValue)
         }
     }
 
+    func testChekiMediaOnlyPlansDoNotRequireAssociationClarification() throws {
+        for intent in [ChekinanaNLIntent.addcheki, .addscancheki] {
+            let operation = ChekinanaNLOperation(intent: intent)
+            XCTAssertEqual(ChekinanaNLSchemaValidator.expectedMissing(for: operation), [])
+            XCTAssertNoThrow(try ChekinanaNLSchemaValidator.validatePlan([operation]))
+            XCTAssertThrowsError(
+                try ChekinanaNLSchemaValidator.validateDraft(
+                    operation,
+                    missing: intent == .addcheki ? [.idol] : [.temporaryCheki]
+                )
+            ) { error in
+                XCTAssertEqual(error as? ChekinanaNLClientError, .invalidSchema)
+            }
+        }
+    }
+
     func testDecodesClarifyAndReject() async throws {
         ChekinanaMockURLProtocol.handler = { _ in
-            (200, Data(#"{"version":1,"kind":"clarify","draft":{"intent":"addcheki","slots":{"note":"用户输入"}},"missing":["idol","event_or_date"]}"#.utf8))
+            (200, Data(#"{"version":1,"kind":"clarify","draft":{"intent":"addidol","slots":{}},"missing":["idol"]}"#.utf8))
         }
         let client = makeClient()
         let clarify = try await client.interpret(
@@ -393,8 +409,8 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
         guard case .clarify(let draft, let missing) = clarify else {
             return XCTFail("expected clarify")
         }
-        XCTAssertEqual(draft.intent, .addcheki)
-        XCTAssertEqual(missing, [.idol, .eventOrDate])
+        XCTAssertEqual(draft.intent, .addidol)
+        XCTAssertEqual(missing, [.idol])
 
         ChekinanaMockURLProtocol.handler = { _ in
             (200, Data(#"{"version":1,"kind":"reject","code":"unsupported_request"}"#.utf8))
@@ -436,20 +452,17 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
         }
 
         ChekinanaMockURLProtocol.handler = { _ in
-            (
-                200,
-                Data(#"{"version":1,"kind":"clarify","draft":{"intent":"addscancheki","slots":{}},"missing":["event_or_date","idol","temporary_cheki"]}"#.utf8)
-            )
+            (200, Data(#"{"version":1,"kind":"plan","operations":[{"intent":"addscancheki","slots":{}}]}"#.utf8))
         }
-        let reordered = try await client.interpret(
-            utterance: "继续",
+        let mediaOnly = try await client.interpret(
+            utterance: "保存扫描结果",
             localDate: "2026-07-16",
             timezone: "Asia/Shanghai"
         )
-        guard case .clarify(_, let missing) = reordered else {
-            return XCTFail("expected clarify")
+        guard case .plan(let operations) = mediaOnly else {
+            return XCTFail("expected media-only plan")
         }
-        XCTAssertEqual(missing, [.eventOrDate, .idol, .temporaryCheki])
+        XCTAssertEqual(operations, [.init(intent: .addscancheki)])
     }
 
     func testEventNameMissingContractAcceptsURLPartialDrafts() async throws {
@@ -550,7 +563,7 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
             #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["A"],"date":"2026-07-16","idx":1}}]}"#,
             #"{"version":1,"kind":"plan","operations":[{"intent":"addidol","slots":{"name":"A"}},{"intent":"addevent","slots":{"name":"E","date":"2026-07-16"}}]}"#,
             #"{"version":1,"kind":"plan","operations":[{"intent":"addevent","slots":{"url":"https://example.com/live"}}]}"#,
-            #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["A"],"event":"E","date":"2026-07-16"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"date":"2026-13-40"}}]}"#,
             #"{"version":1,"kind":"plan","operations":[{"intent":"addcheki","slots":{"idols":["Ａ","a"],"date":"2026-07-16"}}]}"#,
             #"{"version":1,"kind":"plan","operations":[{"intent":"addevent","slots":{"name":"https://example.com/live","date":"2026-07-16"}}]}"#,
             #"{"version":1,"kind":"plan","operations":[{"intent":"addidol","slots":{"name":"A"}}],"extra":true}"#,
@@ -673,6 +686,175 @@ final class ChekinanaNLInterpretClientTests: XCTestCase {
             return XCTFail("expected plan")
         }
         XCTAssertEqual(operations.map(\.intent), [.addidol, .addidol])
+    }
+
+    func testPlanCardinalityAllowsLargeAddIdolOnly() throws {
+        let addIdols = (1...25).map {
+            ChekinanaNLOperation(
+                intent: .addidol,
+                slots: .init(name: "Idol \($0)")
+            )
+        }
+        XCTAssertNoThrow(try ChekinanaNLSchemaValidator.validatePlan(addIdols))
+
+        let tooManyEvents = (1...6).map {
+            ChekinanaNLOperation(
+                intent: .addevent,
+                slots: .init(name: "Event \($0)", date: "2026-07-16")
+            )
+        }
+        XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan(tooManyEvents)) {
+            XCTAssertEqual($0 as? ChekinanaNLClientError, .invalidSchema)
+        }
+        XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan([])) {
+            XCTAssertEqual($0 as? ChekinanaNLClientError, .invalidSchema)
+        }
+        XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan([
+            addIdols[0],
+            ChekinanaNLOperation(
+                intent: .addevent,
+                slots: .init(name: "Mixed", date: "2026-07-16")
+            ),
+        ])) {
+            XCTAssertEqual($0 as? ChekinanaNLClientError, .invalidSchema)
+        }
+        XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan([
+            ChekinanaNLOperation(intent: .listidol),
+            ChekinanaNLOperation(intent: .listidol),
+        ])) {
+            XCTAssertEqual($0 as? ChekinanaNLClientError, .invalidSchema)
+        }
+    }
+
+    func testClientAcceptsTwentyOneAndTwentyFiveAddIdolOperations() async throws {
+        for count in [21, 25] {
+            let operationsJSON = (1...count).map {
+                #"{"intent":"addidol","slots":{"name":"Idol \#($0)"}}"#
+            }.joined(separator: ",")
+            let responseJSON =
+                #"{"version":1,"kind":"plan","operations":[\#(operationsJSON)]}"#
+            ChekinanaMockURLProtocol.handler = { _ in
+                (200, Data(responseJSON.utf8))
+            }
+
+            let result = try await makeClient().interpret(
+                utterance: "添加 \(count) 个 Idol",
+                localDate: "2026-07-16",
+                timezone: "Asia/Shanghai"
+            )
+            guard case .plan(let operations) = result else {
+                return XCTFail("expected \(count)-operation Add Idol plan")
+            }
+            XCTAssertEqual(operations.count, count)
+            XCTAssertTrue(operations.allSatisfy { $0.intent == .addidol })
+            XCTAssertEqual(operations.first?.slots.name, "Idol 1")
+            XCTAssertEqual(operations.last?.slots.name, "Idol \(count)")
+        }
+    }
+
+    func testClientRejectsEmptyMixedAndOversizedEventPlans() async {
+        let eventOperations = (1...6).map {
+            #"{"intent":"addevent","slots":{"name":"Event \#($0)","date":"2026-07-16"}}"#
+        }.joined(separator: ",")
+        let invalidResponses = [
+            #"{"version":1,"kind":"plan","operations":[]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"addidol","slots":{"name":"A"}},{"intent":"addevent","slots":{"name":"E","date":"2026-07-16"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[\#(eventOperations)]}"#,
+        ]
+
+        for json in invalidResponses {
+            ChekinanaMockURLProtocol.handler = { _ in (200, Data(json.utf8)) }
+            await XCTAssertThrowsErrorAsync {
+                _ = try await self.makeClient().interpret(
+                    utterance: "请求",
+                    localDate: "2026-07-16",
+                    timezone: "Asia/Shanghai"
+                )
+            } verify: { error in
+                XCTAssertEqual(error as? ChekinanaNLClientError, .invalidSchema)
+            }
+        }
+    }
+
+    func testStructuredAssistantPlanDecodesHeterogeneousOperationsInOrder() async throws {
+        ChekinanaMockURLProtocol.handler = { _ in
+            (
+                200,
+                Data(#"{"version":1,"kind":"plan","operations":[{"intent":"navigate","slots":{"destination":"calendar","date":"2026-08-09"}},{"intent":"open_scan","slots":{"recognize_date":true,"fixed_date":"2026-08-09","recognize_idol":true,"candidate_refs":["砂糖心跳"],"includes_unassigned":false}},{"intent":"addrecord","slots":{"record_type":"shame","idols":["砂糖心跳"],"note":"memo"}},{"intent":"editrecord","slots":{"record_type":"cheki","target":"the selected record","favorite":false,"clear_fields":["note"]}}]}"#.utf8)
+            )
+        }
+
+        let result = try await makeClient().interpret(
+            utterance: "按顺序执行这些操作",
+            localDate: "2026-08-09",
+            timezone: "Asia/Shanghai"
+        )
+        guard case .plan(let operations) = result else {
+            return XCTFail("expected plan")
+        }
+        XCTAssertEqual(operations.map(\.intent), [.navigate, .openScan, .addrecord, .editrecord])
+        XCTAssertEqual(operations[1].slots.candidateRefs, ["砂糖心跳"])
+        XCTAssertEqual(operations[2].slots.recordType, "shame")
+        XCTAssertEqual(operations[3].slots.favorite, false)
+        XCTAssertEqual(operations[3].slots.clearFields, ["note"])
+    }
+
+    func testStructuredAssistantSchemaRejectsCrossFieldAndUnsafeReferenceShapes() async {
+        let invalidBodies = [
+            #"{"version":1,"kind":"plan","operations":[{"intent":"navigate","slots":{"destination":"gallery","date":"2026-08-09"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"open_scan","slots":{"recognize_date":false,"fixed_date":"2026-08-09"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"listrecord","slots":{"idx":1}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"showrecord","slots":{"record_type":"shame","target":"550e8400-e29b-41d4-a716-446655440000"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"addrecord","slots":{"record_type":"douga","favorite":true}}]}"#,
+        ]
+
+        for body in invalidBodies {
+            ChekinanaMockURLProtocol.handler = { _ in (200, Data(body.utf8)) }
+            await XCTAssertThrowsErrorAsync {
+                _ = try await self.makeClient().interpret(
+                    utterance: "执行记录操作",
+                    localDate: "2026-08-09",
+                    timezone: "Asia/Shanghai"
+                )
+            } verify: { error in
+                XCTAssertEqual(error as? ChekinanaNLClientError, .invalidSchema, body)
+            }
+        }
+    }
+
+    func testEditIdolAndEditChekiSchemaMatchesWorkerClearAndUserRules() async throws {
+        ChekinanaMockURLProtocol.handler = { _ in
+            (200, Data(#"{"version":1,"kind":"plan","operations":[{"intent":"editidol","slots":{"target":"Mina","clear_fields":["avatar","bio"]}},{"intent":"editcheki","slots":{"target":"the selected Cheki","user":"false"}},{"intent":"editcheki","slots":{"target":"the selected Cheki","clear_fields":["user"]}}]}"#.utf8))
+        }
+        let result = try await makeClient().interpret(
+            utterance: "update the selected objects",
+            localDate: "2026-08-09",
+            timezone: "Asia/Shanghai"
+        )
+        guard case .plan(let operations) = result else { return XCTFail("expected plan") }
+        XCTAssertEqual(operations.map(\.intent), [.editidol, .editcheki, .editcheki])
+        XCTAssertEqual(operations[0].slots.clearFields, ["avatar", "bio"])
+        XCTAssertEqual(operations[1].slots.user, "false")
+        XCTAssertEqual(operations[2].slots.clearFields, ["user"])
+
+        let invalidBodies = [
+            #"{"version":1,"kind":"plan","operations":[{"intent":"editidol","slots":{"target":"Mina","bio":"new","clear_fields":["bio"]}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"editidol","slots":{"target":"Mina","clear_fields":["name"]}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"editcheki","slots":{"target":"the selected Cheki","user":"unknown"}}]}"#,
+            #"{"version":1,"kind":"plan","operations":[{"intent":"editcheki","slots":{"target":"the selected Cheki","user":"true","clear_fields":["user"]}}]}"#,
+        ]
+        for body in invalidBodies {
+            ChekinanaMockURLProtocol.handler = { _ in (200, Data(body.utf8)) }
+            await XCTAssertThrowsErrorAsync {
+                _ = try await self.makeClient().interpret(
+                    utterance: "invalid patch",
+                    localDate: "2026-08-09",
+                    timezone: "Asia/Shanghai"
+                )
+            } verify: { error in
+                XCTAssertEqual(error as? ChekinanaNLClientError, .invalidSchema)
+            }
+        }
     }
 
     private func makeClient() -> ChekinanaNLInterpretClient {

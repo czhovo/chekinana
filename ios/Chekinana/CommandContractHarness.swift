@@ -6,7 +6,7 @@ enum CommandContractHarness {
     @MainActor
     static func main() throws {
         try testDirectCommandRegistry()
-        testLLMFirstPromptRouting()
+        testRemotePromptContract()
         try testParserURLTarget()
         try testEventURLDraftContract()
         try testExtractedEventCandidateContract()
@@ -15,22 +15,22 @@ enum CommandContractHarness {
         print("command contract harness: all checks passed")
     }
 
-    private static func testLLMFirstPromptRouting() {
-        for input in ["确认上一步", "confirm deadbeef", "取消全部操作", "清空聊天记录"] {
-            precondition(ChekinanaPromptRouting.localStateCommand(from: input) != nil, input)
-        }
+    private static func testRemotePromptContract() {
         for input in [
-            "你好",
-            "列出所有偶像",
-            "添加活动 Summer Live 2026-08-01",
-            "查看这张切",
-            "扫描这些切",
-            "https://weibo.com/123456/AbC123",
-            "创建 Event https://weibo.com/123456/AbC123",
-            "listidol",
+            "添加以下idol：巫歌 饭饭 木兰",
+            "扫描已选照片",
+            "scancheki",
+            "取消",
         ] {
-            precondition(ChekinanaPromptRouting.localStateCommand(from: input) == nil, input)
+            precondition(ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(input), input)
         }
+        precondition(!ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            "确认 deadbeef",
+            activeConfirmationCodes: ["deadbeef"]
+        ))
+        precondition(!ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            "请添加活动 https://user:password@example.com/live"
+        ))
 
         precondition(
             ChekinanaQuickActions.all.map(\.label)

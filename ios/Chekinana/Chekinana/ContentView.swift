@@ -1,14 +1,106 @@
 import PhotosUI
+import OSLog
 import SwiftData
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-private struct PendingNaturalLanguageRequest: Equatable, Sendable {
+enum ChekinanaAccessibilityMetrics {
+    static let minimumTouchTarget: CGFloat = 44
+}
+
+extension View {
+    func chekinanaMinimumTouchTarget() -> some View {
+        frame(
+            minWidth: ChekinanaAccessibilityMetrics.minimumTouchTarget,
+            minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+struct ChekinanaRotatingActivityArc: View {
+    @State private var rotation = Angle.zero
+
+    var body: some View {
+        Circle()
+            .trim(from: 0.08, to: 0.78)
+            .stroke(
+                Color.accentColor,
+                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+            )
+            .frame(width: 26, height: 26)
+            .rotationEffect(rotation)
+            .onAppear {
+                rotation = .degrees(360)
+            }
+            .animation(
+                .linear(duration: 0.8).repeatForever(autoreverses: false),
+                value: rotation
+            )
+    }
+}
+
+fileprivate struct PendingNaturalLanguageRequest: Equatable, Sendable {
     let input: String
     let draft: ChekinanaNLRequestDraft?
     let activeConfirmationCodes: Set<String>
     let selections: ChekinanaConversationSelections
+}
+
+#if DEBUG
+enum ChekinanaAssistantTimingLog {
+    private static let logger = Logger(
+        subsystem: "app.chekinana.ios",
+        category: "AssistantTiming"
+    )
+
+    static func completed(
+        stage: String,
+        messageCount: Int,
+        cardCount: Int,
+        startedAt: UInt64
+    ) {
+        let elapsed = (DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        logger.debug(
+            "stage=\(stage, privacy: .public) messages=\(messageCount, privacy: .public) cards=\(cardCount, privacy: .public) elapsed_ms=\(elapsed, privacy: .public)"
+        )
+    }
+}
+
+private enum ChekinanaNLTimingLog {
+    private static let logger = Logger(
+        subsystem: "app.chekinana.ios",
+        category: "NLTiming"
+    )
+
+    static func completed(operationCount: Int, startedAt: UInt64) {
+        let elapsed = (DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        logger.debug(
+            "interpret completed operations=\(operationCount, privacy: .public) elapsed_ms=\(elapsed, privacy: .public)"
+        )
+    }
+
+    static func failed(startedAt: UInt64) {
+        let elapsed = (DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        logger.debug("interpret failed operations=0 elapsed_ms=\(elapsed, privacy: .public)")
+    }
+}
+#endif
+
+private struct TemporaryChekiEditorDraft: Equatable {
+    var id = UUID()
+    var idolIDs = Set<UUID>()
+    var hasDate = false
+    var date = Date()
+    var eventID: UUID?
+    var idxText = ""
+    var initialIdxText = ""
+    var userAppears: Bool?
+    var size: ChekiSize?
+    var isFavorite = false
+    var hasPostedToSNS = false
+    var note = ""
 }
 
 enum ChekinanaPromptSubmissionPolicy {
@@ -55,8 +147,116 @@ enum ChekinanaGreetingLanguage {
     }
 }
 
-enum ChekinanaScannerDateAnnotationDefaults {
-    static let isEnabled = false
+enum ChekinanaScannerRecognitionDefaults {
+    static let dateIsEnabled = false
+    static let idolIsEnabled = false
+}
+
+enum ChekinanaDateOnly {
+    private static let carrierCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }()
+
+    static func canonicalDate(
+        from date: Date,
+        displayedIn sourceCalendar: Calendar
+    ) -> Date? {
+        let displayCalendar = gregorianCalendar(in: sourceCalendar.timeZone)
+        let components = displayCalendar.dateComponents(
+            [.year, .month, .day],
+            from: date
+        )
+        return canonicalDate(
+            year: components.year,
+            month: components.month,
+            day: components.day
+        )
+    }
+
+    static func canonicalized(_ date: Date) -> Date? {
+        let components = carrierCalendar.dateComponents(
+            [.year, .month, .day],
+            from: date
+        )
+        return canonicalDate(
+            year: components.year,
+            month: components.month,
+            day: components.day
+        )
+    }
+
+    static func displayDate(
+        from canonicalDate: Date,
+        calendar sourceCalendar: Calendar
+    ) -> Date? {
+        let components = carrierCalendar.dateComponents(
+            [.year, .month, .day],
+            from: canonicalDate
+        )
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day else { return nil }
+        var displayed = DateComponents()
+        displayed.year = year
+        displayed.month = month
+        displayed.day = day
+        displayed.hour = 12
+        return gregorianCalendar(in: sourceCalendar.timeZone).date(from: displayed)
+    }
+
+    static func canonicalDate(year: Int?, month: Int?, day: Int?) -> Date? {
+        guard let year, let month, let day else { return nil }
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        guard let date = carrierCalendar.date(from: components) else { return nil }
+        let resolved = carrierCalendar.dateComponents([.year, .month, .day], from: date)
+        guard resolved.year == year,
+              resolved.month == month,
+              resolved.day == day else { return nil }
+        return date
+    }
+
+    static func parse(_ value: String) -> Date? {
+        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0].count == 4,
+              parts[1].count == 2,
+              parts[2].count == 2,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]) else { return nil }
+        return canonicalDate(year: year, month: month, day: day)
+    }
+
+    static func string(_ canonicalDate: Date) -> String {
+        let components = components(canonicalDate)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+
+    static func sameDay(_ lhs: Date, _ rhs: Date) -> Bool {
+        string(lhs) == string(rhs)
+    }
+
+    static func components(_ canonicalDate: Date) -> DateComponents {
+        carrierCalendar.dateComponents([.year, .month, .day], from: canonicalDate)
+    }
+
+    private static func gregorianCalendar(in timeZone: TimeZone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        return calendar
+    }
 }
 
 #if DEBUG
@@ -113,7 +313,7 @@ enum ChekinanaMediaUITestFixture {
 #endif
 
 enum ChekinanaSelectedChekiLanguage {
-    private static let referencePattern = #"(?:这张|刚才那张|选中的)\s*(?:cheki|切己|切)"#
+    private static let referencePattern = #"(?:(?:这张|刚才那张|选中的)\s*(?:cheki|切己|切)|(?:this|the\s+selected|selected|the\s+last)\s+cheki|(?:この|選択した|さっきの)\s*(?:チェキ|cheki))"#
 
     static func referencesSelectedCheki(_ input: String) -> Bool {
         input.range(
@@ -170,6 +370,11 @@ struct ContentView: View {
     private static let transcriptBottomID = "chekinana.transcript.bottom"
     private static let idolConfirmationTimeoutNanoseconds: UInt64 = 5_000_000_000
 
+    private let onClose: (() -> Void)?
+    private let onShellAction: ((ChekinanaAssistantShellAction) -> Void)?
+    private let initialScannerLaunch: ChekinanaAssistantScanLaunch?
+    private let session: ChekinanaAssistantSession
+
     @Environment(\.modelContext) private var modelContext
 
     @State private var prompt = ""
@@ -188,41 +393,103 @@ struct ContentView: View {
     @State private var eventCandidateState = ChekinanaEventCandidateStateMachine()
     @State private var eventCandidateBusyOwner = ChekinanaEventCandidateBusyOwner()
     @State private var eventCandidateTask: Task<Void, Never>?
+    @State private var activeEventCandidateRequest: EventCandidateRequest?
     @State private var mediaLoadProgress = ""
-    @State private var transcriptMessages: [TranscriptMessage] = []
-    @State private var activeIdolCandidateTokens = Set<String>()
+    @State private var transcriptMessages: [TranscriptMessage]
+    @State private var activeIdolCandidateTokens: Set<String>
+    @State private var confirmedIdolCandidateTokens: Set<String>
     @State private var isSubmitting = false
-    @State private var confirmationLedger = ChekinanaConfirmationLedger()
-    @State private var conversationState = ChekinanaConversationState()
+    @State private var confirmationLedger: ChekinanaConfirmationLedger
+    @State private var conversationState: ChekinanaConversationState
     @State private var clarificationDate = Date()
     @State private var nlRequestTask: Task<Void, Never>?
     @State private var nlRequestGate = ChekinanaNLRequestGenerationGate()
     @State private var activeNLRequest: PendingNaturalLanguageRequest?
     @State private var pendingNLRetry: PendingNaturalLanguageRequest?
     @State private var selectedChekiID: UUID?
-    @State private var isScannerDateAnnotationEnabled =
-        ChekinanaScannerDateAnnotationDefaults.isEnabled
+    @State private var transcriptScrollRequest = ChekinanaTranscriptScrollRequest.none
+    @State private var isClosing = false
+    @State private var isScannerDateRecognitionEnabled =
+        ChekinanaScannerRecognitionDefaults.dateIsEnabled
+    @State private var isScannerIdolRecognitionEnabled =
+        ChekinanaScannerRecognitionDefaults.idolIsEnabled
+    @State private var scannerDateBounds: ChekinanaScannerDateBounds?
+    @State private var scannerCandidateIDs: Set<UUID>?
+    @State private var scannerIncludesUnassignedCandidate = false
+    @State private var didHandleInitialScannerLaunch = false
+    @State private var temporaryEditorDraft = TemporaryChekiEditorDraft()
+    @State private var isTemporaryEditorPresented = false
     @FocusState private var isPromptFocused: Bool
 
+    init(
+        session: ChekinanaAssistantSession = ChekinanaAssistantSession(),
+        onClose: (() -> Void)? = nil,
+        onShellAction: ((ChekinanaAssistantShellAction) -> Void)? = nil,
+        initialScannerLaunch: ChekinanaAssistantScanLaunch? = nil,
+        initialPrompt: String? = nil
+    ) {
+        self.session = session
+        self.onClose = onClose
+        self.onShellAction = onShellAction
+        self.initialScannerLaunch = initialScannerLaunch
+        _prompt = State(initialValue: initialPrompt ?? (initialScannerLaunch == nil ? session.prompt : "scancheki"))
+        _transcriptMessages = State(initialValue: session.transcriptMessages)
+        _activeIdolCandidateTokens = State(initialValue: session.activeIdolCandidateTokens)
+        _confirmedIdolCandidateTokens = State(initialValue: session.confirmedIdolCandidateTokens)
+        _confirmationLedger = State(initialValue: session.confirmationLedger)
+        _conversationState = State(initialValue: session.conversationState)
+        _selectedChekiID = State(initialValue: session.selectedChekiID)
+        _pendingNLRetry = State(initialValue: session.pendingNLRetry)
+        _selectedItems = State(initialValue: initialScannerLaunch?.items ?? [])
+        _isScannerDateRecognitionEnabled = State(
+            initialValue: initialScannerLaunch?.dateRecognitionEnabled
+                ?? ChekinanaScannerRecognitionDefaults.dateIsEnabled
+        )
+        _isScannerIdolRecognitionEnabled = State(
+            initialValue: initialScannerLaunch?.idolRecognitionEnabled
+                ?? ChekinanaScannerRecognitionDefaults.idolIsEnabled
+        )
+        _scannerDateBounds = State(initialValue: initialScannerLaunch?.dateBounds)
+        _scannerCandidateIDs = State(initialValue: initialScannerLaunch?.candidateIDs)
+        _scannerIncludesUnassignedCandidate = State(
+            initialValue: initialScannerLaunch?.includesUnassigned ?? false
+        )
+    }
+
     var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.white
-                .ignoresSafeArea()
+        ZStack {
+            ChekinanaDesignSystem.pageBackground
+                .ignoresSafeArea(.container, edges: .all)
 
             VStack(spacing: 0) {
                 titleBar
                 transcript
-                composer
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chekinana.root")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composer
         }
         .statusBarHidden(false)
-        .preferredColorScheme(.light)
         .photosPicker(
             isPresented: albumPickerPresentationBinding,
             selection: albumPickerSelectionBinding,
-            maxSelectionCount: 9,
+            maxSelectionCount: 0,
             matching: .images
         )
+        .sheet(isPresented: $isTemporaryEditorPresented) {
+            let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+            TemporaryChekiEditorView(
+                draft: $temporaryEditorDraft,
+                idols: ((try? modelContext.fetch(FetchDescriptor<Idol>())) ?? [])
+                    .filter { ChekinanaVisibilityPolicy.includesIdol($0.id, hiddenIDs: hiddenIDs) },
+                events: (try? modelContext.fetch(FetchDescriptor<Event>())) ?? [],
+                onSave: saveTemporaryEditor,
+                onCancel: { isTemporaryEditorPresented = false }
+            )
+        }
         .onAppear {
 #if DEBUG
             if let prefill = ProcessInfo.processInfo.environment["CHEKINANA_UI_PREFILL"],
@@ -235,17 +502,29 @@ struct ContentView: View {
                     content: .chekiCards([ChekinanaMediaUITestFixture.previewCard()])
                 ))
             }
+            if ProcessInfo.processInfo.environment["CHEKINANA_ASSISTANT_SESSION_UI_STUB"] == "long_candidates",
+               transcriptMessages.isEmpty {
+                installLongCandidateUITestFixture()
+            }
 #endif
+            guard initialScannerLaunch != nil, !didHandleInitialScannerLaunch else {
+                return
+            }
+            didHandleInitialScannerLaunch = true
+            Task { @MainActor in
+                await Task.yield()
+                submitPrompt()
+            }
         }
         .onDisappear {
-            invalidateRemoteRequest()
-            commandExecutionTask?.cancel()
-            invalidateIdolRunners()
-            invalidateEventCandidateFlow()
-            albumProcessingTask?.cancel()
+            suspendAssistantSession()
+            captureAssistantSession()
         }
         .overlay(alignment: .topLeading) {
             uiTestLaunchMarker
+        }
+        .overlay(alignment: .topTrailing) {
+            initialScanLaunchMarker
         }
     }
 
@@ -267,33 +546,82 @@ struct ContentView: View {
 #endif
     }
 
+    @ViewBuilder
+    private var initialScanLaunchMarker: some View {
+#if DEBUG
+        if let launch = initialScannerLaunch {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Initial scanner launch")
+                .accessibilityValue(
+                    "photos=\(launch.items.count);date=\(launch.dateRecognitionEnabled ? 1 : 0);idol=\(launch.idolRecognitionEnabled ? 1 : 0);candidates=\(launch.candidateIDs.count);unassigned=\(launch.includesUnassigned ? 1 : 0);handled=\(didHandleInitialScannerLaunch ? 1 : 0)"
+                )
+                .accessibilityIdentifier("chekinana.assistant.scan-launch")
+                .allowsHitTesting(false)
+        }
+#else
+        EmptyView()
+#endif
+    }
+
     private var titleBar: some View {
-        Text("Chekinana")
-            .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(.black)
+        ZStack(alignment: .topTrailing) {
+            HStack(spacing: 0) {
+                if onClose != nil {
+                    Button(action: requestClose) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .disabled(isClosing)
+                    .accessibilityLabel(ChekinanaL10n.text("assistant.back_home", fallback: "Back to home"))
+                    .accessibilityIdentifier("chekinana.assistant.close")
+                } else {
+                    Color.clear.frame(width: 44, height: 44)
+                }
+
+                Spacer()
+
+                Text("Chekinana")
+                    .font(.headline)
+                    .foregroundStyle(.black)
+
+                Spacer()
+
+                Color.clear.frame(width: 44, height: 44)
+            }
+            .padding(.horizontal, 4)
             .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .background(.white)
+            .frame(minHeight: 52)
+            .background(Color(uiColor: .systemBackground))
             .overlay(alignment: .bottom) {
                 Rectangle()
                     .fill(Color(.systemGray5))
                     .frame(height: 0.5)
             }
-            .accessibilityIdentifier("chekinana.root")
-            .accessibilityValue(isSubmitting ? "busy" : "ready")
+
+        }
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    if shouldShowEmptyState {
-                        transcriptEmptyState
-                    }
-
                     ForEach(transcriptMessages) { message in
                         transcriptMessageView(message)
                             .id(message.id)
+                    }
+
+                    if isSubmitting {
+                        transcriptActivityStatus
+                            .id("chekinana.transcript.activity.row")
+                    } else if pendingNLRetry != nil {
+                        transcriptRetryStatus
+                            .id("chekinana.transcript.retry.row")
                     }
 
                     if conversationState.draft != nil {
@@ -315,76 +643,96 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 Rectangle()
-                    .fill(Color(.systemGray6))
-                    .accessibilityElement()
-                    .accessibilityLabel("Transcript")
-                    .accessibilityValue(transcriptAccessibilityValue)
-                    .accessibilityIdentifier("chekinana.transcript")
+                    .fill(ChekinanaDesignSystem.pageBackground)
+                    .accessibilityHidden(true)
             }
-            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("chekinana.transcript")
+            .scrollDismissesKeyboard(.immediately)
             .onTapGesture {
                 isPromptFocused = false
             }
             .onChange(of: transcriptMessages.count) {
+                session.persistTextHistory(from: transcriptMessages)
+                guard let last = transcriptMessages.last else {
+                    transcriptScrollRequest = .none
+                    return
+                }
+                transcriptScrollRequest = ChekinanaTranscriptScrollPolicy.request(
+                    for: last,
+                    isRestoringHistory: false
+                )
+            }
+            .onChange(of: transcriptScrollRequest) { _, request in
+                guard request != .none else { return }
                 Task { @MainActor in
-                    // Let LazyVStack finish laying out newly appended cards and
-                    // confirmation controls before resolving the scroll target.
                     await Task.yield()
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+                    switch request {
+                    case .none:
+                        break
+                    case .bottom:
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+                        }
+                    case .messageTop(let messageID, _):
+                        // Long candidate responses deliberately reveal their
+                        // beginning instead of moving the user to the final
+                        // card or cancellation controls.
+                        proxy.scrollTo(messageID, anchor: .top)
+                    }
+                    if transcriptScrollRequest == request {
+                        transcriptScrollRequest = .none
                     }
                 }
             }
         }
     }
 
-    private var shouldShowEmptyState: Bool {
-        ChekinanaTranscriptEmptyStatePolicy.shouldShow(
-            messageCount: transcriptMessages.count,
-            hasDraft: conversationState.draft != nil,
-            hasEventCandidatePanel: eventCandidateState.phase != .idle
-        )
-    }
-
-    private var transcriptEmptyState: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("用自然语言开始整理")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.black)
-
-            Text("智能助手会理解你的需求，再由 App 安全地添加或查看 Idol、用公开微博创建 Event，并整理 Cheki。")
-                .font(.system(size: 14))
-                .foregroundStyle(Color(.secondaryLabel))
-                .fixedSize(horizontal: false, vertical: true)
-
-            Label("要扫描 Cheki，请先选择照片，再发送扫描需求。", systemImage: "photo.on.rectangle")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Color(.secondaryLabel))
-                .fixedSize(horizontal: false, vertical: true)
+    @ViewBuilder
+    private func transcriptMessageView(_ message: TranscriptMessage) -> some View {
+        if message.role == .user, case .text(let text) = message.content {
+            HStack(alignment: .top, spacing: 0) {
+                Spacer(minLength: 52)
+                Text(text)
+                    .font(.body)
+                    .foregroundStyle(Color(.label))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .contextMenu {
+                        Button(ChekinanaL10n.text("assistant.copy", fallback: "Copy")) {
+                            UIPasteboard.general.string = text
+                        }
+                    }
+                    .accessibilityIdentifier("chekinana.transcript.user-message")
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        } else {
+            transcriptAssistantContent(message.content)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(.systemGray4), lineWidth: 0.5)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chekinana.empty-state")
     }
 
     @ViewBuilder
-    private func transcriptMessageView(_ message: TranscriptMessage) -> some View {
-        switch message.content {
+    private func transcriptAssistantContent(_ content: TranscriptContent) -> some View {
+        switch content {
         case .text(let text):
             Text(text)
-                .font(.system(size: 14, design: .monospaced))
+                .font(.body)
                 .foregroundStyle(.black)
                 .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(ChekinanaDesignSystem.cardBackground)
+                .clipShape(RoundedRectangle(cornerRadius: ChekinanaDesignSystem.compactRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: ChekinanaDesignSystem.compactRadius, style: .continuous)
+                        .stroke(ChekinanaDesignSystem.border, lineWidth: 0.5)
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contextMenu {
-                    Button("复制") {
+                    Button(ChekinanaL10n.text("assistant.copy", fallback: "Copy")) {
                         UIPasteboard.general.string = text
                     }
                 }
@@ -395,11 +743,28 @@ struct ContentView: View {
             IdolCardCollectionView(
                 idols: idols,
                 activeSelectionTokens: activeIdolCandidateTokens,
+                confirmedSelectionTokens: confirmedIdolCandidateTokens,
+                isInteractionEnabled: !isSubmitting,
                 onSelectCandidate: selectIdolCandidate,
                 onCancelCandidates: cancelIdolCandidates
             )
             .frame(maxWidth: .infinity, alignment: .leading)
-            .disabled(isSubmitting)
+        case .idolCardsWithNotice(let idols, let notice):
+            VStack(alignment: .leading, spacing: 10) {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(Color(.secondaryLabel))
+                    .textSelection(.enabled)
+                IdolCardCollectionView(
+                    idols: idols,
+                    activeSelectionTokens: activeIdolCandidateTokens,
+                    confirmedSelectionTokens: confirmedIdolCandidateTokens,
+                    isInteractionEnabled: !isSubmitting,
+                    onSelectCandidate: selectIdolCandidate,
+                    onCancelCandidates: cancelIdolCandidates
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         case .idolSections(let sections):
             IdolSectionCollectionView(
                 sections: sections,
@@ -418,7 +783,14 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         case .chekiScannedCards(let count, let warningCount, let chekis):
-            ScannedChekiTranscriptView(count: count, warningCount: warningCount, chekis: chekis)
+            ScannedChekiTranscriptView(
+                count: count,
+                warningCount: warningCount,
+                chekis: chekis,
+                onEdit: beginEditingTemporaryCheki,
+                onDelete: deleteTemporaryCheki,
+                onDownload: downloadTemporaryCheki
+            )
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .pendingChekiCards(let summary, let chekis):
             PendingChekiTranscriptView(summary: summary, chekis: chekis)
@@ -437,7 +809,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(isSubmitting)
         case .scanAllShortcut:
-            Button("为全部切补充信息") {
+            Button(ChekinanaL10n.text("assistant.scan_all", fallback: "Add details to all Cheki")) {
                 beginScanAllClarification()
             }
             .buttonStyle(.bordered)
@@ -445,35 +817,121 @@ struct ContentView: View {
         }
     }
 
-    private var clarificationPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(clarificationPromptText)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.black)
-
-                Spacer(minLength: 8)
-
-                Button("取消本次对话") {
-                    cancelConversation()
+    private var transcriptActivityStatus: some View {
+        HStack(spacing: 8) {
+            ChekinanaRotatingActivityArc()
+                .accessibilityLabel(ChekinanaL10n.text("assistant.processing", fallback: "Processing request"))
+                .accessibilityIdentifier("chekinana.transcript.activity")
+            Spacer(minLength: 8)
+            if activeNLRequest != nil {
+                Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
+                    cancelRemoteInterpretation()
                 }
-                .font(.system(size: 12))
                 .buttonStyle(.plain)
                 .foregroundStyle(Color(.secondaryLabel))
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.clarification.cancel")
+                .accessibilityHint(ChekinanaL10n.text(
+                    "assistant.cancel_request_hint",
+                    fallback: "Stop this request and preserve the current input"
+                ))
+                .accessibilityIdentifier("chekinana.nl.cancel")
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var transcriptRetryStatus: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                retryPreservedMessage
+                Spacer(minLength: 8)
+                retryActionButtons
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                retryPreservedMessage
+                retryActionButtons
+            }
+        }
+        .padding(10)
+        .background(ChekinanaDesignSystem.softAccent)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var retryPreservedMessage: some View {
+        Text(ChekinanaL10n.text("assistant.input_preserved", fallback: "Your input was preserved"))
+            .font(.footnote)
+            .foregroundStyle(Color(.secondaryLabel))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var retryActionButtons: some View {
+        HStack(spacing: 8) {
+            Button(ChekinanaL10n.text("action.retry", fallback: "Retry")) {
+                retryRemoteInterpretation()
+            }
+            .buttonStyle(.borderedProminent)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+            .accessibilityHint(ChekinanaL10n.text("assistant.retry_hint", fallback: "Send the preserved request again"))
+            .accessibilityIdentifier("chekinana.nl.retry")
+            Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
+                cancelPendingRetry()
+            }
+            .buttonStyle(.bordered)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+            .accessibilityHint(ChekinanaL10n.text("assistant.cancel_retry_hint", fallback: "Keep the input without retrying"))
+            .accessibilityIdentifier("chekinana.nl.cancel")
+        }
+    }
+
+    private var clarificationCancelButton: some View {
+        Button(ChekinanaL10n.text("assistant.cancel_conversation", fallback: "Cancel conversation")) {
+            cancelConversation()
+        }
+        .font(.footnote)
+        .buttonStyle(.plain)
+        .foregroundStyle(Color(.secondaryLabel))
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+        .accessibilityHint(ChekinanaL10n.text("assistant.cancel_conversation_hint", fallback: "Discard the current clarification"))
+        .accessibilityIdentifier("chekinana.clarification.cancel")
+    }
+
+    private var clarificationHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(clarificationPromptText)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                clarificationCancelButton
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(clarificationPromptText)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                clarificationCancelButton
+            }
+        }
+    }
+
+    private var clarificationPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            clarificationHeader
 
             clarificationControls
                 .disabled(isSubmitting)
         }
         .padding(12)
-        .background(.white)
+        .background(ChekinanaDesignSystem.softAccent)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(.systemGray4), lineWidth: 0.5)
+                .stroke(ChekinanaDesignSystem.border, lineWidth: 0.5)
         )
     }
 
@@ -482,48 +940,31 @@ struct ContentView: View {
         switch eventCandidateState.phase {
         case .idle:
             EmptyView()
-        case .extracting(let url):
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("正在提取 Event 候选")
-                        .accessibilityIdentifier("chekinana.event.candidate.extracting")
-                    Text("正在从公开 Weibo 状态提取 Event 候选…")
-                        .font(.system(size: 14, weight: .medium))
-                    Spacer(minLength: 8)
-                    Button("取消") {
-                        cancelEventCandidateFlow(announce: true)
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .accessibilityIdentifier("chekinana.event.candidate.extract.cancel")
-                    .accessibilityHint("取消本次提取，不创建待确认项或 Event")
-                }
-                Text(url)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color(.secondaryLabel))
-                    .lineLimit(2)
-            }
-            .eventCandidatePanelStyle()
-        case .failed(let url, let message):
+        case .extracting:
+            // The transcript-wide activity indicator is the only in-flight UI.
+            EmptyView()
+        case .failed(_, let message):
             VStack(alignment: .leading, spacing: 10) {
                 Text(message)
-                    .font(.system(size: 14))
+                    .font(.subheadline)
                     .foregroundStyle(.red)
                     .accessibilityIdentifier("chekinana.event.candidate.error")
                 HStack(spacing: 8) {
-                    Button("重试") {
-                        startEventCandidateExtraction(url: url, echo: nil)
+                    Button(ChekinanaL10n.text("action.retry", fallback: "Retry")) {
+                        if let activeEventCandidateRequest {
+                            startEventCandidateExtraction(
+                                request: activeEventCandidateRequest,
+                                echo: nil
+                            )
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
                     .disabled(isSubmitting)
                     .accessibilityIdentifier("chekinana.event.candidate.retry")
-                    .accessibilityHint("重新调用 Event 提取服务")
-                    Button("取消") {
+                    .accessibilityHint(ChekinanaL10n.text("assistant.event_retry_hint", fallback: "Call the Event extraction service again"))
+                    Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
                         cancelEventCandidateFlow(announce: true)
                     }
                     .buttonStyle(.bordered)
@@ -531,7 +972,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                     .disabled(isSubmitting)
                     .accessibilityIdentifier("chekinana.event.candidate.cancel")
-                    .accessibilityHint("关闭候选，不创建待确认项或 Event")
+                    .accessibilityHint(ChekinanaL10n.text("assistant.event_cancel_hint", fallback: "Close the candidate without creating an Event"))
                 }
             }
             .eventCandidatePanelStyle()
@@ -546,74 +987,6 @@ struct ContentView: View {
         }
     }
 
-    private var naturalLanguageRequestPanel: some View {
-        HStack(spacing: 10) {
-            if isSubmitting && activeNLRequest != nil {
-                ProgressView()
-                    .controlSize(.small)
-                Text("正在解释需求…")
-                    .font(.system(size: 13))
-                Spacer(minLength: 8)
-                Button("取消") {
-                    cancelRemoteInterpretation()
-                }
-                .buttonStyle(.bordered)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.nl.cancel")
-            } else if pendingNLRetry != nil {
-                Text("原输入已保留")
-                    .font(.system(size: 13))
-                Spacer(minLength: 8)
-                Button("重试") {
-                    retryRemoteInterpretation()
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.nl.retry")
-                Button("取消") {
-                    cancelPendingRetry()
-                }
-                .buttonStyle(.bordered)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.nl.cancel")
-            }
-        }
-        .padding(12)
-        .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(.systemGray4), lineWidth: 0.5)
-        )
-    }
-
-    private var mediaProcessingPanel: some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
-            Text(mediaLoadProgress.isEmpty ? "正在处理…" : mediaLoadProgress)
-                .font(.system(size: 13))
-            Spacer(minLength: 8)
-            Button("取消") {
-                cancelMediaProcessing()
-            }
-            .buttonStyle(.bordered)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
-            .accessibilityIdentifier("chekinana.media.cancel")
-        }
-        .padding(.horizontal, 12)
-        .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color(.systemGray4), lineWidth: 0.5)
-        )
-    }
-
     @ViewBuilder
     private var clarificationControls: some View {
         if let localChoice = conversationState.draft?.localChoice {
@@ -624,14 +997,14 @@ struct ContentView: View {
             switch missing {
             case .idol:
                 if conversationState.draft?.requiresFreeTextIdolName == true {
-                    Text("请在输入框继续输入要添加的 Idol 名称。")
-                        .font(.system(size: 13))
+                    Text(ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add."))
+                        .font(.footnote)
                         .foregroundStyle(Color(.secondaryLabel))
                 } else {
                     let choices = ChekinanaConversationCoordinator.idolChoices(modelContext: modelContext)
                     if choices.isEmpty {
                         Text(ChekinanaConversationMessage.idolNotFound.text)
-                            .font(.system(size: 13))
+                            .font(.footnote)
                             .foregroundStyle(Color(.secondaryLabel))
                     } else {
                         FlowChoiceView(
@@ -640,7 +1013,7 @@ struct ContentView: View {
                         ) { id in
                             toggleSelectedIdol(id)
                         }
-                        Button("继续") {
+                        Button(ChekinanaL10n.text("action.continue", fallback: "Continue")) {
                             completeIdolSelection()
                         }
                         .buttonStyle(.borderedProminent)
@@ -657,7 +1030,7 @@ struct ContentView: View {
                         chooseEvent(id)
                     }
                 }
-                Button("使用日期") {
+                Button(ChekinanaL10n.text("assistant.use_date", fallback: "Use date")) {
                     chooseDateInsteadOfEvent()
                 }
                 .buttonStyle(.bordered)
@@ -665,17 +1038,17 @@ struct ContentView: View {
                 .contentShape(Rectangle())
                 .accessibilityIdentifier("chekinana.clarification.use-date")
             case .eventName:
-                Text("请在输入框继续输入 Event 名称。已保留 URL（如有）。")
-                    .font(.system(size: 13))
+                Text(ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved."))
+                    .font(.footnote)
                     .foregroundStyle(Color(.secondaryLabel))
             case .date:
                 DatePicker(
-                    "日期",
+                    ChekinanaL10n.text("assistant.date", fallback: "Date"),
                     selection: $clarificationDate,
                     displayedComponents: .date
                 )
                 .datePickerStyle(.compact)
-                Button("使用这个日期") {
+                Button(ChekinanaL10n.text("assistant.use_this_date", fallback: "Use this date")) {
                     completeDateSelection()
                 }
                 .buttonStyle(.borderedProminent)
@@ -686,13 +1059,13 @@ struct ContentView: View {
                 let choices = confirmationLedger.availableTemporaryChekiChoices().enumerated().map { index, temporary in
                     ChekinanaLocalChoice(
                         id: temporary.id,
-                        title: "扫描结果 \(index + 1)",
+                        title: ChekinanaL10n.format("assistant.scan_result_index", fallback: "Scan result %lld", Int64(index + 1)),
                         subtitle: nil
                     )
                 }
                 if choices.isEmpty {
-                    Text("当前没有可用的扫描结果，请先选择照片并扫描。")
-                        .font(.system(size: 13))
+                    Text(ChekinanaL10n.text("assistant.no_scan_results", fallback: "No scan results are available. Select photos and scan first."))
+                        .font(.footnote)
                         .foregroundStyle(Color(.secondaryLabel))
                 } else {
                     FlowChoiceView(
@@ -702,7 +1075,7 @@ struct ContentView: View {
                         toggleSelectedTemporaryCheki(id)
                     }
                     HStack(spacing: 8) {
-                        Button("使用所选") {
+                        Button(ChekinanaL10n.text("assistant.use_selected", fallback: "Use selected")) {
                             completeTemporarySelection()
                         }
                         .buttonStyle(.borderedProminent)
@@ -711,7 +1084,7 @@ struct ContentView: View {
                         .accessibilityIdentifier("chekinana.clarification.use-selected")
                         .disabled(conversationState.draft?.selections.selectedTemporaryIDs.isEmpty != false)
 
-                        Button("全部扫描结果") {
+                        Button(ChekinanaL10n.text("assistant.use_all", fallback: "All scan results")) {
                             useAllTemporaryChekis()
                         }
                         .buttonStyle(.bordered)
@@ -729,64 +1102,34 @@ struct ContentView: View {
         if let localChoice = draft.localChoice {
             switch localChoice.kind {
             case .idol:
-                return "找到多个匹配的 Idol，请选择一个。"
+                return ChekinanaL10n.text("assistant.prompt.multiple_idol", fallback: "Multiple Idols matched. Choose one.")
             case .event:
-                return "找到多个匹配的 Event，请选择一个。"
+                return ChekinanaL10n.text("assistant.prompt.multiple_event", fallback: "Multiple Events matched. Choose one.")
             }
         }
         switch draft.missing.first {
         case .idol:
             return draft.requiresFreeTextIdolName
-                ? "请补充要添加的 Idol 名称。"
-                : "请选择至少一个本地 Idol。"
+                ? ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add.")
+                : ChekinanaL10n.text("assistant.prompt.idol", fallback: "Choose at least one local Idol.")
         case .eventOrDate:
-            return "请选择一个本地 Event，或使用日期。"
+            return ChekinanaL10n.text("assistant.prompt.event_or_date", fallback: "Choose a local Event or use a date.")
         case .eventName:
-            return "还需要 Event 名称。"
+            return ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved.")
         case .date:
-            return "请选择日期。"
+            return ChekinanaL10n.text("assistant.prompt.date", fallback: "Choose a date.")
         case .temporaryCheki:
-            return "请选择要保存的扫描结果。"
+            return ChekinanaL10n.text("assistant.prompt.scan_result", fallback: "Choose the scan results to save.")
         case nil:
-            return "请完成本次操作。"
+            return ChekinanaL10n.text("assistant.prompt.complete", fallback: "Complete this operation.")
         }
     }
 
     private var composer: some View {
         VStack(spacing: 10) {
-            LazyVGrid(
-                columns: [GridItem(.flexible()), GridItem(.flexible())],
-                spacing: 8
-            ) {
-                ForEach(ChekinanaQuickActions.all) { action in
-                    Button {
-                        applyQuickAction(action)
-                    } label: {
-                        Text(action.label)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.black)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(.white)
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color(.systemGray4), lineWidth: 0.5)
-                            )
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isSubmitting)
-                    .accessibilityLabel(action.label)
-                    .accessibilityHint("输入框为空时预填建议，不会立即发送或覆盖已有输入")
-                    .accessibilityIdentifier("chekinana.quick.\(action.id)")
-                }
-            }
-            .padding(.horizontal, 7)
-            .accessibilityIdentifier("chekinana.quick-actions")
-
             VStack(spacing: 12) {
-                TextField("输入自然语言需求或命令…", text: $prompt, axis: .vertical)
-                    .font(.system(size: 16))
+                TextField(ChekinanaL10n.text("assistant.ask_placeholder", fallback: "Ask Chekinana…"), text: $prompt, axis: .vertical)
+                    .font(.body)
                     .lineLimit(1...4)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
@@ -807,16 +1150,13 @@ struct ContentView: View {
                         submitPrompt()
                     }
                     .focused($isPromptFocused)
-                    .simultaneousGesture(TapGesture().onEnded {
-                        isPromptFocused = true
-                    })
-                    .frame(maxWidth: .infinity, minHeight: 76, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .topLeading)
                     .accessibilityIdentifier("chekinana.prompt")
                     .toolbar {
                         ToolbarItemGroup(placement: .keyboard) {
                             Spacer()
 
-                            Button("完成") {
+                            Button(ChekinanaL10n.text("action.done", fallback: "Done")) {
                                 isPromptFocused = false
                             }
                             .frame(minWidth: 44, minHeight: 44)
@@ -825,30 +1165,22 @@ struct ContentView: View {
                         }
                     }
 
-                if (isSubmitting && activeNLRequest != nil) || pendingNLRetry != nil {
-                    naturalLanguageRequestPanel
-                }
-
-                if isSubmitting && activeNLRequest == nil && (albumProcessingTask != nil || commandExecutionTask != nil) {
-                    mediaProcessingPanel
-                }
-
                 if !selectedItems.isEmpty {
                     selectedPhotosSummary
                 }
 
                 HStack {
-                    PhotosPicker(selection: $selectedItems, maxSelectionCount: 9, matching: .images) {
+                    PhotosPicker(selection: $selectedItems, maxSelectionCount: 0, matching: .images) {
                         Image(systemName: "plus")
                             .font(.system(size: 26, weight: .light))
-                            .foregroundStyle(.black)
+                            .foregroundStyle(ChekinanaDesignSystem.accent)
                             .frame(width: 28, height: 28)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(isSubmitting)
-                    .accessibilityLabel("选择照片")
+                    .accessibilityLabel(ChekinanaL10n.text("assistant.choose_photos", fallback: "Choose photos"))
                     .accessibilityIdentifier("chekinana.photos")
 
                     Spacer()
@@ -860,31 +1192,36 @@ struct ContentView: View {
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundStyle((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmitting) ? Color(.systemGray3) : .white)
                             .frame(width: 28, height: 28)
-                            .background((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmitting) ? Color(.systemGray6) : .black)
+                            .background((prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmitting) ? Color(.systemGray6) : ChekinanaDesignSystem.accent)
                             .clipShape(Circle())
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmitting)
+                    .accessibilityLabel(ChekinanaL10n.text("assistant.send", fallback: "Send"))
+                    .accessibilityHint(ChekinanaL10n.text("assistant.send_hint", fallback: "Send this message to Chekinana"))
                     .accessibilityIdentifier("chekinana.send")
                 }
             }
             .padding(.horizontal, 12)
             .padding(.top, 11)
             .padding(.bottom, 9)
-            .background(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(Color(uiColor: .systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: ChekinanaDesignSystem.cardRadius, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: ChekinanaDesignSystem.cardRadius, style: .continuous).stroke(ChekinanaDesignSystem.border, lineWidth: 0.5) }
         }
         .padding(.horizontal, 7)
         .padding(.top, 10)
         .padding(.bottom, 8)
-        .background(Color(red: 0.965, green: 0.965, blue: 0.965))
+        .background(ChekinanaDesignSystem.softAccent)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(Color(.systemGray5))
                 .frame(height: 0.5)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chekinana.composer")
     }
 
     private func applyQuickAction(_ action: ChekinanaQuickActionDefinition) {
@@ -904,11 +1241,16 @@ struct ContentView: View {
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Color(.secondaryLabel))
 
-                Text("已选择 \(selectedItems.count) 张照片")
-                    .font(.system(size: 13, weight: .medium))
+                Text(ChekinanaL10n.quantity(
+                    "assistant.photos_selected",
+                    count: selectedItems.count,
+                    one: "%lld photo selected",
+                    other: "%lld photos selected"
+                ))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(Color(.secondaryLabel))
-                    .lineLimit(1)
-                    .accessibilityLabel("已选择照片")
+                    .lineLimit(2)
+                    .accessibilityLabel(ChekinanaL10n.text("assistant.photos_selected_label", fallback: "Selected photos"))
                     .accessibilityValue("\(selectedItems.count)")
                     .accessibilityIdentifier("chekinana.photos.summary")
 
@@ -916,8 +1258,10 @@ struct ContentView: View {
 
                 Button {
                     selectedItems = []
-                    isScannerDateAnnotationEnabled =
-                        ChekinanaScannerDateAnnotationDefaults.isEnabled
+                    isScannerDateRecognitionEnabled =
+                        ChekinanaScannerRecognitionDefaults.dateIsEnabled
+                    isScannerIdolRecognitionEnabled =
+                        ChekinanaScannerRecognitionDefaults.idolIsEnabled
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 17, weight: .medium))
@@ -928,19 +1272,19 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isSubmitting)
-                .accessibilityLabel("清空已选照片")
+                .accessibilityLabel(ChekinanaL10n.text("assistant.clear_photos", fallback: "Clear selected photos"))
             }
 
             Divider()
                 .padding(.horizontal, 10)
 
-            Toggle(isOn: $isScannerDateAnnotationEnabled) {
+            Toggle(isOn: $isScannerDateRecognitionEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("识别并标注手写日期")
-                        .font(.system(size: 13, weight: .medium))
+                    Text(ChekinanaL10n.text("assistant.recognize_date", fallback: "Recognize handwritten dates"))
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(.black)
-                    Text("开启后，每个提取结果会发送到 Qwen 日期识别。")
-                        .font(.system(size: 11))
+                    Text(ChekinanaL10n.text("assistant.recognize_date_detail", fallback: "Requests dates and bounding boxes; boxes are shown only in previews."))
+                        .font(.caption)
                         .foregroundStyle(Color(.secondaryLabel))
                 }
             }
@@ -948,8 +1292,25 @@ struct ContentView: View {
             .disabled(isSubmitting)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .accessibilityHint("仅影响 Scanner 提取结果；默认关闭")
-            .accessibilityIdentifier("chekinana.scanner.date-annotation")
+            .accessibilityHint(ChekinanaL10n.text("assistant.recognize_date_hint", fallback: "Does not modify or save images with boxes"))
+            .accessibilityIdentifier("chekinana.scanner.date-recognition")
+
+            Toggle(isOn: $isScannerIdolRecognitionEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ChekinanaL10n.text("assistant.recognize_idol", fallback: "Recognize Idols"))
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.black)
+                    Text(ChekinanaL10n.text("assistant.recognize_idol_detail", fallback: "Uses the on-device encoder to compare existing Idol patterns."))
+                        .font(.caption)
+                        .foregroundStyle(Color(.secondaryLabel))
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(isSubmitting)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .accessibilityHint(ChekinanaL10n.text("assistant.recognize_idol_hint", fallback: "Uses all valid local patterns and the Unassigned candidate"))
+            .accessibilityIdentifier("chekinana.scanner.idol-recognition")
         }
         .frame(minHeight: 44)
         .background(Color(.systemGray6))
@@ -968,22 +1329,8 @@ struct ContentView: View {
 
         guard !ChekinanaNLPrivacyGuard.containsCredentialedHTTPURL(input) else {
             prompt = ""
+            appendUserMessage(redactedCommandEcho(for: input))
             transcriptMessages.append(TranscriptMessage(content: .text(ChekinanaConversationMessage.privacyProtected.text)))
-            return
-        }
-
-        if let command = ChekinanaPromptRouting.localBareScannerCommand(from: input) {
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(command)")))
-            prompt = ""
-            conversationState.clearDraft()
-            executeTypedCommands([command])
-            return
-        }
-
-        if let command = ChekinanaPromptRouting.localStateCommand(from: input) {
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-            prompt = ""
-            executeCommands([command], announceSingle: false)
             return
         }
 
@@ -993,13 +1340,14 @@ struct ContentView: View {
             activeConfirmationCodes: activeConfirmationCodes
         ) else {
             prompt = ""
+            appendUserMessage(redactedCommandEcho(for: input))
             transcriptMessages.append(
                 TranscriptMessage(content: .text(ChekinanaConversationMessage.privacyProtected.text))
             )
             return
         }
 
-        transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
+        appendUserMessage(redactedCommandEcho(for: input))
         prompt = ""
         let requestDraft = conversationState.draft.map {
             ChekinanaNLRequestDraft(operation: $0.operation, missing: $0.missing)
@@ -1014,44 +1362,6 @@ struct ContentView: View {
         ))
     }
 
-    @MainActor
-    private func handleSelectedChekiUtterance(_ input: String) -> Bool {
-        guard ChekinanaSelectedChekiLanguage.referencesSelectedCheki(input) else {
-            return false
-        }
-
-        transcriptMessages.append(TranscriptMessage(content: .text("> \(input)")))
-        prompt = ""
-
-        guard let selectedChekiID else {
-            transcriptMessages.append(TranscriptMessage(content: .text(
-                "请先从下方选择一张切，再继续刚才的需求。"
-            )))
-            executeCommands(["listcheki"], announceSingle: false)
-            return true
-        }
-
-        guard let rewritten = ChekinanaSelectedChekiLanguage.rewrittenUtterance(
-            input,
-            selectedChekiID: selectedChekiID
-        ) else {
-            transcriptMessages.append(TranscriptMessage(content: .text(
-                "没有理解你指的是哪张切，请重新选择后再试。"
-            )))
-            return true
-        }
-
-        let translation = ChekinanaNaturalLanguageTranslator.translate(rewritten)
-        guard !translation.commands.isEmpty, !translation.needsClarification else {
-            transcriptMessages.append(TranscriptMessage(content: .text(translation.message)))
-            return true
-        }
-
-        transcriptMessages.append(TranscriptMessage(content: .text(translation.message)))
-        executeCommands(translation.commands, announceSingle: false)
-        return true
-    }
-
     private func startRemoteInterpretation(_ request: PendingNaturalLanguageRequest) {
         nlRequestTask?.cancel()
         let requestGeneration = nlRequestGate.begin()
@@ -1059,6 +1369,9 @@ struct ContentView: View {
         pendingNLRetry = nil
         isSubmitting = true
         let task = Task { @MainActor in
+#if DEBUG
+            let interpretationStartedAt = DispatchTime.now().uptimeNanoseconds
+#endif
             do {
                 let interpretation = try await ChekinanaNLInterpretClient().interpret(
                     utterance: request.input,
@@ -1067,6 +1380,18 @@ struct ContentView: View {
                     draft: request.draft,
                     activeConfirmationCodes: request.activeConfirmationCodes
                 )
+#if DEBUG
+                let operationCount: Int
+                switch interpretation {
+                case .plan(let operations): operationCount = operations.count
+                case .clarify: operationCount = 1
+                case .reject: operationCount = 0
+                }
+                ChekinanaNLTimingLog.completed(
+                    operationCount: operationCount,
+                    startedAt: interpretationStartedAt
+                )
+#endif
                 guard nlRequestGate.accepts(
                     requestGeneration,
                     isCancelled: Task.isCancelled
@@ -1080,9 +1405,13 @@ struct ContentView: View {
                         continuingIntent: request.draft?.intent,
                         selections: request.selections,
                         modelContext: modelContext
-                    )
+                    ),
+                    originalUtterance: request.input
                 )
             } catch {
+#if DEBUG
+                ChekinanaNLTimingLog.failed(startedAt: interpretationStartedAt)
+#endif
                 guard nlRequestGate.accepts(
                     requestGeneration,
                     isCancelled: Task.isCancelled
@@ -1107,30 +1436,34 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func handleEventWeiboCandidateInput(_ input: String) -> Bool {
-        guard let url = ChekinanaEventWeiboInput.extractedURL(from: input) else {
-            return false
+    private func startEventCandidateExtraction(url: String, echo: String?) {
+        startEventCandidateExtraction(request: .weiboURL(url), echo: echo)
+    }
+
+    private enum EventCandidateRequest: Equatable {
+        case weiboURL(String)
+        case text(String)
+
+        var stateKey: String {
+            switch self {
+            case .weiboURL(let url): url
+            case .text: "event-candidate-text"
+            }
         }
-        transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-        prompt = ""
-        guard ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(url) else {
-            transcriptMessages.append(TranscriptMessage(content: .text(
-                ChekinanaEventCandidateClientError.invalidURL.localizedDescription
-            )))
-            return true
-        }
-        startEventCandidateExtraction(url: url, echo: nil)
-        return true
     }
 
     @MainActor
-    private func startEventCandidateExtraction(url: String, echo: String?) {
+    private func startEventCandidateExtraction(
+        request: EventCandidateRequest,
+        echo: String?
+    ) {
         guard !isSubmitting else { return }
         if let echo {
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: echo))")))
+            appendUserMessage(redactedCommandEcho(for: echo))
         }
         eventCandidateTask?.cancel()
-        let generation = eventCandidateState.begin(url: url)
+        activeEventCandidateRequest = request
+        let generation = eventCandidateState.begin(url: request.stateKey)
         guard eventCandidateBusyOwner.acquire(generation: generation) else {
             eventCandidateState.invalidate()
             return
@@ -1138,7 +1471,14 @@ struct ContentView: View {
         isSubmitting = true
         let task = Task { @MainActor in
             do {
-                let fields = try await ChekinanaEventCandidateClient().fetch(weiboURL: url)
+                let client = ChekinanaEventCandidateClient()
+                let fields: ChekinanaEventCandidateFields
+                switch request {
+                case .weiboURL(let url):
+                    fields = try await client.fetch(weiboURL: url)
+                case .text(let text):
+                    fields = try await client.parse(text: text)
+                }
                 guard eventCandidateState.accepts(generation, isCancelled: Task.isCancelled),
                       eventCandidateBusyOwner.owns(
                         generation: generation,
@@ -1150,7 +1490,10 @@ struct ContentView: View {
                 guard eventCandidateState.complete(fields, generation: generation) else { return }
                 guard releaseEventCandidateBusy(generation: generation) else { return }
                 transcriptMessages.append(TranscriptMessage(content: .text(
-                    "已提取 Event 候选。请检查并编辑全部字段；此时尚未创建待确认项或写入数据。"
+                    ChekinanaL10n.text(
+                        "assistant.event.extracted",
+                        fallback: "Event details were extracted. Review every field; nothing has been saved yet."
+                    )
                 )))
             } catch is CancellationError {
                 guard eventCandidateState.accepts(generation, isCancelled: Task.isCancelled),
@@ -1174,7 +1517,11 @@ struct ContentView: View {
                 eventCandidateTask = nil
                 let message = (error as? ChekinanaEventCandidateClientError)?.localizedDescription
                     ?? ChekinanaEventCandidateClientError.networkUnavailable.localizedDescription
-                guard eventCandidateState.fail(url: url, message: message, generation: generation) else {
+                guard eventCandidateState.fail(
+                    url: request.stateKey,
+                    message: message,
+                    generation: generation
+                ) else {
                     return
                 }
                 _ = releaseEventCandidateBusy(generation: generation)
@@ -1216,6 +1563,7 @@ struct ContentView: View {
         }
         eventCandidateTask = nil
         eventCandidateState.invalidate()
+        activeEventCandidateRequest = nil
         handleCommandResponse(output)
     }
 
@@ -1225,12 +1573,16 @@ struct ContentView: View {
         eventCandidateTask?.cancel()
         eventCandidateTask = nil
         eventCandidateState.invalidate()
+        activeEventCandidateRequest = nil
         if let ownedGeneration {
             _ = releaseEventCandidateBusy(generation: ownedGeneration)
         }
         if announce {
             transcriptMessages.append(TranscriptMessage(content: .text(
-                "已取消 Event 候选；未创建待确认项，也未写入 Event。"
+                ChekinanaL10n.text(
+                    "assistant.event.cancelled",
+                    fallback: "The Event candidate was cancelled. No Event was saved."
+                )
             )))
         }
     }
@@ -1249,117 +1601,6 @@ struct ContentView: View {
         return true
     }
 
-    @MainActor
-    private func handleLocalEventUtterance(_ input: String) -> Bool {
-        guard let eventDraft = ChekinanaLocalEventLanguage.draft(from: input) else {
-            return false
-        }
-        transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-        prompt = ""
-        let state = ChekinanaConversationDraftState(
-            operation: eventDraft.operation,
-            missing: eventDraft.missing
-        )
-        if eventDraft.missing.isEmpty {
-            conversationState.clearDraft()
-            processConversationResult(
-                ChekinanaConversationCoordinator.compile(
-                    [eventDraft.operation],
-                    modelContext: modelContext
-                )
-            )
-        } else {
-            conversationState.draft = state
-            clarificationDate = Date()
-            transcriptMessages.append(TranscriptMessage(content: .text(
-                clarificationPrompt(for: state)
-            )))
-        }
-        return true
-    }
-
-    @MainActor
-    private func handleLocalDraftFollowUp(_ input: String) -> Bool {
-        guard var draft = conversationState.draft,
-              let missing = draft.missing.first else {
-            return false
-        }
-        let originalDraft = draft
-
-        switch missing {
-        case .idol:
-            if draft.requiresFreeTextIdolName {
-                draft.operation.slots.name = input
-            } else {
-                let normalized = input
-                    .replacingOccurrences(of: "、", with: ",")
-                    .replacingOccurrences(of: "，", with: ",")
-                draft.operation.slots.idols = normalized
-                    .split(separator: ",")
-                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            }
-            draft.removeMissing(.idol)
-        case .eventOrDate:
-            if ChekinanaNLSchemaValidator.isCalendarDate(input) {
-                draft.operation.slots.event = nil
-                draft.operation.slots.date = input
-                draft.selections.selectedEventID = nil
-                draft.selections.selectedDate = input
-            } else {
-                draft.operation.slots.date = nil
-                draft.operation.slots.event = input
-                draft.selections.selectedDate = nil
-            }
-            draft.removeMissing(.eventOrDate)
-        case .date:
-            guard ChekinanaNLSchemaValidator.isCalendarDate(input) else {
-                transcriptMessages.append(TranscriptMessage(content: .text("日期请使用 YYYY-MM-DD，例如 2026-07-16。当前选择已保留。")))
-                return true
-            }
-            draft.operation.slots.date = input
-            draft.selections.selectedDate = input
-            draft.removeMissing(.date)
-        case .eventName:
-            let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty,
-                  name.range(of: #"^https?://"#, options: [.regularExpression, .caseInsensitive]) == nil else {
-                transcriptMessages.append(TranscriptMessage(content: .text(
-                    "Event 名称不能为空，也不能直接使用 URL。当前 URL 和其他输入已保留。"
-                )))
-                return true
-            }
-            draft.operation.slots.name = name
-            draft.removeMissing(.eventName)
-        case .temporaryCheki:
-            return false
-        }
-
-        let result = ChekinanaConversationCoordinator.resume(draft, modelContext: modelContext)
-        switch result {
-        case .commands(let commands):
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-            prompt = ""
-            conversationState.clearDraft()
-            executeCommands(commands)
-        case .eventCandidateURL(let url):
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-            prompt = ""
-            conversationState.clearDraft()
-            startEventCandidateExtraction(url: url, echo: nil)
-        case .clarification(let updated):
-            transcriptMessages.append(TranscriptMessage(content: .text("> \(redactedCommandEcho(for: input))")))
-            prompt = ""
-            conversationState.draft = updated
-            clarificationDate = Date()
-            transcriptMessages.append(TranscriptMessage(content: .text(clarificationPrompt(for: updated))))
-        case .message(let message):
-            conversationState.draft = originalDraft
-            transcriptMessages.append(TranscriptMessage(content: .text("\(message.text) 当前选择和输入均已保留。")))
-        }
-        return true
-    }
-
     private func retryRemoteInterpretation() {
         guard let request = pendingNLRetry, !isSubmitting else { return }
         prompt = ""
@@ -1375,12 +1616,22 @@ struct ContentView: View {
         if let request, prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             prompt = request.input
         }
-        transcriptMessages.append(TranscriptMessage(content: .text("已取消本次解释请求；原输入和当前选择均已保留。")))
+        transcriptMessages.append(TranscriptMessage(content: .text(
+            ChekinanaL10n.text(
+                "assistant.interpretation.cancelled",
+                fallback: "The request was cancelled. Your input and current selections were preserved."
+            )
+        )))
     }
 
     private func cancelPendingRetry() {
         pendingNLRetry = nil
-        transcriptMessages.append(TranscriptMessage(content: .text("已取消重试；原输入仍保留在输入框中。")))
+        transcriptMessages.append(TranscriptMessage(content: .text(
+            ChekinanaL10n.text(
+                "assistant.retry.cancelled",
+                fallback: "Retry was cancelled. Your input remains in the composer."
+            )
+        )))
     }
 
     private func invalidateRemoteRequest() {
@@ -1411,20 +1662,46 @@ struct ContentView: View {
         activeIdolCandidateTokens.removeAll()
         conversationState.clearDraft()
         isSubmitting = false
-        transcriptMessages.append(TranscriptMessage(content: .text("已取消本次对话。")))
+        transcriptMessages.append(TranscriptMessage(content: .text(
+            ChekinanaL10n.text("assistant.conversation.cancelled", fallback: "The conversation was cancelled.")
+        )))
     }
 
     private func submitExplicitCommand(_ command: String) {
         guard !isSubmitting else { return }
-        let actionText = commandName(from: command) == "cancel" ? "已选择取消" : "已选择确认"
+        let actionText = commandName(from: command) == "cancel"
+            ? ChekinanaL10n.text("assistant.action.cancelled", fallback: "Cancelled")
+            : ChekinanaL10n.text("assistant.action.confirmed", fallback: "Confirmed")
         transcriptMessages.append(
-            TranscriptMessage(content: .text(actionText))
+            TranscriptMessage(role: .user, content: .text(actionText))
         )
         executeCommands([command], announceSingle: false)
     }
 
-    private func executeCommands(_ commands: [String], announceSingle: Bool = true) {
+    private func executeCommands(
+        _ commands: [String],
+        announceSingle: Bool = true,
+        continuesAfterOperationFailure: Bool = false,
+        batchesIdolAdds: Bool = true
+    ) {
         guard !commands.isEmpty, !isSubmitting else { return }
+        if batchesIdolAdds, commands.allSatisfy({ commandName(from: $0) == "addidol" }) {
+            isSubmitting = true
+            commandExecutionTask = Task { @MainActor in
+                defer {
+                    commandExecutionTask = nil
+                    isSubmitting = false
+                }
+                let executor = ChekinanaCommandExecutor(
+                    modelContext: modelContext,
+                    confirmationLedger: confirmationLedger
+                )
+                let output = await executor.addIdols(commands)
+                guard !Task.isCancelled else { return }
+                handleCommandResponse(output)
+            }
+            return
+        }
         if commands.count == 1,
            let command = commands.first,
            isAddIdolConfirmationCommand(command) {
@@ -1447,18 +1724,6 @@ struct ContentView: View {
                     isSubmitting = false
                     return
                 }
-                if commands.count > 1 {
-                    transcriptMessages.append(
-                        TranscriptMessage(content: .text("正在准备第 \(index + 1)/\(commands.count) 项操作。"))
-                    )
-                } else if announceSingle,
-                          commandName(from: command) != "confirm",
-                          commandName(from: command) != "cancel" {
-                    transcriptMessages.append(
-                        TranscriptMessage(content: .text("已理解你的需求，正在处理。"))
-                    )
-                }
-
                 let output: ChekinanaCommandResponse
                 do {
                     let pendingImages = try await loadPendingChekiImages(for: command)
@@ -1467,7 +1732,11 @@ struct ContentView: View {
                     isSubmitting = false
                     return
                 } catch {
-                    output = .text("error: selected photos could not be loaded. Please keep the photos selected and try again. \(error.localizedDescription)")
+                    output = .text(ChekinanaL10n.format(
+                        "assistant.photo.load_failed",
+                        fallback: "error: The selected photos could not be loaded. Keep them selected and try again. %@",
+                        error.localizedDescription
+                    ))
                 }
                 guard !Task.isCancelled else {
                     isSubmitting = false
@@ -1477,9 +1746,17 @@ struct ContentView: View {
 
                 if ChekinanaConversationCoordinator.responseStopsPlan(output) {
                     if index + 1 < commands.count {
-                        transcriptMessages.append(
-                            TranscriptMessage(content: .text("后续操作已安全停止，请先完成当前选择或修正错误。"))
-                        )
+                        if continuesAfterOperationFailure,
+                           case .text(let text) = output,
+                           text.hasPrefix("error:") {
+                            continue
+                        }
+                        transcriptMessages.append(TranscriptMessage(content: .text(
+                            ChekinanaL10n.text(
+                                "assistant.plan.stopped",
+                                fallback: "Later operations were stopped safely. Complete the current choice or correct the error first."
+                            )
+                        )))
                     }
                     if case .requestAddChekiPhoto = output {
                         return
@@ -1542,7 +1819,10 @@ struct ContentView: View {
             idolConfirmationTimeoutTask = nil
             isSubmitting = false
             handleCommandResponse(.text(
-                "error: Idol confirmation timed out before persistence started; no Idol was saved. The confirmation remains available to retry."
+                ChekinanaL10n.text(
+                    "assistant.idol.confirmation_timeout",
+                    fallback: "error: Idol confirmation timed out before saving. No Idol was saved, and the confirmation can be retried."
+                )
             ))
         }
     }
@@ -1559,6 +1839,11 @@ struct ContentView: View {
         // are ready again. This prevents card layout from delaying busy cleanup.
         isSubmitting = false
         handleCommandResponse(output)
+        if case .idolCard(let idol) = output {
+            transcriptMessages.append(TranscriptMessage(content: .text(
+                ChekinanaL10n.format("assistant.idol.added", fallback: "Added %@.", idol.name)
+            )))
+        }
     }
 
     private func isAddIdolConfirmationCommand(_ command: String) -> Bool {
@@ -1614,20 +1899,50 @@ struct ContentView: View {
         albumAddChekiItems = []
         mediaLoadProgress = ""
         isSubmitting = false
-        transcriptMessages.append(TranscriptMessage(content: .text("已取消照片处理；未创建新的 Cheki。")))
+        transcriptMessages.append(TranscriptMessage(content: .text(
+            ChekinanaL10n.text(
+                "assistant.photo_processing.cancelled",
+                fallback: "Photo processing was cancelled. No new Cheki was created."
+            )
+        )))
     }
 
     @MainActor
-    private func processConversationResult(_ result: ChekinanaConversationCompileResult) {
+    private func processConversationResult(
+        _ result: ChekinanaConversationCompileResult,
+        originalUtterance: String? = nil
+    ) {
         switch result {
         case .commands(let commands):
             conversationState.clearDraft()
             isSubmitting = false
             executeTypedCommands(commands)
-        case .eventCandidateURL(let url):
+        case .eventCandidateURL:
             conversationState.clearDraft()
             isSubmitting = false
-            startEventCandidateExtraction(url: url, echo: nil)
+            guard case .weiboURL(let routedURL) = ChekinanaEventCandidateConversationRoute.resolve(
+                result,
+                originalUtterance: originalUtterance
+            ) else {
+                transcriptMessages.append(TranscriptMessage(content: .text(
+                    ChekinanaConversationMessage.invalidPlan.text
+                )))
+                return
+            }
+            startEventCandidateExtraction(url: routedURL, echo: nil)
+        case .eventCandidateText:
+            conversationState.clearDraft()
+            isSubmitting = false
+            guard case .text(let text) = ChekinanaEventCandidateConversationRoute.resolve(
+                result,
+                originalUtterance: originalUtterance
+            ) else {
+                transcriptMessages.append(TranscriptMessage(content: .text(
+                    ChekinanaConversationMessage.invalidPlan.text
+                )))
+                return
+            }
+            startEventCandidateExtraction(request: .text(text), echo: nil)
         case .clarification(let draft):
             conversationState.draft = draft
             clarificationDate = Date()
@@ -1643,14 +1958,35 @@ struct ContentView: View {
     }
 
     private func executeTypedCommands(_ commands: [String]) {
+        let idolCandidateIDs = (
+            try? modelContext.fetch(FetchDescriptor<Idol>())
+        )?
+            .filter {
+                $0.hasRecognitionPatterns
+                    && ChekinanaVisibilityPolicy.includesIdol(
+                        $0.id,
+                        hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+                    )
+            }
+            .map(\.id) ?? []
+        let selectedCandidateIDs = scannerCandidateIDs.map { selected in
+            idolCandidateIDs.filter(selected.contains)
+        } ?? idolCandidateIDs
         switch ChekinanaScannerConfiguration.prepareTypedCommands(
             commands,
-            configuredPodID: ChekinanaScannerConfiguration.configuredPodID(),
             baseURLResolution: ChekinanaScannerConfiguration.configuredBaseURL(),
-            dateAnnotationEnabled: isScannerDateAnnotationEnabled
+            dateRecognitionEnabled: isScannerDateRecognitionEnabled,
+            dateBounds: scannerDateBounds,
+            idolRecognitionEnabled: isScannerIdolRecognitionEnabled,
+            idolCandidateIDs: selectedCandidateIDs,
+            includeUnassignedCandidate: scannerIncludesUnassignedCandidate
         ) {
         case .ready(let preparedCommands):
-            executeCommands(preparedCommands)
+            executeCommands(
+                preparedCommands,
+                continuesAfterOperationFailure: true,
+                batchesIdolAdds: false
+            )
         case .rejected(let failure):
             transcriptMessages.append(
                 TranscriptMessage(content: .text(failure.userMessage))
@@ -1664,20 +2000,40 @@ struct ContentView: View {
         case .clearTranscript:
             invalidateRemoteRequest()
             invalidateEventCandidateFlow()
+            confirmationLedger.invalidateIdolCandidates()
             transcriptMessages.removeAll()
             activeIdolCandidateTokens.removeAll()
+            confirmedIdolCandidateTokens.removeAll()
             conversationState.clearDraft()
             selectedChekiID = nil
+            pendingNLRetry = nil
         case .requestAddChekiPhoto(let request):
             albumPickerCancellationTask?.cancel()
             albumPickerCancellationTask = nil
             albumAddChekiRequest = request
             albumAddChekiItems = []
             albumPickerState.begin()
+        case .shellAction(let action, let message):
+            if let onShellAction {
+                onShellAction(action)
+                transcriptMessages.append(TranscriptMessage(content: .text(message)))
+            } else {
+                transcriptMessages.append(TranscriptMessage(content: .text(
+                    ChekinanaL10n.text(
+                        "assistant.navigation.unavailable",
+                        fallback: "This navigation action is not available from the current presentation."
+                    )
+                )))
+            }
         default:
             if case .idolCards(let cards) = output {
                 removeIdolCandidateMessages()
                 activeIdolCandidateTokens = Set(cards.compactMap(\.selectionToken))
+                confirmedIdolCandidateTokens.removeAll()
+            } else if case .idolCardsWithNotice(let cards, _) = output {
+                removeIdolCandidateMessages()
+                activeIdolCandidateTokens = Set(cards.compactMap(\.selectionToken))
+                confirmedIdolCandidateTokens.removeAll()
             }
             transcriptMessages.append(TranscriptMessage(content: .commandResponse(output)))
             let codes = ChekinanaConversationCoordinator.confirmationCodes(in: output)
@@ -1689,8 +2045,10 @@ struct ContentView: View {
             }
             if output.consumesSelectedPhotos {
                 selectedItems = []
-                isScannerDateAnnotationEnabled =
-                    ChekinanaScannerDateAnnotationDefaults.isEnabled
+                isScannerDateRecognitionEnabled =
+                    ChekinanaScannerRecognitionDefaults.dateIsEnabled
+                isScannerIdolRecognitionEnabled =
+                    ChekinanaScannerRecognitionDefaults.idolIsEnabled
             }
             if case .text(let text) = output, text.hasPrefix("已删除这张切") {
                 selectedChekiID = nil
@@ -1700,22 +2058,241 @@ struct ContentView: View {
 
     private func selectCheki(_ card: ChekinanaChekiCard) {
         selectedChekiID = card.id
-        let title = card.idx.map { "第 \($0) 张切" } ?? "这张切"
+        let title = card.idx.map {
+            ChekinanaL10n.format("assistant.cheki.index", fallback: "Cheki #%lld", Int64($0))
+        } ?? ChekinanaL10n.text("assistant.cheki.this", fallback: "this Cheki")
         transcriptMessages.append(TranscriptMessage(content: .text(
-            "已选中\(title)。现在可以说“查看这张切”“把这张切的备注改成……”或“删除这张切”。"
+            ChekinanaL10n.format(
+                "assistant.cheki.selected",
+                fallback: "Selected %@. You can now ask to view, edit, or delete it.",
+                title
+            )
         )))
+    }
+
+    private func beginEditingTemporaryCheki(_ card: ChekinanaChekiCard) {
+        guard let temporary = confirmationLedger.temporaryCheki(card.id) else {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.text(
+                    "assistant.temporary.invalid",
+                    fallback: "This temporary Cheki is no longer available."
+                ))
+            ))
+            return
+        }
+        temporaryEditorDraft = TemporaryChekiEditorDraft(
+            id: temporary.id,
+            idolIDs: Set(temporary.idolIDs),
+            hasDate: temporary.date != nil,
+            date: temporary.date.flatMap {
+                ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
+            } ?? Date(),
+            eventID: temporary.eventID,
+            idxText: temporary.idx.map(String.init) ?? "",
+            initialIdxText: temporary.idx.map(String.init) ?? "",
+            userAppears: temporary.userAppears,
+            size: temporary.size,
+            isFavorite: temporary.isFavorite,
+            hasPostedToSNS: temporary.hasPostedToSNS,
+            note: temporary.note
+        )
+        isTemporaryEditorPresented = true
+    }
+
+    private func saveTemporaryEditor() {
+        let draft = temporaryEditorDraft
+        let normalizedDate: Date?
+        if draft.hasDate {
+            guard let date = ChekinanaDateOnly.canonicalDate(
+                from: draft.date,
+                displayedIn: .current
+            ) else {
+                transcriptMessages.append(TranscriptMessage(
+                    content: .text(ChekinanaL10n.text(
+                        "assistant.temporary.invalid_date",
+                        fallback: "The selected date could not be read. Choose it again."
+                    ))
+                ))
+                return
+            }
+            normalizedDate = date
+        } else {
+            normalizedDate = nil
+        }
+        let normalizedIdxText = draft.idxText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let idx: Int?
+        if normalizedIdxText.isEmpty {
+            idx = nil
+        } else if let parsed = Int(normalizedIdxText), parsed > 0 {
+            idx = parsed
+        } else {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.text(
+                    "assistant.temporary.invalid_index",
+                    fallback: "The index must be empty or a positive integer."
+                ))
+            ))
+            return
+        }
+        let group = ChekinanaChekiGroupKey(
+            idolIDs: Array(draft.idolIDs),
+            date: normalizedDate
+        )
+        if idx != nil, group == nil {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.text(
+                    "assistant.temporary.index_requires_group",
+                    fallback: "A positive index requires a date and at least one Idol."
+                ))
+            ))
+            return
+        }
+        if normalizedIdxText != draft.initialIdxText,
+           let idx, let group,
+           ((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? []).contains(where: {
+               ChekinanaChekiGroupKey(
+                   idolIDs: $0.idols.map(\.id),
+                   date: $0.date
+               ) == group && $0.idx == idx
+           }) {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.format(
+                    "assistant.temporary.index_conflict",
+                    fallback: "Index #%lld is already used by this Idol/date group.",
+                    Int64(idx)
+                ))
+            ))
+            return
+        }
+        guard let currentTemporary = confirmationLedger.temporaryCheki(draft.id) else {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.text(
+                    "assistant.temporary.update_failed",
+                    fallback: "This temporary Cheki could not be updated; it may have expired."
+                ))
+            ))
+            return
+        }
+        guard confirmationLedger.updateTemporaryCheki(
+            id: draft.id,
+            idolIDs: Array(draft.idolIDs),
+            date: normalizedDate,
+            eventID: draft.eventID,
+            userAppears: draft.userAppears,
+            size: draft.size,
+            isFavorite: draft.isFavorite,
+            hasPostedToSNS: draft.hasPostedToSNS,
+            note: draft.note,
+            idx: idx,
+            idxWasManuallyEdited: normalizedIdxText != draft.initialIdxText,
+            existingChekiID: currentTemporary.existingChekiID,
+            existingSelectionIsManual: currentTemporary.existingSelectionIsManual
+        ) else {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text(ChekinanaL10n.text(
+                    "assistant.temporary.update_unavailable",
+                    fallback: "This temporary Cheki could not be updated; it may have expired or entered confirmation."
+                ))
+            ))
+            isTemporaryEditorPresented = false
+            return
+        }
+        refreshTemporaryChekiCard(draft.id)
+        isTemporaryEditorPresented = false
+    }
+
+    private func deleteTemporaryCheki(_ card: ChekinanaChekiCard) {
+        guard confirmationLedger.discardTemporaryCheki(id: card.id) else {
+            transcriptMessages.append(TranscriptMessage(content: .text(
+                ChekinanaL10n.text(
+                    "assistant.temporary.delete_failed",
+                    fallback: "This temporary Cheki could not be deleted. Cancel its confirmation first if needed."
+                )
+            )))
+            return
+        }
+        refreshTemporaryChekiCard(card.id)
+        transcriptMessages.append(TranscriptMessage(content: .text(
+            ChekinanaL10n.text(
+                "assistant.temporary.deleted",
+                fallback: "The temporary Cheki was deleted without changing the database or image storage."
+            )
+        )))
+    }
+
+    private func downloadTemporaryCheki(_ card: ChekinanaChekiCard) {
+        executeCommands([
+            "downloadtemporarycheki \(card.id.uuidString.lowercased())",
+        ])
+    }
+
+    private func refreshTemporaryChekiCard(_ id: UUID) {
+        let temporary = confirmationLedger.temporaryCheki(id)
+        let idolsByID = Dictionary(
+            uniqueKeysWithValues: ((try? modelContext.fetch(FetchDescriptor<Idol>())) ?? [])
+                .filter {
+                    ChekinanaVisibilityPolicy.includesIdol(
+                        $0.id,
+                        hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+                    )
+                }
+                .map { ($0.id, $0) }
+        )
+        let eventsByID = Dictionary(
+            uniqueKeysWithValues: ((try? modelContext.fetch(FetchDescriptor<Event>())) ?? [])
+                .map { ($0.id, $0) }
+        )
+        let replacement = temporary.map { value in
+            ChekinanaChekiCard(
+                id: value.id,
+                imageRef: nil,
+                createdAt: value.createdAt,
+                confirmationCode: nil,
+                thumbnailImageData: value.thumbnailImageData,
+                idolNames: value.idolIDs.compactMap { idolsByID[$0]?.name },
+                eventName: value.eventID.flatMap { eventsByID[$0]?.name },
+                eventDateText: value.date.map(calendarDateString),
+                userAppears: value.userAppears,
+                size: value.size,
+                isFavorite: value.isFavorite,
+                hasPostedToSNS: value.hasPostedToSNS,
+                note: value.note,
+                dateAnnotationState: value.dateAnnotationState
+            )
+        }
+        for index in transcriptMessages.indices {
+            guard case .chekiScannedCards(
+                _,
+                let warningCount,
+                let cards
+            ) = transcriptMessages[index].content,
+                  cards.contains(where: { $0.id == id }) else {
+                continue
+            }
+            let updatedCards = cards.compactMap { card -> ChekinanaChekiCard? in
+                guard card.id == id else { return card }
+                return replacement
+            }
+            transcriptMessages[index] = TranscriptMessage(
+                id: transcriptMessages[index].id,
+                role: transcriptMessages[index].role,
+                content: .chekiScannedCards(
+                    count: updatedCards.count,
+                    warningCount: warningCount,
+                    chekis: updatedCards
+                )
+            )
+        }
+    }
+
+    private func calendarDateString(_ date: Date) -> String {
+        ChekinanaDateOnly.string(date)
     }
 
     private func selectIdolCandidate(_ token: String) {
         guard !isSubmitting, activeIdolCandidateTokens.contains(token) else { return }
-        // Resolve the whole visible batch immediately. The ledger consumes the
-        // same batch synchronously, so no old candidate can become selectable
-        // again after this operation returns to ready.
-        activeIdolCandidateTokens.removeAll()
-        removeIdolCandidateMessages(containing: token)
-        transcriptMessages.append(TranscriptMessage(content: .text(
-            "已选择此 Idol，正在准备确认预览。"
-        )))
         isSubmitting = true
         let executionID = idolCandidateSelectionGate.begin()
 
@@ -1728,41 +2305,71 @@ struct ContentView: View {
                 modelContext: modelContext,
                 confirmationLedger: confirmationLedger
             )
-            let output = await executor.execute("selectidolcandidate \(token)")
+            let output = await executor.execute("confirmidolcandidate \(token)")
             guard idolCandidateSelectionGate.accepts(
                 executionID,
                 isCancelled: Task.isCancelled
             ) else { return }
-            finishIdolCandidateSelection(executionID: executionID, output: output)
+            finishIdolCandidateSelection(
+                executionID: executionID,
+                token: token,
+                output: output
+            )
         }
         idolCandidateSelectionTask = task
     }
 
     private func finishIdolCandidateSelection(
         executionID: UUID,
+        token: String,
         output: ChekinanaCommandResponse
     ) {
         guard idolCandidateSelectionGate.finish(executionID) else { return }
         idolCandidateSelectionTask = nil
-        // Clear the sole busy owner before publishing the preview. Appending a
-        // card can immediately trigger LazyVStack layout and animated scrolling.
         isSubmitting = false
-        handleCommandResponse(output)
+        if case .idolCard(let idol) = output {
+            activeIdolCandidateTokens.remove(token)
+            confirmedIdolCandidateTokens.insert(token)
+            // Candidate success is represented by the in-place checkmark.
+            // Appending a new transcript row would trigger the normal
+            // assistant-text bottom scroll and move a long candidate list
+            // away from the card the user just selected.
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: ChekinanaL10n.format(
+                    "assistant.idol.added_announcement",
+                    fallback: "Added %@.",
+                    idol.name
+                )
+            )
+        } else {
+            handleCommandResponse(output)
+        }
     }
 
     private func cancelIdolCandidates() {
         guard !isSubmitting else { return }
         confirmationLedger.invalidateIdolCandidates()
         activeIdolCandidateTokens.removeAll()
+        confirmedIdolCandidateTokens.removeAll()
         removeIdolCandidateMessages()
         transcriptMessages.append(TranscriptMessage(content: .text(
-            "已取消本次 Idol 候选；旧候选按钮已失效。"
+            ChekinanaL10n.text(
+                "assistant.idol_candidates.cancelled",
+                fallback: "The Idol candidates were cancelled. Their previous buttons are no longer active."
+            )
         )))
     }
 
     private func removeIdolCandidateMessages(containing token: String? = nil) {
         transcriptMessages.removeAll { message in
-            guard case .idolCards(let cards) = message.content else { return false }
+            let cards: [ChekinanaIdolCard]
+            switch message.content {
+            case .idolCards(let values), .idolCardsWithNotice(let values, _):
+                cards = values
+            default:
+                return false
+            }
             guard let token else { return cards.contains { $0.selectionToken != nil } }
             return cards.contains { $0.selectionToken == token }
         }
@@ -1878,48 +2485,41 @@ struct ContentView: View {
     private func beginScanAllClarification() {
         guard !confirmationLedger.availableTemporaryChekiChoices().isEmpty else {
             transcriptMessages.append(
-                TranscriptMessage(content: .text("当前没有可用的扫描结果，请先选择照片并扫描。"))
+                TranscriptMessage(content: .text(ChekinanaL10n.text(
+                    "assistant.no_scan_results",
+                    fallback: "No scan results are available. Select photos and scan first."
+                )))
             )
             return
         }
-        var state = ChekinanaConversationDraftState(
-            operation: .init(
-                intent: .addscancheki,
-                slots: .init(temporary: "all")
-            ),
-            missing: [.idol, .eventOrDate]
-        )
-        state.selections.usesAllTemporaryChekis = true
-        conversationState.draft = state
-        transcriptMessages.append(
-            TranscriptMessage(content: .text(clarificationPrompt(for: state)))
-        )
+        conversationState.clearDraft()
+        executeCommands(["addscancheki all"])
     }
 
     private func clarificationPrompt(for draft: ChekinanaConversationDraftState) -> String {
         if let localChoice = draft.localChoice {
             switch localChoice.kind {
             case .idol:
-                return "找到多个匹配的 Idol，请从本地候选中选择一个。"
+                return ChekinanaL10n.text("assistant.prompt.multiple_idol", fallback: "Multiple Idols matched. Choose one.")
             case .event:
-                return "找到多个匹配的 Event，请从本地候选中选择一个。"
+                return ChekinanaL10n.text("assistant.prompt.multiple_event", fallback: "Multiple Events matched. Choose one.")
             }
         }
         switch draft.missing.first {
         case .idol:
             return draft.requiresFreeTextIdolName
-                ? "请补充要添加的 Idol 名称。"
-                : "还需要 Idol：请选择至少一个本地 Idol。"
+                ? ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add.")
+                : ChekinanaL10n.text("assistant.prompt.idol", fallback: "Choose at least one local Idol.")
         case .eventOrDate:
-            return "还需要 Event 或日期：请选择本地 Event，或使用日期。"
+            return ChekinanaL10n.text("assistant.prompt.event_or_date", fallback: "Choose a local Event or use a date.")
         case .eventName:
-            return "还需要 Event 名称；已保留 URL（如有），请继续输入名称。"
+            return ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved.")
         case .date:
-            return "还需要日期，请选择。"
+            return ChekinanaL10n.text("assistant.prompt.date", fallback: "Choose a date.")
         case .temporaryCheki:
-            return "还需要扫描结果：请选择一个或多个，或使用全部。"
+            return ChekinanaL10n.text("assistant.prompt.scan_result", fallback: "Choose the scan results to save.")
         case nil:
-            return "请完成本次操作。"
+            return ChekinanaL10n.text("assistant.prompt.complete", fallback: "Complete this operation.")
         }
     }
 
@@ -1971,7 +2571,9 @@ struct ContentView: View {
             albumAddChekiRequest = nil
             albumAddChekiItems = []
             albumPickerCancellationTask = nil
-            transcriptMessages.append(TranscriptMessage(content: .text("album selection cancelled")))
+            transcriptMessages.append(TranscriptMessage(content: .text(
+                ChekinanaL10n.text("assistant.album.cancelled", fallback: "Album selection was cancelled.")
+            )))
             isSubmitting = false
         }
     }
@@ -1997,10 +2599,15 @@ struct ContentView: View {
             var failedCount = 0
             // Process a bounded batch sequentially. This avoids decoding and
             // copying several full-resolution Photos assets at once.
-            let boundedItems = Array(items.prefix(9))
+            let boundedItems = items
             for (index, item) in boundedItems.enumerated() {
                 guard !Task.isCancelled else { return }
-                mediaLoadProgress = "正在读取照片 \(index + 1)/\(boundedItems.count)…"
+                mediaLoadProgress = ChekinanaL10n.format(
+                    "assistant.photo.reading",
+                    fallback: "Reading photo %1$lld/%2$lld…",
+                    Int64(index + 1),
+                    Int64(boundedItems.count)
+                )
                 do {
                     let image = try await loadPendingChekiImage(from: item)
                     prepared.append(await ChekinanaCommandExecutor.prepareAlbumAddCheki(
@@ -2017,7 +2624,10 @@ struct ContentView: View {
                 guard albumPickerState.failProcessing(sessionID: sessionID) else { return }
                 albumAddChekiRequest = nil
                 albumAddChekiItems = []
-                handleCommandResponse(.text("error: selected photos could not be loaded. No Cheki was prepared."))
+                handleCommandResponse(.text(ChekinanaL10n.text(
+                    "assistant.photo.batch_failed",
+                    fallback: "error: The selected photos could not be loaded. No Cheki was prepared."
+                )))
                 isSubmitting = false
                 return
             }
@@ -2039,7 +2649,11 @@ struct ContentView: View {
             } catch {
                 albumAddChekiRequest = nil
                 albumAddChekiItems = []
-                handleCommandResponse(.text("error: selected photo could not be prepared. No Cheki was prepared. \(error.localizedDescription)"))
+                handleCommandResponse(.text(ChekinanaL10n.format(
+                    "assistant.photo.prepare_failed",
+                    fallback: "error: A selected photo could not be prepared. No Cheki was prepared. %@",
+                    error.localizedDescription
+                )))
                 isSubmitting = false
             }
         }
@@ -2060,7 +2674,12 @@ struct ContentView: View {
 
         for (index, item) in selectedItems.enumerated() {
             guard !Task.isCancelled else { throw ChekinanaAsyncDeadlineError.cancelled }
-            mediaLoadProgress = "正在读取照片 \(index + 1)/\(selectedItems.count)…"
+            mediaLoadProgress = ChekinanaL10n.format(
+                "assistant.photo.reading",
+                fallback: "Reading photo %1$lld/%2$lld…",
+                Int64(index + 1),
+                Int64(selectedItems.count)
+            )
             pendingImages.append(try await loadPendingChekiImage(from: item))
         }
 
@@ -2114,24 +2733,148 @@ struct ContentView: View {
 
     private func redactedCommandEcho(for command: String) -> String {
         if ChekinanaNLPrivacyGuard.containsCredentialedHTTPURL(command) {
-            return "[已隐藏包含凭据的 URL]"
+            return ChekinanaL10n.text(
+                "assistant.redacted_url",
+                fallback: "[URL containing credentials hidden]"
+            )
         }
         if ChekinanaNLPrivacyGuard.containsPodScanCredential(command) {
-            return "[已隐藏包含凭据的输入]"
+            return ChekinanaL10n.text(
+                "assistant.redacted_input",
+                fallback: "[Input containing credentials hidden]"
+            )
         }
         guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(command) else {
-            return "[已隐藏包含凭据的输入]"
+            return ChekinanaL10n.text(
+                "assistant.redacted_input",
+                fallback: "[Input containing credentials hidden]"
+            )
         }
         return command
     }
 
-    private var transcriptAccessibilityValue: String {
-        let visibleText = transcriptMessages.compactMap { message -> String? in
-            guard case .text(let text) = message.content else { return nil }
-            return text
-        }
-        return (["messages=\(transcriptMessages.count)"] + visibleText).joined(separator: "\n")
+    private func appendUserMessage(_ text: String) {
+        transcriptMessages.append(
+            TranscriptMessage(role: .user, content: .text(text))
+        )
     }
+
+    private func requestClose() {
+        guard !isClosing else { return }
+        isClosing = true
+#if DEBUG
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+#endif
+        isPromptFocused = false
+        // SwiftUI owns focus dismissal. Forcing UIKit to resign a stale
+        // responder during cover dismissal generated invalid-session and
+        // keyboard-snapshot work on the main thread.
+        suspendAssistantSession()
+        captureAssistantSession()
+#if DEBUG
+        ChekinanaAssistantTimingLog.completed(
+            stage: "close-ready",
+            messageCount: transcriptMessages.count,
+            cardCount: session.candidateCardCount,
+            startedAt: startedAt
+        )
+#endif
+        onClose?()
+    }
+
+    private func suspendAssistantSession() {
+        if let activeNLRequest,
+           prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt = activeNLRequest.input
+        }
+        if pendingNLRetry == nil { pendingNLRetry = activeNLRequest }
+        invalidateRemoteRequest()
+        activeNLRequest = nil
+        commandExecutionTask?.cancel()
+        commandExecutionTask = nil
+        idolCandidateSelectionGate.invalidate()
+        idolConfirmationGate.invalidate()
+        idolCandidateSelectionTask?.cancel()
+        idolCandidateSelectionTask = nil
+        idolConfirmationTask?.cancel()
+        idolConfirmationTask = nil
+        idolConfirmationTimeoutTask?.cancel()
+        idolConfirmationTimeoutTask = nil
+        invalidateEventCandidateFlow()
+        albumProcessingTask?.cancel()
+        albumProcessingTask = nil
+        isSubmitting = false
+    }
+
+    private func captureAssistantSession() {
+        session.capture(
+            prompt: prompt,
+            transcriptMessages: transcriptMessages,
+            activeIdolCandidateTokens: activeIdolCandidateTokens,
+            confirmedIdolCandidateTokens: confirmedIdolCandidateTokens,
+            confirmationLedger: confirmationLedger,
+            conversationState: conversationState,
+            selectedChekiID: selectedChekiID,
+            pendingNLRetry: pendingNLRetry
+        )
+    }
+
+#if DEBUG
+    private func installLongCandidateUITestFixture() {
+        for index in 1...10 {
+            transcriptMessages.append(TranscriptMessage(
+                content: .text("History message \(index)")
+            ))
+        }
+        let avatarData = ChekinanaMediaUITestFixture.pendingChekiImages()[0].data
+        let prepared = (1...10).map { index in
+            let sourceID = String(format: "fixture_%02d", index)
+            let avatarURL = "https://fixtures.chekinana.invalid/avatar-\(index).jpg"
+            return ChekinanaPreparedIdolCandidate(
+                candidate: ChekinanaEnrichedIdol(
+                    sourceId: sourceID,
+                    idolName: "Candidate \(index)",
+                    groupName: "Fixture Group",
+                    color: nil,
+                    birthday: nil,
+                    verification: "Fixture verified",
+                    bio: nil,
+                    avatarUrl: avatarURL
+                ),
+                avatarThumbnailData: avatarData,
+                avatarIdentity: ChekinanaIdolAvatarIdentity.make(
+                    sourceID: sourceID,
+                    avatarURL: avatarURL
+                )
+            )
+        }
+        let generation = confirmationLedger.beginIdolQuery()
+        guard let choices = confirmationLedger.replaceIdolCandidates(
+            prepared,
+            generation: generation
+        ) else { return }
+        let cards = choices.map { choice in
+            ChekinanaIdolCard(
+                id: UUID(),
+                catalogueID: choice.candidate.candidate.sourceId,
+                name: choice.candidate.candidate.idolName,
+                group: choice.candidate.candidate.groupName,
+                color: nil,
+                birthday: nil,
+                verification: choice.candidate.candidate.verification,
+                bio: nil,
+                avatarImageRef: nil,
+                avatarThumbnailData: nil,
+                avatarIdentity: nil,
+                detail: .addCandidate,
+                confirmationCode: nil,
+                selectionToken: choice.token
+            )
+        }
+        activeIdolCandidateTokens = Set(choices.map(\.token))
+        transcriptMessages.append(TranscriptMessage(content: .idolCards(cards)))
+    }
+#endif
 
     private func filenameExtension(for item: PhotosPickerItem) -> String {
         item.supportedContentTypes
@@ -2140,15 +2883,32 @@ struct ContentView: View {
     }
 }
 
-private struct TranscriptMessage: Identifiable {
-    let id = UUID()
-    let content: TranscriptContent
+enum ChekinanaTranscriptRole: String, Codable, Equatable {
+    case user
+    case assistant
 }
 
-private enum TranscriptContent {
+struct TranscriptMessage: Identifiable {
+    let id: UUID
+    let role: ChekinanaTranscriptRole
+    let content: TranscriptContent
+
+    init(
+        id: UUID = UUID(),
+        role: ChekinanaTranscriptRole = .assistant,
+        content: TranscriptContent
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+    }
+}
+
+enum TranscriptContent {
     case text(String)
     case idolCard(ChekinanaIdolCard)
     case idolCards([ChekinanaIdolCard])
+    case idolCardsWithNotice([ChekinanaIdolCard], String)
     case idolSections([ChekinanaIdolSection])
     case eventCard(ChekinanaEventCard)
     case eventCards([ChekinanaEventCard])
@@ -2163,15 +2923,33 @@ private enum TranscriptContent {
         case .text(let text):
             return .text(text)
         case .confirmationText:
-            return .text("已准备好这项更改。请使用下方按钮确认或取消。")
+            return .text(ChekinanaL10n.text(
+                "assistant.confirmation.ready",
+                fallback: "This change is ready. Use the buttons below to confirm or cancel."
+            ))
         case .chekiAdded(let count):
-            return .text("added cheki: \(count)")
+            return .text(ChekinanaL10n.quantity(
+                "assistant.cheki.added_count",
+                count: count,
+                one: "Added %lld Cheki.",
+                other: "Added %lld Cheki."
+            ))
         case .chekiScanned(let count, let warningCount):
             if warningCount > 0 {
-                return .text("scanned cheki: \(count)\nwarnings: \(warningCount)")
+                return .text(ChekinanaL10n.format(
+                    "assistant.cheki.scanned_with_warnings",
+                    fallback: "Scanned %1$lld Cheki. Warnings: %2$lld.",
+                    Int64(count),
+                    Int64(warningCount)
+                ))
             }
 
-            return .text("scanned cheki: \(count)")
+            return .text(ChekinanaL10n.quantity(
+                "assistant.cheki.scanned_count",
+                count: count,
+                one: "Scanned %lld Cheki.",
+                other: "Scanned %lld Cheki."
+            ))
         case .chekiScannedCards(let count, let warningCount, let chekis):
             return .chekiScannedCards(count: count, warningCount: warningCount, chekis: chekis)
         case .pendingChekiCards(let summary, let chekis, _):
@@ -2182,6 +2960,8 @@ private enum TranscriptContent {
             return .idolCard(idol)
         case .idolCards(let idols):
             return .idolCards(idols)
+        case .idolCardsWithNotice(let idols, let notice):
+            return .idolCardsWithNotice(idols, notice)
         case .idolSections(let sections):
             return .idolSections(sections)
         case .eventCard(let event):
@@ -2189,10 +2969,324 @@ private enum TranscriptContent {
         case .eventCards(let events):
             return .eventCards(events)
         case .requestAddChekiPhoto:
-            return .text("请选择一张或多张照片。选好后我会先展示待保存的切。")
+            return .text(ChekinanaL10n.text(
+                "assistant.choose_photo_request",
+                fallback: "Choose one or more photos. The Cheki will be previewed before saving."
+            ))
+        case .shellAction(_, let message):
+            return .text(message)
         case .clearTranscript:
             return .text("")
         }
+    }
+}
+
+enum ChekinanaTranscriptAppendKind: Equatable {
+    case userText
+    case assistantText
+    case idolCandidates(count: Int)
+    case otherRichContent
+}
+
+enum ChekinanaTranscriptScrollBehavior: Equatable {
+    case none
+    case bottom
+    case responseTop
+}
+
+struct ChekinanaTranscriptScrollPolicy {
+    static func behavior(
+        for kind: ChekinanaTranscriptAppendKind,
+        isRestoringHistory: Bool
+    ) -> ChekinanaTranscriptScrollBehavior {
+        guard !isRestoringHistory else { return .none }
+        switch kind {
+        case .idolCandidates(let count) where count >= 6:
+            return .responseTop
+        case .userText, .assistantText, .idolCandidates, .otherRichContent:
+            return .bottom
+        }
+    }
+
+    fileprivate static func request(
+        for message: TranscriptMessage,
+        isRestoringHistory: Bool
+    ) -> ChekinanaTranscriptScrollRequest {
+        let kind: ChekinanaTranscriptAppendKind
+        switch message.content {
+        case .text:
+            kind = message.role == .user ? .userText : .assistantText
+        case .idolCards(let cards), .idolCardsWithNotice(let cards, _):
+            kind = .idolCandidates(count: cards.count)
+        default:
+            kind = .otherRichContent
+        }
+        switch behavior(for: kind, isRestoringHistory: isRestoringHistory) {
+        case .none: return .none
+        case .bottom: return .bottom(UUID())
+        case .responseTop: return .messageTop(message.id, UUID())
+        }
+    }
+}
+
+fileprivate enum ChekinanaTranscriptScrollRequest: Equatable {
+    case none
+    case bottom(UUID)
+    case messageTop(UUID, UUID)
+}
+
+struct ChekinanaPersistedTranscriptRecord: Codable, Equatable, Sendable {
+    let role: ChekinanaTranscriptRole
+    let text: String
+}
+
+private enum ChekinanaAssistantHistoryWriteQueue {
+    private static let queue = DispatchQueue(
+        label: "app.chekinana.ios.assistant-history",
+        qos: .utility
+    )
+
+    static func save(
+        _ records: [ChekinanaPersistedTranscriptRecord],
+        to url: URL
+    ) {
+        queue.async {
+            ChekinanaAssistantHistoryStore.save(records, to: url)
+        }
+    }
+}
+
+enum ChekinanaAssistantHistoryStore {
+    static let maximumRecords = 200
+    static let maximumTextCharacters = 4_000
+
+    static func load(from url: URL) -> [ChekinanaPersistedTranscriptRecord] {
+        guard let data = try? Data(contentsOf: url) else {
+            return []
+        }
+        guard let records = try? JSONDecoder().decode(
+            [ChekinanaPersistedTranscriptRecord].self,
+            from: data
+        ) else {
+            // Unknown legacy bytes are not a safe history format.
+            try? FileManager.default.removeItem(at: url)
+            return []
+        }
+        let sanitized = boundedSanitizedRecords(records)
+        if sanitized.isEmpty || sanitized != records {
+            if !writeSanitizedRecords(sanitized, to: url) {
+                // Do not leave the known-unsafe legacy bytes behind if the
+                // atomic replacement cannot be completed.
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return sanitized
+    }
+
+    static func save(_ records: [ChekinanaPersistedTranscriptRecord], to url: URL) {
+        writeSanitizedRecords(boundedSanitizedRecords(records), to: url)
+    }
+
+    @discardableResult
+    private static func writeSanitizedRecords(
+        _ records: [ChekinanaPersistedTranscriptRecord],
+        to url: URL
+    ) -> Bool {
+        if records.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(records)
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            // History is best-effort and must never make the Assistant unusable.
+            return false
+        }
+    }
+
+    static func persistableRecords(
+        from messages: [TranscriptMessage]
+    ) -> [ChekinanaPersistedTranscriptRecord] {
+        messages.compactMap { message in
+            guard let text = persistableText(for: message.content) else { return nil }
+            return sanitizedRecord(
+                ChekinanaPersistedTranscriptRecord(role: message.role, text: text)
+            )
+        }
+    }
+
+    private static func persistableText(for content: TranscriptContent) -> String? {
+        switch content {
+        case .text(let text):
+            return text
+        case .idolCard(let idol):
+            return ChekinanaL10n.format("assistant.history.idol", fallback: "Idol: %@", idol.name)
+        case .idolCards(let idols), .idolCardsWithNotice(let idols, _):
+            let names = idols.map(\.name)
+            return names.isEmpty ? nil : ChekinanaL10n.format(
+                "assistant.history.idols",
+                fallback: "Idols: %@",
+                names.joined(separator: ChekinanaL10n.text("assistant.list_separator", fallback: ", "))
+            )
+        case .eventCard(let event):
+            return ChekinanaL10n.format("assistant.history.event", fallback: "Event: %@", event.name)
+        case .eventCards(let events):
+            let names = events.map(\.name)
+            return names.isEmpty ? nil : ChekinanaL10n.format(
+                "assistant.history.events",
+                fallback: "Events: %@",
+                names.joined(separator: ChekinanaL10n.text("assistant.list_separator", fallback: ", "))
+            )
+        case .chekiScannedCards(let count, let warningCount, _):
+            return warningCount == 0
+                ? ChekinanaL10n.quantity(
+                    "assistant.history.scan",
+                    count: count,
+                    one: "Scan complete: %lld Cheki",
+                    other: "Scan complete: %lld Cheki"
+                )
+                : ChekinanaL10n.format(
+                    "assistant.history.scan_warnings",
+                    fallback: "Scan complete: %1$lld Cheki, %2$lld warnings",
+                    Int64(count),
+                    Int64(warningCount)
+                )
+        case .pendingChekiCards(let summary, _):
+            return summary
+        case .chekiCards(let cards):
+            return ChekinanaL10n.quantity(
+                "assistant.history.cheki",
+                count: cards.count,
+                one: "Cheki: %lld item",
+                other: "Cheki: %lld items"
+            )
+        case .idolSections:
+            return ChekinanaL10n.text(
+                "assistant.history.idol_cheki",
+                fallback: "Idol and Cheki results were returned."
+            )
+        case .confirmationActions, .scanAllShortcut:
+            return nil
+        }
+    }
+
+    private static func boundedSanitizedRecords(
+        _ records: [ChekinanaPersistedTranscriptRecord]
+    ) -> [ChekinanaPersistedTranscriptRecord] {
+        Array(records.compactMap(sanitizedRecord).suffix(maximumRecords))
+    }
+
+    private static func sanitizedRecord(
+        _ record: ChekinanaPersistedTranscriptRecord
+    ) -> ChekinanaPersistedTranscriptRecord? {
+        // Persisted history is a separate trust boundary from the in-process
+        // transcript. Apply the same fail-closed privacy guard to both user and
+        // assistant text so an echoed credential or confirmation code cannot
+        // bypass the user-input checks. Sensitive records are omitted rather
+        // than partially redacted because retaining an unrecognised fragment is
+        // riskier than losing one best-effort history entry.
+        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(record.text),
+              !containsExplicitHistorySecret(record.text) else {
+            return nil
+        }
+        return ChekinanaPersistedTranscriptRecord(
+            role: record.role,
+            text: String(record.text.prefix(maximumTextCharacters))
+        )
+    }
+
+    private static func containsExplicitHistorySecret(_ text: String) -> Bool {
+        text.range(
+            of: #"(?i)\b(?:password|passwd|passcode|api[_-]?key|client[_-]?secret|secret|session(?:[_-]?(?:id|key|token))?|private[\s_-]*key)\s*[:：=]\s*\S+"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    static func defaultURL() -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        return base
+            .appendingPathComponent("Chekinana", isDirectory: true)
+            .appendingPathComponent("assistant-history-v1.json", isDirectory: false)
+    }
+}
+
+@MainActor
+final class ChekinanaAssistantSession {
+    fileprivate var prompt: String
+    fileprivate var transcriptMessages: [TranscriptMessage]
+    fileprivate var activeIdolCandidateTokens: Set<String>
+    fileprivate var confirmedIdolCandidateTokens: Set<String>
+    fileprivate var confirmationLedger: ChekinanaConfirmationLedger
+    fileprivate var conversationState: ChekinanaConversationState
+    fileprivate var selectedChekiID: UUID?
+    fileprivate var pendingNLRetry: PendingNaturalLanguageRequest?
+    private let historyURL: URL
+
+    init(historyURL: URL = ChekinanaAssistantHistoryStore.defaultURL()) {
+        self.historyURL = historyURL
+        if ProcessInfo.processInfo.environment["CHEKINANA_UI_RESET_STORE"] == "1" {
+            try? FileManager.default.removeItem(at: historyURL)
+        }
+        prompt = ""
+        activeIdolCandidateTokens = []
+        confirmedIdolCandidateTokens = []
+        confirmationLedger = ChekinanaConfirmationLedger()
+        conversationState = ChekinanaConversationState()
+        selectedChekiID = nil
+        pendingNLRetry = nil
+        transcriptMessages = ChekinanaAssistantHistoryStore.load(from: historyURL).map {
+            TranscriptMessage(role: $0.role, content: .text($0.text))
+        }
+    }
+
+    var messageCount: Int { transcriptMessages.count }
+
+    var candidateCardCount: Int {
+        transcriptMessages.reduce(into: 0) { count, message in
+            switch message.content {
+            case .idolCards(let cards), .idolCardsWithNotice(let cards, _):
+                count += cards.count
+            default:
+                break
+            }
+        }
+    }
+
+    fileprivate func capture(
+        prompt: String,
+        transcriptMessages: [TranscriptMessage],
+        activeIdolCandidateTokens: Set<String>,
+        confirmedIdolCandidateTokens: Set<String>,
+        confirmationLedger: ChekinanaConfirmationLedger,
+        conversationState: ChekinanaConversationState,
+        selectedChekiID: UUID?,
+        pendingNLRetry: PendingNaturalLanguageRequest?
+    ) {
+        self.prompt = prompt
+        self.transcriptMessages = transcriptMessages
+        self.activeIdolCandidateTokens = activeIdolCandidateTokens
+        self.confirmedIdolCandidateTokens = confirmedIdolCandidateTokens
+        self.confirmationLedger = confirmationLedger
+        self.conversationState = conversationState
+        self.selectedChekiID = selectedChekiID
+        self.pendingNLRetry = pendingNLRetry
+        persistTextHistory(from: transcriptMessages)
+    }
+
+    fileprivate func persistTextHistory(from messages: [TranscriptMessage]) {
+        let records = ChekinanaAssistantHistoryStore.persistableRecords(from: messages)
+        // Keep message publication, keyboard transitions, and dismissal off
+        // the atomic filesystem write path while preserving write order.
+        ChekinanaAssistantHistoryWriteQueue.save(records, to: historyURL)
     }
 }
 
@@ -2202,42 +3296,41 @@ private struct EventCandidateEditorView: View {
     let isDisabled: Bool
     let onPrepare: () -> Void
     let onCancel: () -> Void
+    @FocusState private var isFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Event 候选（尚未写入）")
-                .font(.system(size: 16, weight: .semibold))
+            Text(ChekinanaL10n.text("assistant.event_candidate", fallback: "Event candidate · Not saved"))
+                .font(.headline)
 
-            candidateField("名称 *", text: $fields.name, identifier: "name")
-            candidateField("日期", text: $fields.date, identifier: "date", prompt: "YYYY-MM-DD 或留空")
+            candidateField(
+                ChekinanaL10n.text("assistant.event.field.name_required", fallback: "Name *"),
+                text: $fields.name,
+                identifier: "name"
+            )
+            candidateField(
+                ChekinanaL10n.text("assistant.event.field.date", fallback: "Date"),
+                text: $fields.date,
+                identifier: "date",
+                prompt: ChekinanaL10n.text("assistant.event.date_optional", fallback: "YYYY-MM-DD or empty")
+            )
             if fields.date.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("未确定日期；将保存为空日期。")
-                    .font(.system(size: 12))
+                Text(ChekinanaL10n.text("assistant.event_no_date", fallback: "No date was found; the Event will be saved without a date."))
+                    .font(.footnote)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("chekinana.event.candidate.date-undetermined")
             }
-            candidateField("城市", text: $fields.city, identifier: "city")
-            candidateField("场地", text: $fields.livehouse, identifier: "livehouse")
-            candidateField("微博链接 *", text: $fields.weiboURL, identifier: "weibo-url")
-            candidateField("票务链接", text: $fields.ticketURL, identifier: "ticket-url")
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("备注")
-                    .font(.system(size: 12, weight: .medium))
-                TextEditor(text: $fields.note)
-                    .frame(minHeight: 72)
-                    .padding(6)
-                    .background(Color(.systemGray6))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-                    .disabled(isDisabled)
-                    .accessibilityIdentifier("chekinana.event.candidate.note")
-            }
+            candidateField(ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), text: $fields.city, identifier: "city")
+            candidateField(ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), text: $fields.livehouse, identifier: "livehouse")
+            candidateField(ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), text: $fields.price, identifier: "price")
+            candidateField(ChekinanaL10n.text("assistant.event.field.weibo_required", fallback: "Weibo URL *"), text: $fields.weiboURL, identifier: "weibo-url")
+            candidateField(ChekinanaL10n.text("assistant.event.field.ticket", fallback: "Ticket URL"), text: $fields.ticketURL, identifier: "ticket-url")
 
             if !blockers.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(blockers) { blocker in
                         Text("• \(blocker.message)")
-                            .font(.system(size: 12))
+                            .font(.footnote)
                             .foregroundStyle(.red)
                             .accessibilityIdentifier("chekinana.event.candidate.blocker.\(blocker.id)")
                     }
@@ -2246,8 +3339,25 @@ private struct EventCandidateEditorView: View {
                 .accessibilityIdentifier("chekinana.event.candidate.blockers")
             }
 
-            HStack(spacing: 8) {
-                Button("准备确认") {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { eventCandidateButtons }
+                VStack(alignment: .leading, spacing: 8) { eventCandidateButtons }
+            }
+        }
+        .eventCandidatePanelStyle()
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button(ChekinanaL10n.text("action.done", fallback: "Done")) {
+                    isFieldFocused = false
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var eventCandidateButtons: some View {
+                Button(ChekinanaL10n.text("assistant.prepare_confirmation", fallback: "Prepare confirmation")) {
                     onPrepare()
                 }
                 .buttonStyle(.borderedProminent)
@@ -2257,13 +3367,13 @@ private struct EventCandidateEditorView: View {
                 .accessibilityIdentifier("chekinana.event.candidate.prepare")
                 .accessibilityHint(
                     isDisabled
-                        ? "请等待当前操作完成"
+                        ? ChekinanaL10n.text("assistant.event.prepare_wait", fallback: "Wait for the current operation to finish")
                         : blockers.isEmpty
-                            ? "冻结当前七个字段并生成确认卡"
-                            : "请先修正候选中的阻断问题"
+                            ? ChekinanaL10n.text("assistant.event.prepare_hint", fallback: "Freeze these fields and create a confirmation card")
+                            : ChekinanaL10n.text("assistant.event.prepare_blocked", fallback: "Correct the listed issues first")
                 )
 
-                Button("取消") {
+                Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
                     onCancel()
                 }
                 .buttonStyle(.bordered)
@@ -2271,27 +3381,25 @@ private struct EventCandidateEditorView: View {
                 .contentShape(Rectangle())
                 .disabled(isDisabled)
                 .accessibilityIdentifier("chekinana.event.candidate.cancel")
-                .accessibilityHint("关闭候选，不创建待确认项或 Event")
-            }
-        }
-        .eventCandidatePanelStyle()
+                .accessibilityHint(ChekinanaL10n.text("assistant.event_cancel_hint", fallback: "Close the candidate without creating an Event"))
     }
 
     private func candidateField(
         _ label: String,
         text: Binding<String>,
         identifier: String,
-        prompt: String = "可留空"
+        prompt: String = ChekinanaL10n.text("assistant.optional", fallback: "Optional")
     ) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .font(.footnote.weight(.medium))
             TextField(prompt, text: text, axis: .vertical)
                 .lineLimit(1...3)
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .disabled(isDisabled)
+                .focused($isFieldFocused)
                 .accessibilityIdentifier("chekinana.event.candidate.\(identifier)")
         }
     }
@@ -2302,16 +3410,24 @@ private struct EventCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(event.confirmationCode == nil ? "Event" : "待确认 Event")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            Text(event.confirmationCode == nil
+                ? ChekinanaL10n.text("assistant.event.title", fallback: "Event")
+                : ChekinanaL10n.text("assistant.event.pending", fallback: "Pending Event"))
+                .font(.footnote.weight(.semibold).monospaced())
                 .foregroundStyle(event.confirmationCode == nil ? Color(.secondaryLabel) : .orange)
-            value("名称", event.name)
-            value("日期", event.date.isEmpty ? "未确定日期" : event.date)
-            value("城市", emptyFallback(event.city))
-            value("场地", emptyFallback(event.livehouse))
-            value("微博", emptyFallback(event.weiboURL))
-            value("票务", emptyFallback(event.ticketURL))
-            value("备注", emptyFallback(event.note))
+            value(ChekinanaL10n.text("assistant.event.field.name", fallback: "Name"), event.name)
+            value(
+                ChekinanaL10n.text("assistant.event.field.date", fallback: "Date"),
+                event.date.isEmpty
+                    ? ChekinanaL10n.text("assistant.event.date_undetermined", fallback: "Undetermined")
+                    : ChekinanaDisplayFormat.date(event.date)
+            )
+            value(ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), emptyFallback(event.city))
+            value(ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), emptyFallback(event.livehouse))
+            value(ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), emptyFallback(event.price))
+            value(ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo"), emptyFallback(event.weiboURL))
+            value(ChekinanaL10n.text("assistant.event.field.ticket_short", fallback: "Tickets"), emptyFallback(event.ticketURL))
+            value(ChekinanaL10n.text("assistant.note", fallback: "Note"), emptyFallback(event.note))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2325,15 +3441,17 @@ private struct EventCardView: View {
     }
 
     private func value(_ label: String, _ value: String) -> some View {
-        Text("\(label)：\(value)")
-            .font(.system(size: 13))
+        Text(ChekinanaL10n.format("assistant.field_value", fallback: "%1$@: %2$@", label, value))
+            .font(.subheadline)
             .foregroundStyle(.black)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
     }
 
     private func emptyFallback(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未设置" : value
+        value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ChekinanaL10n.text("assistant.not_set", fallback: "Not set")
+            : value
     }
 }
 
@@ -2358,7 +3476,7 @@ private struct ConfirmationActionView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(codes, id: \.self) { code in
                 HStack(spacing: 8) {
-                    Button("确认") {
+                    Button(ChekinanaL10n.text("assistant.confirm", fallback: "Confirm")) {
                         action("confirm \(code)")
                     }
                     .buttonStyle(.borderedProminent)
@@ -2366,7 +3484,7 @@ private struct ConfirmationActionView: View {
                     .contentShape(Rectangle())
                     .accessibilityIdentifier("chekinana.confirm.\(code)")
 
-                    Button("取消") {
+                    Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
                         action("cancel \(code)")
                     }
                     .buttonStyle(.bordered)
@@ -2393,13 +3511,13 @@ private struct FlowChoiceView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(option.title)
-                                .font(.system(size: 13, weight: .medium))
-                                .lineLimit(1)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(2)
                             if let subtitle = option.subtitle, !subtitle.isEmpty {
                                 Text(subtitle)
-                                    .font(.system(size: 10))
+                                    .font(.caption)
                                     .foregroundStyle(Color(.secondaryLabel))
-                                    .lineLimit(1)
+                                    .lineLimit(2)
                             }
                         }
                         .foregroundStyle(.black)
@@ -2411,6 +3529,7 @@ private struct FlowChoiceView: View {
                     .buttonStyle(.plain)
                     .frame(minHeight: 44)
                     .contentShape(Rectangle())
+                    .accessibilityAddTraits(selectedIDs.contains(option.id) ? .isSelected : [])
                     .accessibilityIdentifier("chekinana.choice.\(option.id.uuidString.lowercased())")
                 }
             }
@@ -2443,15 +3562,34 @@ private struct ScannedChekiTranscriptView: View {
     let count: Int
     let warningCount: Int
     let chekis: [ChekinanaChekiCard]
+    let onEdit: (ChekinanaChekiCard) -> Void
+    let onDelete: (ChekinanaChekiCard) -> Void
+    let onDownload: (ChekinanaChekiCard) -> Void
 
     private var summaryText: String {
         var lines = [
-            "已识别出 \(count) 张切。",
-            "点击“为全部切补充信息”，再选择一个或多个 Idol，以及 Event 或日期。",
-            "这些结果尚未保存；完成信息并确认后才会写入。",
+            ChekinanaL10n.quantity(
+                "assistant.scan.recognized",
+                count: count,
+                one: "Recognized %lld Cheki.",
+                other: "Recognized %lld Cheki."
+            ),
+            ChekinanaL10n.text(
+                "assistant.scan.edit_help",
+                fallback: "Edit each result's Idol, date, Event, and other details, or delete it and save its clean image."
+            ),
+            ChekinanaL10n.text(
+                "assistant.scan.unsaved",
+                fallback: "These results are not saved yet. Each needs a date before confirmation."
+            ),
         ]
         if warningCount > 0 {
-            lines.append("扫描过程有 \(warningCount) 条提醒（例如识别数量与预期不同，或较早的未使用结果被释放）。")
+            lines.append(ChekinanaL10n.quantity(
+                "assistant.scan.warnings",
+                count: warningCount,
+                one: "The scan produced %lld warning, such as a count mismatch or an earlier unused result being released.",
+                other: "The scan produced %lld warnings, such as a count mismatch or an earlier unused result being released."
+            ))
         }
         return lines.joined(separator: "\n")
     }
@@ -2459,7 +3597,7 @@ private struct ScannedChekiTranscriptView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(summaryText)
-                .font(.system(size: 14, design: .monospaced))
+                .font(.subheadline)
                 .foregroundStyle(.black)
                 .textSelection(.enabled)
 
@@ -2467,7 +3605,31 @@ private struct ScannedChekiTranscriptView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 8) {
                         ForEach(chekis) { cheki in
-                            ChekiCardView(cheki: cheki)
+                            VStack(spacing: 6) {
+                                ChekiCardView(cheki: cheki)
+                                Button(ChekinanaL10n.text("assistant.edit", fallback: "Edit")) { onEdit(cheki) }
+                                    .buttonStyle(.bordered)
+                                    .chekinanaMinimumTouchTarget()
+                                    .accessibilityIdentifier(
+                                        "chekinana.temporary.edit.\(cheki.id.uuidString.lowercased())"
+                                    )
+                                Button(ChekinanaL10n.text("assistant.save_original", fallback: "Save original")) { onDownload(cheki) }
+                                    .buttonStyle(.bordered)
+                                    .chekinanaMinimumTouchTarget()
+                                    .accessibilityHint(ChekinanaL10n.text(
+                                        "assistant.save_original_hint",
+                                        fallback: "Save the clean image without the date bounding box"
+                                    ))
+                                    .accessibilityIdentifier(
+                                        "chekinana.temporary.download.\(cheki.id.uuidString.lowercased())"
+                                    )
+                                Button(ChekinanaL10n.text("assistant.delete", fallback: "Delete"), role: .destructive) { onDelete(cheki) }
+                                    .buttonStyle(.bordered)
+                                    .chekinanaMinimumTouchTarget()
+                                    .accessibilityIdentifier(
+                                        "chekinana.temporary.delete.\(cheki.id.uuidString.lowercased())"
+                                    )
+                            }
                         }
                     }
                     .padding(.vertical, 1)
@@ -2483,8 +3645,8 @@ private struct PendingChekiTranscriptView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(summary)\n请使用下方按钮确认或取消。")
-                .font(.system(size: 14, design: .monospaced))
+            Text("\(summary)\n\(ChekinanaL10n.text("assistant.confirm_below", fallback: "Use the buttons below to confirm or cancel."))")
+                .font(.subheadline)
                 .foregroundStyle(.black)
                 .textSelection(.enabled)
 
@@ -2495,6 +3657,103 @@ private struct PendingChekiTranscriptView: View {
                     }
                 }
                 .padding(.vertical, 1)
+            }
+        }
+    }
+}
+
+private struct TemporaryChekiEditorView: View {
+    @Binding var draft: TemporaryChekiEditorDraft
+    let idols: [Idol]
+    let events: [Event]
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isIndexFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(ChekinanaL10n.text("assistant.temporary.idols", fallback: "Idols (optional, multiple allowed)")) {
+                    if idols.isEmpty {
+                        Text(ChekinanaL10n.text("assistant.no_local_idol", fallback: "No local Idols"))
+                            .foregroundStyle(Color(.secondaryLabel))
+                    }
+                    ForEach(idols.sorted(by: { $0.name < $1.name })) { idol in
+                        Toggle(
+                            idol.name,
+                            isOn: Binding(
+                                get: { draft.idolIDs.contains(idol.id) },
+                                set: { selected in
+                                    if selected {
+                                        draft.idolIDs.insert(idol.id)
+                                    } else {
+                                        draft.idolIDs.remove(idol.id)
+                                    }
+                                }
+                            )
+                        )
+                    }
+                }
+
+                Section(ChekinanaL10n.text("assistant.temporary.date_section", fallback: "Date (required before confirmation)")) {
+                    Toggle(ChekinanaL10n.text("assistant.temporary.set_date", fallback: "Set date"), isOn: $draft.hasDate)
+                    if draft.hasDate {
+                        DatePicker(
+                            ChekinanaL10n.text("assistant.date", fallback: "Date"),
+                            selection: $draft.date,
+                            displayedComponents: .date
+                        )
+                        .datePickerStyle(.compact)
+                    }
+                }
+
+                Section(ChekinanaL10n.text("assistant.temporary.event", fallback: "Event (optional; does not affect index)")) {
+                    Picker(ChekinanaL10n.text("assistant.event.title", fallback: "Event"), selection: $draft.eventID) {
+                        Text(ChekinanaL10n.text("assistant.none", fallback: "None")).tag(UUID?.none)
+                        ForEach(events.sorted(by: { $0.name < $1.name })) { event in
+                            Text(event.name).tag(Optional(event.id))
+                        }
+                    }
+                }
+
+                Section(ChekinanaL10n.text("assistant.temporary.other", fallback: "Other details")) {
+                    TextField(ChekinanaL10n.text("assistant.index_optional", fallback: "Index (optional)"), text: $draft.idxText)
+                        .keyboardType(.numberPad)
+                        .focused($isIndexFocused)
+                    Picker(ChekinanaL10n.text("assistant.temporary.size", fallback: "Size"), selection: $draft.size) {
+                        Text(ChekinanaL10n.text("assistant.not_set", fallback: "Not set")).tag(ChekiSize?.none)
+                        ForEach(ChekiSize.allCases) { size in
+                            Text(size == .mini
+                                ? ChekinanaL10n.text("assistant.size.mini", fallback: "Mini")
+                                : ChekinanaL10n.text("assistant.size.wide", fallback: "Wide"))
+                                .tag(Optional(size))
+                        }
+                    }
+                    Toggle(ChekinanaL10n.text("assistant.temporary.favorite", fallback: "Favorite"), isOn: $draft.isFavorite)
+                    Toggle(ChekinanaL10n.text("assistant.temporary.posted", fallback: "Posted to SNS"), isOn: $draft.hasPostedToSNS)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(ChekinanaL10n.text("assistant.note", fallback: "Note"))
+                        TextEditor(text: $draft.note)
+                            .frame(minHeight: 90)
+                    }
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle(ChekinanaL10n.text("assistant.temporary.edit_title", fallback: "Edit Temporary Cheki"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel"), action: onCancel)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(ChekinanaL10n.text("assistant.save", fallback: "Save"), action: onSave)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button(ChekinanaL10n.text("action.done", fallback: "Done")) {
+                        isIndexFocused = false
+                    }
+                }
             }
         }
     }
@@ -2512,30 +3771,31 @@ private enum ChekinanaCardBatching {
 private struct IdolCardCollectionView: View {
     let idols: [ChekinanaIdolCard]
     let activeSelectionTokens: Set<String>
+    let confirmedSelectionTokens: Set<String>
+    let isInteractionEnabled: Bool
     let onSelectCandidate: (String) -> Void
     let onCancelCandidates: () -> Void
-    @State private var visibleCount = ChekinanaCardBatching.initialCount
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 12) {
-            ForEach(idols.prefix(visibleCount)) { idol in
+            ForEach(idols) { idol in
                 IdolCardView(
                     idol: idol,
-                    onSelectCandidate: selectionAction(for: idol)
+                    onSelectCandidate: selectionAction(for: idol),
+                    isCandidateConfirmed: idol.selectionToken.map(confirmedSelectionTokens.contains) ?? false,
+                    isCandidateInteractionEnabled: isInteractionEnabled
                 )
-            }
-            if visibleCount < idols.count {
-                loadMoreButton(totalCount: idols.count)
             }
             if idols.contains(where: { idol in
                 idol.selectionToken.map(activeSelectionTokens.contains) ?? false
             }) {
-                Button("取消本次候选") {
+                Button(ChekinanaL10n.text("assistant.cancel_candidates", fallback: "Cancel these candidates")) {
                     onCancelCandidates()
                 }
                 .buttonStyle(.bordered)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
+                .disabled(!isInteractionEnabled)
                 .accessibilityIdentifier("chekinana.idol.candidates.cancel")
             }
         }
@@ -2549,14 +3809,6 @@ private struct IdolCardCollectionView: View {
         return { onSelectCandidate(token) }
     }
 
-    private func loadMoreButton(totalCount: Int) -> some View {
-        Button("Load more (\(min(ChekinanaCardBatching.increment, totalCount - visibleCount)) of \(totalCount - visibleCount) remaining)") {
-            visibleCount = min(totalCount, visibleCount + ChekinanaCardBatching.increment)
-        }
-        .buttonStyle(.bordered)
-        .frame(maxWidth: .infinity)
-        .accessibilityHint("Shows the next Idol cards")
-    }
 }
 
 private struct IdolSectionCollectionView: View {
@@ -2575,12 +3827,17 @@ private struct IdolSectionCollectionView: View {
                 )
             }
             if visibleCount < sections.count {
-                Button("Load more (\(min(ChekinanaCardBatching.increment, sections.count - visibleCount)) of \(sections.count - visibleCount) remaining)") {
+                Button(ChekinanaL10n.format(
+                    "assistant.load_more",
+                    fallback: "Load %1$lld more · %2$lld remaining",
+                    Int64(min(ChekinanaCardBatching.increment, sections.count - visibleCount)),
+                    Int64(sections.count - visibleCount)
+                )) {
                     visibleCount = min(sections.count, visibleCount + ChekinanaCardBatching.increment)
                 }
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity)
-                .accessibilityHint("Shows the next Idol cards")
+                .accessibilityHint(ChekinanaL10n.text("assistant.load_more_hint", fallback: "Show the next Idol cards"))
             }
         }
     }
@@ -2624,6 +3881,7 @@ struct ChekinanaChekiPreviewSource: Equatable, Sendable {
     let imageRef: String?
     let embeddedThumbnailData: Data?
     let preferredKind: PreferredKind
+    let transientDateAnnotation: ChekinanaChekiDateAnnotation?
 
     init(cheki: ChekinanaChekiCard) {
         chekiID = cheki.id
@@ -2640,6 +3898,13 @@ struct ChekinanaChekiPreviewSource: Equatable, Sendable {
             preferredKind = .embeddedThumbnail
         } else {
             preferredKind = .unavailable
+        }
+        if imageRef == nil,
+           cheki.idx == nil,
+           case .detected(let annotation) = cheki.dateAnnotationState {
+            transientDateAnnotation = annotation
+        } else {
+            transientDateAnnotation = nil
         }
     }
 
@@ -2839,16 +4104,16 @@ private struct ChekiCardView: View {
 
     private var title: String {
         if cheki.confirmationCode != nil {
-            return "待确认"
+            return ChekinanaL10n.text("assistant.cheki.pending", fallback: "Pending")
         }
         if let idx = cheki.idx {
-            return "第 \(idx) 张切"
+            return ChekinanaL10n.format("assistant.cheki.index", fallback: "Cheki #%lld", Int64(idx))
         }
-        return "扫描结果"
+        return ChekinanaL10n.text("assistant.cheki.scan_result", fallback: "Scan result")
     }
 
     private var associationText: String? {
-        let idols = cheki.idolNames.joined(separator: "、")
+        let idols = cheki.idolNames.joined(separator: ChekinanaL10n.text("assistant.list_separator", fallback: ", "))
         let occasion = cheki.eventName ?? cheki.eventDateText
         let parts = [idols.isEmpty ? nil : idols, occasion].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -2867,11 +4132,15 @@ private struct ChekiCardView: View {
         case .notRequested:
             nil
         case .detected(let annotation):
-            "手写日期：\(annotation.text)"
+            ChekinanaL10n.format(
+                "assistant.cheki.detected_date",
+                fallback: "Date: %@",
+                ChekinanaDisplayFormat.date(annotation.text)
+            )
         case .notDetected:
-            "未识别到日期"
+            ChekinanaL10n.text("assistant.cheki.date_not_detected", fallback: "No date detected")
         case .unavailable:
-            "日期识别不可用"
+            ChekinanaL10n.text("assistant.cheki.date_unavailable", fallback: "Date recognition unavailable")
         }
     }
 
@@ -2885,14 +4154,17 @@ private struct ChekiCardView: View {
     private var dateAnnotationAccessibilityValue: String {
         switch cheki.dateAnnotationState {
         case .notRequested:
-            return "未启用手写日期识别"
+            return ChekinanaL10n.text("assistant.cheki.date_not_requested", fallback: "Handwritten date recognition was not requested")
         case .detected(let annotation):
-            let box = annotation.boundingBox
-            return "识别到手写日期 \(annotation.text)，标注区域 \(box.x1)，\(box.y1)，\(box.x2)，\(box.y2)"
+            return ChekinanaL10n.format(
+                "assistant.cheki.date_detected_accessibility",
+                fallback: "Detected handwritten date %@",
+                ChekinanaDisplayFormat.date(annotation.text)
+            )
         case .notDetected:
-            return "已识别，未检测到手写日期"
+            return ChekinanaL10n.text("assistant.cheki.date_not_detected_accessibility", fallback: "No handwritten date was detected")
         case .unavailable:
-            return "手写日期识别不可用，图片仍可使用"
+            return ChekinanaL10n.text("assistant.cheki.date_unavailable_accessibility", fallback: "Handwritten date recognition was unavailable; the image can still be used")
         }
     }
 
@@ -2937,7 +4209,7 @@ private struct ChekiCardView: View {
                     }
 
                     Text(title)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -2952,28 +4224,28 @@ private struct ChekiCardView: View {
             .buttonStyle(.plain)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
-            .accessibilityLabel("查看 Cheki 大图")
-            .accessibilityHint("打开全屏图片预览，不会选择或修改这张切")
+            .accessibilityLabel(ChekinanaL10n.text("assistant.cheki.preview", fallback: "View full-size Cheki"))
+            .accessibilityHint(ChekinanaL10n.text("assistant.cheki.preview_hint", fallback: "Open a full-screen preview without selecting or changing this Cheki"))
             .accessibilityValue(dateAnnotationAccessibilityValue)
             .accessibilityIdentifier("chekinana.cheki.preview.open.\(cheki.id.uuidString.lowercased())")
 
             if let associationText {
                 Text(associationText)
-                    .font(.system(size: 11))
+                    .font(.caption)
                     .foregroundStyle(Color(.secondaryLabel))
-                    .lineLimit(2)
+                    .lineLimit(3)
             }
 
             if let note = cheki.note, !note.isEmpty {
-                Text("备注：\(note)")
-                    .font(.system(size: 11))
+                Text(ChekinanaL10n.format("assistant.cheki.note", fallback: "Note: %@", note))
+                    .font(.caption)
                     .foregroundStyle(Color(.secondaryLabel))
-                    .lineLimit(2)
+                    .lineLimit(3)
             }
 
             if let dateAnnotationStatusText {
                 Text(dateAnnotationStatusText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.caption.weight(.medium))
                     .foregroundStyle(dateAnnotationStatusColor)
                     .lineLimit(2)
                     .accessibilityIdentifier(
@@ -2982,18 +4254,21 @@ private struct ChekiCardView: View {
             }
 
             if cheki.confirmationCode == nil, cheki.idx != nil, let onSelect {
-                Button(isSelected ? "已选中" : "选择这张切") {
+                Button(isSelected
+                    ? ChekinanaL10n.text("assistant.cheki.selected_button", fallback: "Selected")
+                    : ChekinanaL10n.text("assistant.cheki.select_button", fallback: "Select this Cheki")) {
                     onSelect()
                 }
                 .buttonStyle(.bordered)
                 .tint(isSelected ? Color.accentColor : Color(.secondaryLabel))
                 .frame(minWidth: 96, minHeight: 44)
                 .contentShape(Rectangle())
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
                 .accessibilityIdentifier("chekinana.cheki.select.\(cheki.id.uuidString.lowercased())")
             }
         }
         .padding(6)
-        .frame(width: 132, alignment: .topLeading)
+        .frame(minWidth: 132, idealWidth: 160, maxWidth: 220, alignment: .topLeading)
         .background(isSelected ? Color.accentColor.opacity(0.08) : .white)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
@@ -3041,8 +4316,8 @@ private struct ChekinanaChekiImagePreview: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
-                    Text("Cheki 大图预览")
-                        .font(.system(size: 16, weight: .semibold))
+                    Text(ChekinanaL10n.text("assistant.cheki.preview_title", fallback: "Cheki Preview"))
+                        .font(.headline)
                         .foregroundStyle(.white)
                         .accessibilityIdentifier("chekinana.cheki.preview.title")
 
@@ -3061,8 +4336,8 @@ private struct ChekinanaChekiImagePreview: View {
                     .buttonStyle(.plain)
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
-                    .accessibilityLabel("关闭大图预览")
-                    .accessibilityHint("关闭预览并返回原 Cheki 卡片")
+                    .accessibilityLabel(ChekinanaL10n.text("assistant.cheki.preview_close", fallback: "Close full-size preview"))
+                    .accessibilityHint(ChekinanaL10n.text("assistant.cheki.preview_close_hint", fallback: "Return to the Cheki card"))
                     .accessibilityIdentifier("chekinana.cheki.preview.close")
                 }
                 .padding(.horizontal, 16)
@@ -3076,10 +4351,20 @@ private struct ChekinanaChekiImagePreview: View {
                             .scaledToFit()
                             .accessibilityHidden(true)
 
+                        if let annotation = source.transientDateAnnotation {
+                            ChekinanaChekiDateOverlay(
+                                annotation: annotation,
+                                imageSize: CGSize(
+                                    width: renderedImage.cgImage.width,
+                                    height: renderedImage.cgImage.height
+                                )
+                            )
+                        }
+
                         VStack {
                             Spacer()
-                            Text("大图已加载")
-                                .font(.system(size: 11, weight: .medium))
+                            Text(ChekinanaL10n.text("assistant.cheki.preview_loaded", fallback: "Full-size image loaded"))
+                                .font(.caption.weight(.medium))
                                 .foregroundStyle(.white.opacity(0.7))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
@@ -3091,8 +4376,8 @@ private struct ChekinanaChekiImagePreview: View {
                         VStack(spacing: 10) {
                             Image(systemName: "photo")
                                 .font(.system(size: 42, weight: .light))
-                            Text("无法加载这张 Cheki 的大图。")
-                                .font(.system(size: 14))
+                            Text(ChekinanaL10n.text("assistant.cheki.preview_unavailable", fallback: "The full-size Cheki image could not be loaded."))
+                                .font(.subheadline)
                         }
                         .foregroundStyle(Color(.systemGray2))
                         .accessibilityElement(children: .combine)
@@ -3100,7 +4385,7 @@ private struct ChekinanaChekiImagePreview: View {
                     } else {
                         ProgressView()
                             .tint(.white)
-                            .accessibilityLabel("正在加载 Cheki 大图")
+                            .accessibilityLabel(ChekinanaL10n.text("assistant.cheki.preview_loading", fallback: "Loading full-size Cheki"))
                             .accessibilityIdentifier("chekinana.cheki.preview.loading")
                     }
                 }
@@ -3133,53 +4418,69 @@ private struct ChekinanaChekiImagePreview: View {
 }
 
 struct ChekinanaIdolCardPresentation: Equatable {
-    enum FourthLineKind: Equatable {
+    enum ThirdLineKind: Equatable {
         case verification
+        case bio
         case chekiCount
     }
 
     let lines: [String]
-    let fourthLineKind: FourthLineKind
+    let thirdLineKind: ThirdLineKind
 
     init(idol: ChekinanaIdolCard) {
-        let fourthLine: String
+        let thirdLine: String
         switch idol.detail {
         case .addCandidate:
-            fourthLineKind = .verification
-            fourthLine = "Verification: \(Self.nonempty(idol.verification))"
+            let verification = Self.trimmed(idol.verification)
+            if verification.isEmpty {
+                thirdLineKind = .bio
+                thirdLine = Self.nonempty(idol.bio)
+            } else {
+                thirdLineKind = .verification
+                thirdLine = verification
+            }
         case .deleteCandidate:
-            fourthLineKind = .chekiCount
-            fourthLine = "0 cheki"
+            thirdLineKind = .chekiCount
+            thirdLine = ChekinanaRecordKind.cheki.countLabel(0)
         case .chekiCount(let count):
-            fourthLineKind = .chekiCount
-            fourthLine = "\(count) \(count > 1 ? "chekis" : "cheki")"
+            thirdLineKind = .chekiCount
+            thirdLine = ChekinanaRecordKind.cheki.countLabel(count)
         }
         lines = [
             Self.nonempty(idol.name),
             Self.nonempty(idol.group),
-            "Birthday: \(Self.nonempty(idol.birthday))",
-            fourthLine,
+            thirdLine,
         ]
     }
 
+    private static func trimmed(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     private static func nonempty(_ value: String?) -> String {
-        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "—" : trimmed
+        let value = trimmed(value)
+        return value.isEmpty ? "—" : value
     }
 }
 
 private struct IdolCardView: View {
     let idol: ChekinanaIdolCard
     let onSelectCandidate: (() -> Void)?
+    let isCandidateConfirmed: Bool
+    let isCandidateInteractionEnabled: Bool
     @State private var renderedLocalAvatar: ChekinanaRenderedImage?
     @State private var renderedRemoteAvatar: ChekinanaRenderedImage?
 
     init(
         idol: ChekinanaIdolCard,
-        onSelectCandidate: (() -> Void)? = nil
+        onSelectCandidate: (() -> Void)? = nil,
+        isCandidateConfirmed: Bool = false,
+        isCandidateInteractionEnabled: Bool = true
     ) {
         self.idol = idol
         self.onSelectCandidate = onSelectCandidate
+        self.isCandidateConfirmed = isCandidateConfirmed
+        self.isCandidateInteractionEnabled = isCandidateInteractionEnabled
     }
 
     private var ringColors: [Color] {
@@ -3206,9 +4507,15 @@ private struct IdolCardView: View {
         return "\(idol.id.uuidString)|\(ref)"
     }
 
-    private var remoteAvatarUsesCacheOnly: Bool {
-        guard case .addCandidate = idol.detail else { return false }
-        return idol.selectionToken == nil && idol.confirmationCode != nil
+    private var embeddedAvatarImage: ChekinanaRenderedImage? {
+        guard idol.avatarThumbnailData?.isEmpty == false,
+              idol.avatarIdentity == ChekinanaIdolAvatarIdentity.make(
+                sourceID: idol.catalogueID ?? "",
+                avatarURL: idol.avatarImageRef
+              ) else {
+            return nil
+        }
+        return idol.avatarThumbnailImage
     }
 
     private var avatarPlaceholderText: String {
@@ -3221,19 +4528,19 @@ private struct IdolCardView: View {
 
     var body: some View {
         let presentation = ChekinanaIdolCardPresentation(idol: idol)
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             avatar
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(presentation.lines[0])
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.headline)
                     .foregroundStyle(Color(.label))
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .multilineTextAlignment(.leading)
                     .accessibilityIdentifier("chekinana.idol.card.line.1")
                     .textSelection(.enabled)
                     .contextMenu {
-                        Button("复制") {
+                        Button(ChekinanaL10n.text("assistant.copy", fallback: "Copy")) {
                             UIPasteboard.general.string = presentation.lines[0]
                         }
                     }
@@ -3242,17 +4549,37 @@ private struct IdolCardView: View {
                     informationLine(line, number: index + 2)
                 }
 
-                if idol.selectionToken != nil, let onSelectCandidate {
-                    Button("选择此 Idol") {
+            }
+            .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("chekinana.idol.card.information")
+
+            if idol.selectionToken != nil {
+                if isCandidateConfirmed {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.green)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel(ChekinanaL10n.text("assistant.candidate.confirmed", fallback: "Confirmed"))
+                        .accessibilityAddTraits(.isSelected)
+                        .accessibilityIdentifier("chekinana.idol.candidate.confirmed.\(idol.id.uuidString.lowercased())")
+                } else if let onSelectCandidate {
+                    Button {
                         onSelectCandidate()
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 24, weight: .semibold))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .frame(minHeight: 44)
+                    .buttonStyle(.plain)
+                    .disabled(!isCandidateInteractionEnabled)
+                    .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
+                    .accessibilityLabel(ChekinanaL10n.format("assistant.candidate.add", fallback: "Add %@", idol.name))
+                    .accessibilityHint(ChekinanaL10n.text("assistant.candidate.add_hint", fallback: "Confirm this Idol candidate"))
                     .accessibilityIdentifier("chekinana.idol.candidate.select.\(idol.id.uuidString.lowercased())")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -3268,14 +4595,14 @@ private struct IdolCardView: View {
 
     private func informationLine(_ value: String, number: Int) -> some View {
         Text(value)
-            .font(.system(size: 12, weight: .regular))
+            .font(.caption)
             .foregroundStyle(Color(.secondaryLabel))
-            .lineLimit(1)
+            .lineLimit(2)
             .multilineTextAlignment(.leading)
             .accessibilityIdentifier("chekinana.idol.card.line.\(number)")
             .textSelection(.enabled)
             .contextMenu {
-                Button("复制") {
+                Button(ChekinanaL10n.text("assistant.copy", fallback: "Copy")) {
                     UIPasteboard.general.string = value
                 }
             }
@@ -3297,7 +4624,13 @@ private struct IdolCardView: View {
                     .rotationEffect(.degrees(-90))
             }
 
-            if let renderedLocalAvatar {
+            if let embeddedAvatarImage {
+                Image(decorative: embeddedAvatarImage.cgImage, scale: 1, orientation: .up)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 64, height: 64)
+                    .clipShape(Circle())
+            } else if let renderedLocalAvatar {
                 Image(decorative: renderedLocalAvatar.cgImage, scale: 1, orientation: .up)
                     .resizable()
                     .scaledToFill()
@@ -3333,22 +4666,13 @@ private struct IdolCardView: View {
         }
         .task(id: avatarURL) {
             renderedRemoteAvatar = nil
-            guard let avatarURL else { return }
-            let thumbnail: ChekinanaRenderedImage?
-            if remoteAvatarUsesCacheOnly {
-                // Selecting a catalogue candidate is a local state transition.
-                // Reuse an already rendered candidate avatar, but never start a
-                // fresh request while preparing its confirmation preview.
-                thumbnail = await ChekinanaRemoteImageCache.shared.cachedImage(
-                    for: avatarURL,
-                    maxDimension: 256
-                )
-            } else {
-                thumbnail = await ChekinanaRemoteImageCache.shared.image(
-                    for: avatarURL,
-                    maxDimension: 256
-                )
-            }
+            guard embeddedAvatarImage == nil,
+                  idol.detail != .addCandidate,
+                  let avatarURL else { return }
+            let thumbnail = await ChekinanaRemoteImageCache.shared.image(
+                for: avatarURL,
+                maxDimension: 256
+            )
             guard !Task.isCancelled else { return }
             renderedRemoteAvatar = thumbnail
         }
@@ -3360,7 +4684,7 @@ private struct IdolCardView: View {
                 .fill(Color(.systemGray5))
 
             Text(avatarPlaceholderText)
-                .font(.system(size: 24, weight: .semibold))
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(Color(.secondaryLabel))
         }
     }
@@ -3372,12 +4696,15 @@ private enum PendingChekiImageLoadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unreadableImage:
-            "One or more selected photos are unavailable or cannot be converted to image data."
+            ChekinanaL10n.text(
+                "assistant.photo.unreadable",
+                fallback: "One or more selected photos are unavailable or cannot be converted to image data."
+            )
         }
     }
 }
 
-private struct ChekinanaTransferableImageData: Transferable {
+struct ChekinanaTransferableImageData: Transferable {
     let data: Data
 
     static var transferRepresentation: some TransferRepresentation {
@@ -3387,7 +4714,7 @@ private struct ChekinanaTransferableImageData: Transferable {
     }
 }
 
-private struct ChekinanaTransferableFallbackImageData: Transferable {
+struct ChekinanaTransferableFallbackImageData: Transferable {
     let data: Data
 
     static var transferRepresentation: some TransferRepresentation {
@@ -3408,12 +4735,17 @@ private extension Color {
     }
 
     private static func chekinanaIdolColor(_ value: String) -> Color {
+        if let preset = ChekinanaIdolPalette.presetName(hex: value) {
+            // Keep legacy RGB imports aligned with the product shell's exact
+            // preset table without duplicating the table here.
+            return chekinanaIdolColor(preset)
+        }
         switch value {
         case "棕", "棕色": return Color(red: 0.49, green: 0.30, blue: 0.20)
         case "橙", "橙色": return .orange
-        case "水", "水色": return Color(red: 0.31, green: 0.78, blue: 0.91)
+        case "水", "水色": return Color(red: 129 / 255, green: 212 / 255, blue: 250 / 255)
         case "灰", "灰色": return .gray
-        case "白", "白色": return .white
+        case "白", "白色": return Color(red: 224 / 255, green: 224 / 255, blue: 224 / 255)
         case "粉", "粉色": return Color(red: 1.0, green: 0.42, blue: 0.68)
         case "紫", "紫色": return .purple
         case "红", "红色": return .red
@@ -3440,5 +4772,8 @@ private extension Color {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [Idol.self, Event.self, Cheki.self], inMemory: true)
+        .modelContainer(
+            for: [Idol.self, Event.self, Cheki.self, Shame.self, Douga.self],
+            inMemory: true
+        )
 }

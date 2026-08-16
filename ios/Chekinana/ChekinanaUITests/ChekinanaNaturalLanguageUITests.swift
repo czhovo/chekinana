@@ -4,66 +4,23 @@ import XCTest
 final class ChekinanaNaturalLanguageUITests: XCTestCase {
     private lazy var app = XCUIApplication()
 
-    func testEmptyStateAndQuickActionsOnlyPrefillBeforeRemoteSubmit() {
-        let actions = [
-            ("chekinana.quick.add-idol", "添加 Idol "),
-            ("chekinana.quick.event-weibo", "根据这条公开微博创建 Event："),
-            ("chekinana.quick.scan-photos", "请先选择照片，再扫描这些照片"),
-            ("chekinana.quick.list-cheki", "查看所有 Cheki"),
-        ]
+    func testConversationChromeUsesChekinanaCopyAndHidesQuickActions() {
+        launchApp()
+        defer { app.terminate() }
 
-        for (identifier, expectedPrompt) in actions {
-            launchApp()
-            let emptyState = app.otherElements["chekinana.empty-state"]
-            XCTAssertTrue(emptyState.waitForExistence(timeout: 5))
-            XCTAssertEqual(transcriptValue, "messages=0")
-
-            let button = app.buttons[identifier]
-            XCTAssertTrue(button.waitForExistence(timeout: 5), identifier)
-            XCTAssertTrue(button.isHittable, identifier)
-            XCTAssertGreaterThanOrEqual(button.frame.height, 44, identifier)
-            XCTAssertTrue(
-                app.windows.firstMatch.frame.contains(button.frame),
-                "\(identifier) is clipped outside the visible window"
-            )
-            button.tap()
-
-            XCTAssertEqual(prompt.value as? String, expectedPrompt)
-            XCTAssertEqual(transcriptValue, "messages=0")
-            XCTAssertTrue(emptyState.exists)
-            XCTAssertFalse(app.buttons["chekinana.nl.cancel"].exists)
-            app.terminate()
-        }
-
-        launchApp(prefill: "保留我的输入")
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
-        app.buttons["chekinana.quick.add-idol"].tap()
-        XCTAssertEqual(prompt.value as? String, "保留我的输入")
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
-        XCTAssertEqual(transcriptValue, "messages=0")
-        app.terminate()
-
-        launchApp(stub: "success")
-        app.buttons["chekinana.quick.add-idol"].tap()
-        XCTAssertTrue(dismissPromptKeyboard())
-        submitPrefilled()
-        assertTranscriptContains("还没有添加 Event")
+        XCTAssertTrue(app.staticTexts["Chekinana"].waitForExistence(timeout: 5))
+        XCTAssertEqual(prompt.placeholderValue, "Ask chekinana...")
         XCTAssertFalse(app.otherElements["chekinana.empty-state"].exists)
-        XCTAssertTrue(waitForReady(timeout: 8))
-        app.terminate()
-
-        launchApp(stub: "cancel")
-        app.buttons["chekinana.quick.list-cheki"].tap()
-        XCTAssertTrue(dismissPromptKeyboard())
-        submitPrefilled()
-        let cancel = app.buttons["chekinana.nl.cancel"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
-        for (identifier, _) in actions {
-            XCTAssertFalse(app.buttons[identifier].isEnabled, identifier)
+        XCTAssertEqual(transcriptValue, "messages=0")
+        XCTAssertFalse(app.otherElements["chekinana.quick-actions"].exists)
+        for identifier in [
+            "chekinana.quick.add-idol",
+            "chekinana.quick.event-weibo",
+            "chekinana.quick.scan-photos",
+            "chekinana.quick.list-cheki",
+        ] {
+            XCTAssertFalse(app.buttons[identifier].exists, identifier)
         }
-        cancel.tap()
-        XCTAssertTrue(waitForReady(timeout: 8))
-        app.terminate()
     }
 
     func testChekiImagePreviewIsAccessibleAndIndependentFromSelection() {
@@ -86,7 +43,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
             )
         )
         XCTAssertEqual(dateStatuses.count, 1)
-        XCTAssertEqual(dateStatuses.firstMatch.label, "手写日期：2026.07.04")
+        XCTAssertEqual(dateStatuses.firstMatch.label, "日期：2026.07.04")
 
         let selectButtons = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.cheki.select.")
@@ -127,7 +84,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         defer { app.terminate() }
         submit("显示帮助")
 
-        assertTranscriptContains("> 显示帮助")
+        assertTranscriptContains("显示帮助")
         assertTranscriptContains("这项请求暂不支持")
     }
 
@@ -136,7 +93,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         defer { app.terminate() }
         submit("列出所有偶像")
 
-        assertTranscriptContains("> 列出所有偶像")
+        assertTranscriptContains("列出所有偶像")
         assertTranscriptContains("还没有添加 Idol")
         XCTAssertTrue(waitForReady(timeout: 8))
     }
@@ -175,7 +132,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         retry.tap()
 
         assertTranscriptContains("还没有添加 Idol")
-        XCTAssertEqual(transcriptValue.components(separatedBy: "> \(input)").count - 1, 1)
+        XCTAssertEqual(transcriptValue.components(separatedBy: input).count - 1, 1)
         XCTAssertFalse(retry.exists)
         XCTAssertTrue(prompt.isEnabled)
     }
@@ -281,7 +238,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         defer { app.terminate() }
         submit("确认上一步")
 
-        assertTranscriptContains("> 确认上一步")
+        assertTranscriptContains("确认上一步")
         assertTranscriptContains("there is no pending operation to confirm")
     }
 
@@ -295,12 +252,12 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 5) {
             self.transcriptValue == "messages=0"
         }, "clear did not remove the visible transcript")
-        XCTAssertTrue(app.otherElements["chekinana.empty-state"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.otherElements["chekinana.empty-state"].exists)
         XCTAssertTrue(prompt.exists)
         XCTAssertTrue(sendButton.exists)
 
         submit("列出所有偶像")
-        assertTranscriptContains("> 列出所有偶像")
+        assertTranscriptContains("列出所有偶像")
         assertTranscriptContains("还没有添加 Idol")
     }
 
@@ -309,7 +266,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         defer { app.terminate() }
         submit("今天帮我整理一下")
         assertTranscriptContains("还没有添加 Event")
-        XCTAssertEqual(transcriptValue.components(separatedBy: "> 今天帮我整理一下").count - 1, 1)
+        XCTAssertEqual(transcriptValue.components(separatedBy: "今天帮我整理一下").count - 1, 1)
         XCTAssertFalse(app.keyboards.firstMatch.exists)
     }
 
@@ -323,42 +280,110 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         prompt.typeText("列出所有偶像")
         prompt.typeText("\n")
 
-        assertTranscriptContains("> 列出所有偶像")
+        assertTranscriptContains("列出所有偶像")
         assertTranscriptContains("还没有添加 Idol")
         XCTAssertFalse(app.keyboards.firstMatch.exists)
+    }
+
+    func testComposerTracksKeyboardSafeAreaAndReturnsImmediatelyAfterDoneAndSend() throws {
+        launchApp()
+        defer { app.terminate() }
+        let composerBottom = app.descendants(matching: .any)
+            .matching(identifier: "chekinana.composer.bottom-marker")
+            .firstMatch
+        XCTAssertTrue(composerBottom.waitForExistence(timeout: 2))
+        let restingPromptFrame = prompt.frame
+        let restingComposerBottomFrame = composerBottom.frame
+        let keyboard = app.keyboards.firstMatch
+
+        prompt.tap()
+        guard keyboard.waitForExistence(timeout: 2) else {
+            throw XCTSkip("The simulator did not expose a software keyboard")
+        }
+        let appFrame = app.windows.firstMatch.frame
+        guard keyboard.frame.minY < appFrame.maxY - 80 else {
+            throw XCTSkip("The simulator exposed only the hardware-keyboard accessory bar")
+        }
+        var raisedPromptFrame = prompt.frame
+        var raisedComposerBottomFrame = composerBottom.frame
+        var keyboardFrame = keyboard.frame
+        let composerRaised = waitUntil(timeout: 2) {
+            raisedPromptFrame = self.prompt.frame
+            raisedComposerBottomFrame = composerBottom.frame
+            keyboardFrame = keyboard.frame
+            return raisedComposerBottomFrame.maxY <= keyboardFrame.minY + 1
+                && restingPromptFrame.minY - raisedPromptFrame.minY > 80
+                && restingComposerBottomFrame.minY - raisedComposerBottomFrame.minY > 80
+        }
+        XCTAssertTrue(
+            composerRaised,
+            "Composer did not immediately follow the keyboard safe area. "
+                + "restingPrompt=\(restingPromptFrame), raisedPrompt=\(raisedPromptFrame), "
+                + "restingComposerBottom=\(restingComposerBottomFrame), "
+                + "raisedComposerBottom=\(raisedComposerBottomFrame), "
+                + "keyboard=\(keyboardFrame)"
+        )
+
+        let done = app.buttons["chekinana.keyboard.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 1))
+        done.tap()
+        XCTAssertTrue(
+            waitUntil(timeout: 2) {
+                !keyboard.exists
+                    && abs(self.prompt.frame.minY - restingPromptFrame.minY) < 8
+                    && abs(composerBottom.frame.minY - restingComposerBottomFrame.minY) < 8
+            },
+            "Composer did not immediately return after Done dismissed the keyboard"
+        )
+
+        prompt.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 2))
+        prompt.typeText("列出所有偶像")
+        XCTAssertTrue(sendButton.isEnabled && sendButton.isHittable)
+        sendButton.tap()
+        XCTAssertTrue(
+            waitUntil(timeout: 2) {
+                !keyboard.exists
+                    && abs(self.prompt.frame.minY - restingPromptFrame.minY) < 8
+                    && abs(composerBottom.frame.minY - restingComposerBottomFrame.minY) < 8
+            },
+            "Composer did not immediately return after sending"
+        )
     }
 
     func testAddIdolConfirmationAccessibilityAndPersistence() {
         launchApp(enrichmentFixture: true)
         defer { app.terminate() }
 
-        let existing = confirmationIdentifiers(prefix: "chekinana.confirm.")
         submitWithArrow("添加偶像 Alice")
-        assertTranscriptContains("> 添加偶像 Alice")
+        assertTranscriptContains("添加偶像 Alice")
         XCTAssertTrue(waitForReady(timeout: 15))
-        assertIdolCardInformation(lineCount: 4)
-        XCTAssertTrue(app.staticTexts["Verification: —"].exists)
-        let identifier = waitForNewConfirmation(
-            after: existing,
-            prefix: "chekinana.confirm."
+        assertIdolCardInformation(lineCount: 3)
+        let candidate = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.select.")
+        ).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: 8))
+        candidate.tap()
+        XCTAssertTrue(
+            app.images.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.confirmed.")
+            ).firstMatch.waitForExistence(timeout: 8)
         )
-        tapConfirmation(identifier: identifier)
         submit("清空聊天记录")
         submit("列出所有偶像")
-        assertTranscriptContains("> 列出所有偶像")
+        assertTranscriptContains("列出所有偶像")
         XCTAssertTrue(
             waitUntil(timeout: 8) { self.app.staticTexts["Alice"].exists },
             "Confirmed Idol was not visible after clearing and listing persisted data"
         )
-        assertIdolCardInformation(lineCount: 4)
-        XCTAssertTrue(app.staticTexts["0 cheki"].exists)
+        assertIdolCardInformation(lineCount: 3)
+        XCTAssertTrue(app.staticTexts["0 Cheki"].exists)
     }
 
     func testMultiIdolSelectionConfirmationReturnsReadyAndResolvesCandidates() {
         launchApp(multiEnrichmentFixture: true)
         defer { app.terminate() }
 
-        let existingConfirmations = confirmationIdentifiers(prefix: "chekinana.confirm.")
         submitWithArrow("添加偶像 Alice")
         XCTAssertTrue(waitForReady(timeout: 15), "Idol candidates did not finish loading")
 
@@ -366,26 +391,21 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.select.")
         )
         XCTAssertTrue(waitUntil(timeout: 8) { candidates.count == 2 }, "Expected two Idol candidates")
-        assertIdolCardInformation(lineCount: 8)
-        XCTAssertTrue(app.staticTexts["Verification: —"].exists)
-        XCTAssertTrue(app.staticTexts["Verification: fixture"].exists)
+        assertIdolCardInformation(lineCount: 6)
         let selected = candidates.element(boundBy: 0)
         XCTAssertTrue(selected.isHittable)
         selected.tap()
 
-        assertTranscriptContains("已选择此 Idol，正在准备确认预览")
         XCTAssertTrue(waitForReady(timeout: 8), "Candidate selection remained busy")
         XCTAssertTrue(
-            waitUntil(timeout: 8) { candidates.count == 0 },
-            "Resolved candidate controls remained selectable"
+            waitUntil(timeout: 8) { candidates.count == 1 },
+            "Confirmed candidate remained selectable or hid the other candidate"
         )
-        assertIdolCardInformation(lineCount: 4)
-
-        let confirmationID = waitForNewConfirmation(
-            after: existingConfirmations,
-            prefix: "chekinana.confirm."
+        XCTAssertTrue(
+            app.images.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.confirmed.")
+            ).firstMatch.exists
         )
-        tapConfirmation(identifier: confirmationID)
 
         submit("清空聊天记录")
         submit("列出所有偶像")
@@ -397,31 +417,55 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         )
     }
 
-    func testAddIdolConfirmationTimeoutReturnsReadyWithoutWrite() {
-        launchApp(multiEnrichmentFixture: true, idolConfirmationStub: "hang")
+    func testNineReturnedIdolCandidatesAllRenderWithoutLoadMore() {
+        launchApp(nineEnrichmentFixture: true)
         defer { app.terminate() }
 
-        let existingConfirmations = confirmationIdentifiers(prefix: "chekinana.confirm.")
-        submitWithArrow("添加偶像 Timeout Idol")
-        XCTAssertTrue(waitForReady(timeout: 15))
+        submitWithArrow("添加偶像 Nine Candidate")
+        XCTAssertTrue(waitForReady(timeout: 15), "Nine Idol candidates did not finish loading")
+
         let candidates = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.select.")
         )
-        XCTAssertTrue(waitUntil(timeout: 8) { candidates.count == 2 })
-        candidates.element(boundBy: 0).tap()
-        XCTAssertTrue(waitForReady(timeout: 8))
-
-        let confirmationID = waitForNewConfirmation(
-            after: existingConfirmations,
-            prefix: "chekinana.confirm."
+        XCTAssertTrue(
+            waitUntil(timeout: 8) { candidates.count == 9 },
+            "Expected every one of the nine returned candidates to be rendered"
         )
-        tapConfirmation(identifier: confirmationID)
-        assertTranscriptContains("Idol confirmation timed out before persistence started")
-        XCTAssertTrue(waitForReady(timeout: 8), "Timed-out confirmation did not return to ready")
+        for index in 1...9 {
+            XCTAssertTrue(app.staticTexts["Nine Candidate \(index)"].exists)
+        }
+        XCTAssertFalse(
+            app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Load more")
+            ).firstMatch.exists
+        )
+    }
 
-        submit("清空聊天记录")
-        submit("列出所有偶像")
-        assertTranscriptContains("还没有添加 Idol")
+    func testTypedLocalLookingPhrasesAlwaysStartRemoteInterpretation() {
+        for input in [
+            "添加以下idol：巫歌 饭饭 木兰 aina eriko mina 石榴 优子 萝北",
+            "扫描已选照片",
+            "scancheki",
+            "取消",
+        ] {
+            launchApp(stub: "cancel")
+            submitWithArrow(input)
+
+            let remoteCancel = app.buttons["chekinana.nl.cancel"]
+            XCTAssertTrue(
+                remoteCancel.waitForExistence(timeout: 3),
+                "Typed text did not reach remote interpretation: \(input)"
+            )
+            XCTAssertFalse(app.buttons["chekinana.media.cancel"].exists)
+            XCTAssertFalse(
+                app.buttons.matching(
+                    NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.idol.candidate.select.")
+                ).firstMatch.exists
+            )
+            remoteCancel.tap()
+            assertTranscriptContains("已取消本次解释请求")
+            app.terminate()
+        }
     }
 
     func testWeiboEventCandidateEditsPrepareConfirmAndPersistSevenFields() {
@@ -460,7 +504,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["场地：Fixture Livehouse 中大二号馆"].exists)
     }
 
-    func testWeiboEventAddressBlockerAndInFlightCancelWriteNothing() {
+    func testWeiboEventAddressBlockerAndInFlightTranscriptActivityWriteNothing() {
         launchApp(stub: "event_candidate", eventCandidateStub: "address_fixture")
         submitWithArrow("创建 Event https://weibo.com/123456/AbC123")
         XCTAssertTrue(waitForReady(timeout: 8))
@@ -474,15 +518,15 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
 
         launchApp(stub: "event_candidate", eventCandidateStub: "hang")
         submitWithArrow("https://weibo.com/123456/AbC123")
-        let extracting = app.activityIndicators["chekinana.event.candidate.extracting"]
-        XCTAssertTrue(extracting.waitForExistence(timeout: 5))
-        let cancel = app.buttons["chekinana.event.candidate.extract.cancel"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
-        XCTAssertEqual(cancel.identifier, "chekinana.event.candidate.extract.cancel")
-        XCTAssertGreaterThanOrEqual(cancel.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(cancel.frame.height, 44)
-        cancel.tap()
-        XCTAssertTrue(waitForReady(timeout: 5))
+        let activity = app.activityIndicators["chekinana.transcript.activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.activityIndicators["chekinana.event.candidate.extracting"].exists)
+        XCTAssertFalse(app.buttons["chekinana.event.candidate.extract.cancel"].exists)
+        XCTAssertFalse(app.buttons["chekinana.media.cancel"].exists)
+        XCTAssertFalse(app.buttons["chekinana.nl.cancel"].exists)
+        app.terminate()
+
+        launchApp(resetStore: false)
         submit("显示所有活动")
         assertTranscriptContains("还没有添加 Event")
         app.terminate()
@@ -532,6 +576,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         submit("请添加活动 https://user:password@example.com/live")
         assertTranscriptContains("检测到可能的凭据或本地标识")
         XCTAssertFalse(transcriptValue.contains("password"))
+        XCTAssertFalse(app.buttons["chekinana.nl.cancel"].exists)
         submit("显示所有活动")
         assertTranscriptContains("还没有添加 Event")
         app.terminate()
@@ -541,6 +586,27 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         assertTranscriptContains("这项请求暂不支持")
         XCTAssertFalse(transcriptValue.contains("理解为："))
         app.terminate()
+    }
+
+    func testTypedConfirmationCodeIsPrivacyRejectedBeforeRemoteInterpretation() {
+        launchApp()
+        defer { app.terminate() }
+        let existingConfirmations = confirmationIdentifiers(prefix: "chekinana.confirm.")
+
+        submit("添加活动 Privacy Fixture 2026-08-09")
+        XCTAssertTrue(waitForReady(timeout: 15))
+        let identifier = waitForNewConfirmation(
+            after: existingConfirmations,
+            prefix: "chekinana.confirm."
+        )
+        let code = String(identifier.dropFirst("chekinana.confirm.".count))
+        XCTAssertFalse(code.isEmpty)
+
+        submit("确认 \(code)")
+
+        assertTranscriptContains("检测到可能的凭据或本地标识")
+        XCTAssertFalse(transcriptValue.contains(code))
+        XCTAssertFalse(app.buttons["chekinana.nl.cancel"].exists)
     }
 
     func testRetryMutationAndInFlightCancelDoNotDuplicateWritesOrEchoes() {
@@ -559,7 +625,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
             after: existingConfirmations,
             prefix: "chekinana.confirm."
         )
-        XCTAssertEqual(transcriptValue.components(separatedBy: "> \(input)").count - 1, 1)
+        XCTAssertEqual(transcriptValue.components(separatedBy: input).count - 1, 1)
         tapConfirmation(identifier: confirmationID)
         XCTAssertTrue(app.staticTexts["名称：Remote Retry"].waitForExistence(timeout: 8))
 
@@ -580,7 +646,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         cancel.tap()
         assertTranscriptContains("已取消本次解释请求")
         XCTAssertEqual(prompt.value as? String, cancelledInput)
-        XCTAssertEqual(transcriptValue.components(separatedBy: "> \(cancelledInput)").count - 1, 1)
+        XCTAssertEqual(transcriptValue.components(separatedBy: cancelledInput).count - 1, 1)
         app.terminate()
         launchApp(stub: "success", resetStore: false)
         submit("显示所有活动")
@@ -770,6 +836,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         chekiPreviewFixture: Bool = false,
         enrichmentFixture: Bool = false,
         multiEnrichmentFixture: Bool = false,
+        nineEnrichmentFixture: Bool = false,
         idolConfirmationStub: String? = nil,
         eventCandidateStub: String? = nil,
         realNLEndpoint: Bool = false,
@@ -795,7 +862,9 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
         if chekiPreviewFixture {
             app.launchEnvironment["CHEKINANA_CHEKI_PREVIEW_UI_STUB"] = "fixture"
         }
-        if multiEnrichmentFixture {
+        if nineEnrichmentFixture {
+            app.launchEnvironment["CHEKINANA_IDOL_UI_STUB"] = "nine_fixture"
+        } else if multiEnrichmentFixture {
             app.launchEnvironment["CHEKINANA_IDOL_UI_STUB"] = "multi_fixture"
         } else if enrichmentFixture {
             app.launchEnvironment["CHEKINANA_IDOL_UI_STUB"] = "fixture"
@@ -936,7 +1005,7 @@ final class ChekinanaNaturalLanguageUITests: XCTestCase {
     private func submitAndConfirm(_ command: String, file: StaticString = #filePath, line: UInt = #line) {
         let existing = confirmationIdentifiers(prefix: "chekinana.confirm.")
         submit(command, file: file, line: line)
-        assertTranscriptContains("> \(command)", file: file, line: line)
+        assertTranscriptContains(command, file: file, line: line)
         XCTAssertTrue(
             waitForReady(timeout: 15),
             "Command did not finish preparing its confirmation",

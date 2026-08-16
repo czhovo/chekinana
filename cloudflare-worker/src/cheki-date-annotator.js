@@ -2,7 +2,7 @@ import { CHEKI_DATE_PROMPT } from "./cheki-date-prompt.js";
 
 const DEFAULT_MODEL = "qwen3.7-plus";
 const DEFAULT_IMAGE_READ_TIMEOUT_MS = 10_000;
-const DEFAULT_QWEN_TIMEOUT_MS = 45_000;
+const DEFAULT_QWEN_TIMEOUT_MS = 90_000;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_MODEL_RESPONSE_BYTES = 32_768;
 const MAX_MODEL_NAME_CHARS = 200;
@@ -15,42 +15,26 @@ function unavailable(error) {
   return { status: "unavailable", error };
 }
 
+function requestMediaType(headers) {
+  return (headers.get("content-type") || "")
+    .split(";", 1)[0].trim().toLowerCase();
+}
+
+function declaredImageLengthError(headers) {
+  const declaredLength = headers.get("content-length");
+  if (declaredLength === null) return null;
+  const normalized = declaredLength.trim();
+  if (!/^\d+$/u.test(normalized) || Number(normalized) <= 0) {
+    return "image_read_failed";
+  }
+  return Number(normalized) > MAX_IMAGE_BYTES ? "image_too_large" : null;
+}
+
 function normalizeString(value, maximum) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   if (!normalized || normalized.length > maximum) return null;
   return normalized;
-}
-
-function clientIP(request) {
-  const cloudflareIP = request.headers.get("cf-connecting-ip");
-  if (cloudflareIP) return cloudflareIP.trim().slice(0, 128);
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",", 1)[0].trim().slice(0, 128);
-  return "unknown";
-}
-
-function rateLimitKey(request, env) {
-  if (env?.CHEKINANA_SCANNER_LOCAL_MODE === "true") {
-    return "local-scanner";
-  }
-  return clientIP(request);
-}
-
-async function rateLimitDecision(request, env) {
-  if (!env?.CHEKI_DATE_RATE_LIMITER
-    || typeof env.CHEKI_DATE_RATE_LIMITER.limit !== "function") {
-    return "unavailable";
-  }
-  try {
-    const result = await env.CHEKI_DATE_RATE_LIMITER.limit({
-      key: rateLimitKey(request, env),
-    });
-    if (!result || typeof result.success !== "boolean") return "unavailable";
-    return result.success ? "allowed" : "denied";
-  } catch {
-    return "unavailable";
-  }
 }
 
 function qwenEndpoint(env) {
@@ -169,12 +153,17 @@ async function readLimitedBytes(response, maximum, timeoutMs) {
 }
 
 function bytesToBase64(bytes) {
-  const chunkSize = 0x8000;
+  // Encode independent 24 KiB blocks. The block size is divisible by three,
+  // so padding is emitted only for the final block. This avoids retaining a
+  // second full-size binary string before btoa builds the Base64 payload.
+  const chunkSize = 3 * 0x2000;
   const parts = [];
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    parts.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
+    parts.push(btoa(String.fromCharCode(
+      ...bytes.subarray(offset, offset + chunkSize),
+    )));
   }
-  return btoa(parts.join(""));
+  return parts.join("");
 }
 
 function validCalendarDate(year, month, day) {
@@ -315,7 +304,14 @@ async function readLimitedModelText(
   }
 }
 
-async function callQwen(bytes, mediaType, configuration, fetchImpl, timeoutMs) {
+async function callQwen(
+  bytes,
+  mediaType,
+  configuration,
+  fetchImpl,
+  timeoutMs,
+  requestSignal = null,
+) {
   const controller = new AbortController();
   const timeoutSentinel = Symbol("timeout");
   let timer;
@@ -346,6 +342,9 @@ async function callQwen(bytes, mediaType, configuration, fetchImpl, timeoutMs) {
     stream: false,
     enable_thinking: false,
   });
+  const abortUpstream = () => controller.abort(requestSignal?.reason);
+  requestSignal?.addEventListener("abort", abortUpstream, { once: true });
+  if (requestSignal?.aborted) controller.abort(requestSignal.reason);
 
   try {
     const fetchPromise = Promise.resolve().then(() => fetchImpl(configuration.endpoint, {
@@ -393,6 +392,7 @@ async function callQwen(bytes, mediaType, configuration, fetchImpl, timeoutMs) {
     }
   } finally {
     clearTimeout(timer);
+    requestSignal?.removeEventListener("abort", abortUpstream);
   }
 }
 
@@ -405,27 +405,14 @@ export async function annotateChekiDateResponse(
   if (upstreamResponse.status !== 200) {
     return unavailable("image_unavailable");
   }
-  const mediaType = (upstreamResponse.headers.get("content-type") || "")
-    .split(";", 1)[0].trim().toLowerCase();
+  const mediaType = requestMediaType(upstreamResponse.headers);
   if (!SUPPORTED_IMAGE_TYPES.has(mediaType)) {
     return unavailable("unsupported_image_type");
   }
 
-  const declaredLength = upstreamResponse.headers.get("content-length");
-  if (declaredLength !== null
-    && (!/^\d+$/u.test(declaredLength.trim())
-      || Number(declaredLength) <= 0
-      || Number(declaredLength) > MAX_IMAGE_BYTES)) {
-    return unavailable(
-      /^\d+$/u.test(declaredLength.trim()) && Number(declaredLength) > MAX_IMAGE_BYTES
-        ? "image_too_large"
-        : "image_read_failed",
-    );
-  }
+  const declaredLengthError = declaredImageLengthError(upstreamResponse.headers);
+  if (declaredLengthError) return unavailable(declaredLengthError);
 
-  const rateLimit = await rateLimitDecision(request, env);
-  if (rateLimit === "unavailable") return unavailable("rate_limit_unavailable");
-  if (rateLimit === "denied") return unavailable("rate_limited");
   const configuration = qwenConfiguration(env);
   if (!configuration) return unavailable("service_unavailable");
 
@@ -460,7 +447,52 @@ export async function annotateChekiDateResponse(
     configuration,
     options.fetchImpl || fetch,
     qwenTimeoutMs,
+    request.signal,
+  );
+}
+
+export async function annotateChekiDateImageRequest(
+  request,
+  env = {},
+  options = {},
+) {
+  const mediaType = requestMediaType(request.headers);
+  if (!SUPPORTED_IMAGE_TYPES.has(mediaType)) {
+    return unavailable("unsupported_image_type");
+  }
+  const declaredLengthError = declaredImageLengthError(request.headers);
+  if (declaredLengthError) return unavailable(declaredLengthError);
+
+  const configuration = qwenConfiguration(env);
+  if (!configuration) return unavailable("service_unavailable");
+  const requestedImageTimeout = options.imageReadTimeoutMs;
+  const imageReadTimeoutMs = Number.isFinite(requestedImageTimeout)
+    && requestedImageTimeout > 0
+    ? requestedImageTimeout
+    : DEFAULT_IMAGE_READ_TIMEOUT_MS;
+  const imageResult = await readLimitedBytes(
+    request,
+    MAX_IMAGE_BYTES,
+    imageReadTimeoutMs,
+  );
+  if (imageResult.kind === "too_large") return unavailable("image_too_large");
+  if (imageResult.kind === "timeout") return unavailable("image_read_timeout");
+  if (imageResult.kind !== "ok") return unavailable("image_read_failed");
+
+  const requestedQwenTimeout = options.qwenTimeoutMs;
+  const qwenTimeoutMs = Number.isFinite(requestedQwenTimeout)
+    && requestedQwenTimeout > 0
+    ? requestedQwenTimeout
+    : DEFAULT_QWEN_TIMEOUT_MS;
+  return callQwen(
+    imageResult.bytes,
+    mediaType,
+    configuration,
+    options.fetchImpl || fetch,
+    qwenTimeoutMs,
+    request.signal,
   );
 }
 
 export const CHEKI_DATE_MAX_IMAGE_BYTES = MAX_IMAGE_BYTES;
+export const CHEKI_DATE_QWEN_TIMEOUT_MS = DEFAULT_QWEN_TIMEOUT_MS;

@@ -4,7 +4,7 @@
 - 分步处理，每步结果即时推送到前端
 """
 
-import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, socket, traceback, smtplib, ipaddress
+import io, os, time, json, uuid, hashlib, threading, sys, gc, secrets, hmac, traceback, smtplib, ipaddress
 from datetime import datetime
 from collections import defaultdict
 from email.message import EmailMessage
@@ -55,6 +55,8 @@ _sam3_model = None
 _sam3_processor = None
 _device = None
 MODEL_LOAD_LOCK = threading.Lock()
+MODEL_PREWARM_LOCK = threading.Lock()
+_sam3_prewarm_started = False
 
 def get_sam3():
     global _sam3_model, _sam3_processor, _device
@@ -89,21 +91,36 @@ def get_sam3():
         print(f"✅ SAM3 就绪 (设备: {_device})", flush=True)
         return _sam3_model, _sam3_processor, _device
 
-def preload_sam3_after_listen(port: int):
-    connect_host = "127.0.0.1"
-    while True:
-        try:
-            with socket.create_connection((connect_host, port), timeout=1):
-                break
-        except OSError:
-            time.sleep(0.5)
+def start_sam3_prewarm() -> bool:
+    """Start one best-effort model warmup for accepted standard Scan tasks."""
+    global _sam3_prewarm_started
+    with MODEL_PREWARM_LOCK:
+        if _sam3_prewarm_started or (
+            _sam3_model is not None and _sam3_processor is not None
+        ):
+            return False
+        _sam3_prewarm_started = True
 
-    print("📦 端口已监听，开始预加载 SAM3 模型...", flush=True)
+    def prewarm():
+        global _sam3_prewarm_started
+        try:
+            get_sam3()
+        except Exception as exc:
+            print(f"SAM3 prewarm failed ({type(exc).__name__})", flush=True)
+            with MODEL_PREWARM_LOCK:
+                _sam3_prewarm_started = False
+
     try:
-        get_sam3()
-    except Exception as e:
-        print(f"💥 SAM3 预加载失败: {type(e).__name__}: {e}", flush=True)
-        traceback.print_exc()
+        threading.Thread(
+            target=prewarm,
+            name="sam3-standard-scan-prewarm",
+            daemon=True,
+        ).start()
+    except Exception:
+        with MODEL_PREWARM_LOCK:
+            _sam3_prewarm_started = False
+        return False
+    return True
 
 # ===================================================================
 # 四边形拟合工具
@@ -435,6 +452,30 @@ def resolve_polaroid_size(requested_size: str, vertices: np.ndarray) -> str:
     return POLAROID_SIZE_MINI
 
 
+def resolve_direct_polaroid_size(requested_size: str, width: int, height: int) -> str:
+    if requested_size == POLAROID_SIZE_AUTO:
+        return POLAROID_SIZE_WIDE if width > height else POLAROID_SIZE_MINI
+    if requested_size == POLAROID_SIZE_WIDE:
+        return POLAROID_SIZE_WIDE
+    return POLAROID_SIZE_MINI
+
+
+def resize_direct_cheki(image: np.ndarray, geometry: dict) -> np.ndarray:
+    source_height, source_width = image.shape[:2]
+    output_width = int(geometry["width"])
+    output_height = int(geometry["height"])
+    interpolation = (
+        cv2.INTER_AREA
+        if output_width <= source_width and output_height <= source_height
+        else cv2.INTER_CUBIC
+    )
+    return cv2.resize(
+        image,
+        (output_width, output_height),
+        interpolation=interpolation,
+    )
+
+
 def quad_area(vertices: np.ndarray) -> float:
     return float(abs(cv2.contourArea(np.asarray(vertices, dtype=np.float32))))
 
@@ -609,6 +650,58 @@ def apply_postprocess_mode(image: np.ndarray, mode: str) -> tuple[np.ndarray, di
     return denoised, {"mode": POSTPROCESS_MODE_DENOISE, "applied": bool(denoise_info.get("applied")), "steps": steps}
 
 
+def extract_polaroid_candidate(
+    img_np: np.ndarray,
+    verts: np.ndarray,
+    requested_polaroid_size: str,
+    white_balance_enabled: bool,
+    denoise_enabled: bool,
+    postprocess_mode: str,
+    task_id: str,
+    candidate_number: int,
+) -> bytes:
+    """Extract and encode one detected polaroid candidate."""
+    output_polaroid_size = resolve_polaroid_size(requested_polaroid_size, verts)
+    geometry = get_polaroid_geometry(output_polaroid_size)
+    output_width = geometry["width"]
+    output_height = geometry["height"]
+    print(f"   size={output_polaroid_size}", flush=True)
+    src = verts.astype(np.float32)
+    dst = np.array([[0,0],[output_width,0],[output_width,output_height],
+                    [0,output_height]], dtype=np.float32)
+    transform = cv2.getPerspectiveTransform(src, dst)
+    rectified = cv2.warpPerspective(
+        img_np,
+        transform,
+        (output_width, output_height),
+        flags=cv2.INTER_CUBIC,
+    )
+    if white_balance_enabled:
+        rectified, wb_info = apply_fixed_border_white_balance(rectified, geometry)
+        if wb_info["applied"]:
+            print(f"   ✓ 白平衡 #{candidate_number}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
+        else:
+            print(f"   ⚠ 白平衡 #{candidate_number}: {wb_info['reason']}", flush=True)
+    if denoise_enabled:
+        rectified, denoise_info = denoise_extracted_polaroid(rectified)
+        if denoise_info["applied"]:
+            print(f"   ✓ 降噪 #{candidate_number}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
+        else:
+            print(f"   ⚠ 降噪 #{candidate_number}: {denoise_info['reason']}", flush=True)
+    if cancel_if_requested(task_id):
+        raise RuntimeError("Task canceled")
+    if postprocess_mode == POSTPROCESS_MODE_SHARPEN:
+        rectified, sharpen_info = sharpen_extracted_polaroid(rectified)
+        if sharpen_info["applied"]:
+            print(f"   sharpen #{candidate_number}: {sharpen_info['method']} amount={sharpen_info['amount']}", flush=True)
+        else:
+            print(f"   sharpen #{candidate_number}: {sharpen_info['reason']}", flush=True)
+    image_bytes = img_to_png_bytes(rectified)
+    if not image_bytes:
+        raise ValueError("PNG encoding failed")
+    return image_bytes
+
+
 def add_intermediate(task_id: str, rtype: str, img_data: bytes, label: str):
     """向任务添加一个中间结果"""
     with task_lock:
@@ -732,9 +825,114 @@ def is_upload_attempt_canceled(upload_attempt_id: str) -> bool:
         return attempt_id in canceled_upload_attempts
 
 
+def do_process_direct_cheki(raw_data: bytes, task_id: str):
+    """Normalize one already-cropped Cheki without loading or invoking SAM3."""
+    if cancel_if_requested(task_id):
+        return
+
+    with task_lock:
+        task = task_store.get(task_id, {})
+        white_balance_enabled = bool(task.get("white_balance", True))
+        postprocess_mode = parse_postprocess_mode(
+            task.get("postprocess_mode"),
+            bool(task.get("denoise", True)),
+        )
+        rotation_degrees = int(task.get("rotation_degrees", 0) or 0)
+        requested_polaroid_size = parse_polaroid_size(task.get("polaroid_size"))
+        if task_id not in task_store:
+            return
+        task_store[task_id].update({
+            "phase": "direct_processing",
+            "expected_polaroids": 1,
+            "total_polaroids": 1,
+            "detected_polaroids": 1,
+            "detection_threshold": 0,
+            "warning": "",
+            "extraction_complete": False,
+        })
+
+    try:
+        image = Image.open(io.BytesIO(raw_data)).convert("RGB")
+        image = ImageOps.exif_transpose(image)
+        if rotation_degrees:
+            image = image.rotate(rotation_degrees, expand=True)
+        if cancel_if_requested(task_id):
+            return
+
+        output_polaroid_size = resolve_direct_polaroid_size(
+            requested_polaroid_size,
+            image.size[0],
+            image.size[1],
+        )
+        geometry = get_polaroid_geometry(output_polaroid_size)
+        normalized = resize_direct_cheki(np.array(image), geometry)
+        if cancel_if_requested(task_id):
+            return
+
+        if white_balance_enabled:
+            normalized, _ = apply_fixed_border_white_balance(normalized, geometry)
+        if cancel_if_requested(task_id):
+            return
+
+        normalized, _ = apply_postprocess_mode(normalized, postprocess_mode)
+        if cancel_if_requested(task_id):
+            return
+
+        image_bytes = img_to_png_bytes(normalized)
+        if not image_bytes:
+            raise ValueError("PNG encoding failed")
+        if cancel_if_requested(task_id):
+            return
+
+        add_intermediate(task_id, "polaroid", image_bytes, "拍立得 #1")
+        with task_lock:
+            task = task_store.get(task_id)
+            if not task or task.get("cancel_requested") or task.get("status") == CANCELED_STATUS:
+                return
+            task.update({
+                "status": "done",
+                "phase": "complete",
+                "error": "",
+                "expected_polaroids": 1,
+                "total_polaroids": 1,
+                "detected_polaroids": 1,
+                "detection_threshold": 0,
+                "warning": "",
+                "extraction_complete": True,
+            })
+        print(
+            f"Direct Cheki complete: size={output_polaroid_size}",
+            flush=True,
+        )
+    except Exception as exc:
+        if cancel_if_requested(task_id):
+            return
+        print(f"Direct Cheki failed ({type(exc).__name__})", flush=True)
+        with task_lock:
+            task = task_store.get(task_id)
+            if not task or task.get("cancel_requested") or task.get("status") == CANCELED_STATUS:
+                return
+            task.update({
+                "status": "failed",
+                "phase": "complete",
+                "error": "Direct Cheki processing failed",
+                "expected_polaroids": 1,
+                "total_polaroids": 1,
+                "detected_polaroids": 1,
+                "detection_threshold": 0,
+                "warning": "",
+                "extraction_complete": True,
+            })
+
+
 def do_process_extraction(raw_data: bytes, task_id: str):
     """主处理流程：SAM3 检测 → 四边形拟合 → 逐个提取"""
     if cancel_if_requested(task_id):
+        return
+    with task_lock:
+        direct = bool(task_store.get(task_id, {}).get("direct", False))
+    if direct:
+        do_process_direct_cheki(raw_data, task_id)
         return
     model, processor, device = get_sam3()
     if cancel_if_requested(task_id):
@@ -845,62 +1043,64 @@ def do_process_extraction(raw_data: bytes, task_id: str):
         task_store[task_id]["detection_threshold"] = threshold_used
         task_store[task_id]["warning"] = detection_warning
         task_store[task_id]["extraction_complete"] = False
+    successful_count = 0
+    failed_count = 0
     for pidx, verts in enumerate(all_vertices):
         if cancel_if_requested(task_id):
             return
         print(f"📸 提取拍立得 {pidx+1}/{len(all_vertices)}...", flush=True)
-        output_polaroid_size = resolve_polaroid_size(requested_polaroid_size, verts)
-        geometry = get_polaroid_geometry(output_polaroid_size)
-        output_width = geometry["width"]
-        output_height = geometry["height"]
-        print(f"   size={output_polaroid_size}", flush=True)
-        src = verts.astype(np.float32)
-        dst = np.array([[0,0],[output_width,0],[output_width,output_height],
-                        [0,output_height]], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(src, dst)
-        rectified = cv2.warpPerspective(
-            img_np,
-            M,
-            (output_width, output_height),
-            flags=cv2.INTER_CUBIC,
-        )
-        if white_balance_enabled:
-            rectified, wb_info = apply_fixed_border_white_balance(rectified, geometry)
-            if wb_info["applied"]:
-                print(f"   ✓ 白平衡 #{pidx+1}: gains={wb_info['gains']} blocks={wb_info['used_blocks']}/{wb_info['blocks']}", flush=True)
-            else:
-                print(f"   ⚠ 白平衡 #{pidx+1}: {wb_info['reason']}", flush=True)
-        if denoise_enabled:
-            rectified, denoise_info = denoise_extracted_polaroid(rectified)
-            if denoise_info["applied"]:
-                print(f"   ✓ 降噪 #{pidx+1}: {denoise_info['method']} h={denoise_info['h']}", flush=True)
-            else:
-                print(f"   ⚠ 降噪 #{pidx+1}: {denoise_info['reason']}", flush=True)
-        if cancel_if_requested(task_id):
-            return
-        if postprocess_mode == POSTPROCESS_MODE_SHARPEN:
-            rectified, sharpen_info = sharpen_extracted_polaroid(rectified)
-            if sharpen_info["applied"]:
-                print(f"   sharpen #{pidx+1}: {sharpen_info['method']} amount={sharpen_info['amount']}", flush=True)
-            else:
-                print(f"   sharpen #{pidx+1}: {sharpen_info['reason']}", flush=True)
-        add_intermediate(task_id, "polaroid", img_to_png_bytes(rectified),
-                         f"拍立得 #{pidx+1}")
-        print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
+        try:
+            image_bytes = extract_polaroid_candidate(
+                img_np,
+                verts,
+                requested_polaroid_size,
+                white_balance_enabled,
+                denoise_enabled,
+                postprocess_mode,
+                task_id,
+                pidx + 1,
+            )
+            if cancel_if_requested(task_id):
+                return
+            add_intermediate(task_id, "polaroid", image_bytes, f"拍立得 #{pidx+1}")
+            successful_count += 1
+            print(f"   ✓ 拍立得 #{pidx+1} 提取完成", flush=True)
+        except Exception as exc:
+            if cancel_if_requested(task_id):
+                return
+            failed_count += 1
+            print(
+                f"   ⚠ 拍立得 #{pidx+1} 提取失败，已跳过 ({type(exc).__name__})",
+                flush=True,
+            )
 
     # --- 完成 ---
     if cancel_if_requested(task_id):
         return
+    failure_warning = (
+        f"已跳过 {failed_count}/{len(all_vertices)} 个无法处理的拍立得候选"
+        if failed_count else ""
+    )
+    final_warning = "；".join(
+        message for message in (detection_warning, failure_warning) if message
+    )
     with task_lock:
-        task_store[task_id]["status"] = "done"
+        task_store[task_id]["status"] = "done" if successful_count else "failed"
         task_store[task_id]["phase"] = "complete"
+        task_store[task_id]["error"] = "" if successful_count else "所有拍立得候选提取失败"
         task_store[task_id]["total_polaroids"] = len(all_vertices)
         task_store[task_id]["expected_polaroids"] = len(all_vertices)
         task_store[task_id]["detected_polaroids"] = detected_count
         task_store[task_id]["detection_threshold"] = threshold_used
-        task_store[task_id]["warning"] = detection_warning
+        task_store[task_id]["warning"] = final_warning
         task_store[task_id]["extraction_complete"] = True
-    print(f"✅ 全部完成: 共 {len(all_vertices)} 张拍立得", flush=True)
+    if successful_count:
+        print(
+            f"✅ 提取完成: 成功 {successful_count}/{len(all_vertices)} 张拍立得",
+            flush=True,
+        )
+    else:
+        print(f"❌ 提取失败: {len(all_vertices)} 个候选均无法处理", flush=True)
 
 
 # ===================================================================
@@ -1010,7 +1210,6 @@ def health():
     return jsonify({
         "status": "ok",
         "time": datetime.now().isoformat(),
-        "pod_id": RUNPOD_POD_ID,
         "token_source": ACCESS_TOKEN_SOURCE,
     })
 
@@ -1117,10 +1316,13 @@ def submit_task():
     legacy_denoise = parse_bool(request.form.get("denoise"), default=True)
     postprocess_mode = parse_postprocess_mode(request.form.get("postprocess_mode"), legacy_denoise)
     denoise = postprocess_mode != POSTPROCESS_MODE_OFF
+    direct = parse_bool(request.form.get("direct"), default=False)
     requested_polaroids = parse_positive_int(
         request.form.get("expected_polaroids"),
         request.form.get("polaroid_count"),
     )
+    if direct:
+        requested_polaroids = 1
     rotation_degrees = parse_rotation_degrees(request.form.get("rotation_degrees"))
     polaroid_size = parse_polaroid_size(request.form.get("polaroid_size"))
     tid = uuid.uuid4().hex
@@ -1134,12 +1336,13 @@ def submit_task():
             "postprocess_mode": postprocess_mode,
             "white_balance_color_space": WHITE_BALANCE_COLOR_SPACE if white_balance else "",
             "upload_attempt_id": upload_attempt_id,
+            "direct": direct,
             "requested_polaroids": requested_polaroids,
             "polaroid_size": polaroid_size,
             "rotation_degrees": rotation_degrees,
             "expected_polaroids": requested_polaroids,
-            "total_polaroids": 0,
-            "detected_polaroids": 0,
+            "total_polaroids": 1 if direct else 0,
+            "detected_polaroids": 1 if direct else 0,
             "detection_threshold": 0,
             "warning": "",
             "extraction_complete": False,
@@ -1153,7 +1356,9 @@ def submit_task():
     with queue_lock:
         task_queue.append(tid)
     queue_event.set()
-    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
+    if not direct:
+        start_sam3_prewarm()
+    print(f"📋 task={tid[:8]} queued (队列: {len(task_queue)}, direct={direct}, wb={white_balance}, postprocess_mode={postprocess_mode}, target={requested_polaroids or 'auto'}, rotation={rotation_degrees}, polaroid_size={polaroid_size})", flush=True)
     return jsonify({
         "task_id": tid,
         "status": "queued",
@@ -1281,12 +1486,10 @@ if __name__ == "__main__":
         if TRUST_LOOPBACK_PROXY:
             print("🔐 仅信任本机 loopback Worker 代理", flush=True)
         else:
-            print(f"🔐 访问 Token ({ACCESS_TOKEN_SOURCE}): {ACCESS_TOKEN}", flush=True)
-        threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
+            print(f"🔐 访问 Token 已配置（来源: {ACCESS_TOKEN_SOURCE}）", flush=True)
         serve(app, host=host, port=port, threads=threads)
     except ImportError:
         host = os.environ.get("HOST", "0.0.0.0").strip() or "0.0.0.0"
         validate_bind_host(host)
         port = int(os.environ.get("PORT", "8080"))
-        threading.Thread(target=preload_sam3_after_listen, args=(port,), daemon=True).start()
         app.run(host=host, port=port, debug=False)

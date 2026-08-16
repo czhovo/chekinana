@@ -91,6 +91,25 @@ def main():
     status_json = status.get_json()
     assert status_json["results_count"] == 60
     assert len(status_json["results"]) == 60
+    assert all(
+        set(result) == {"id", "type", "label"}
+        and result["type"] == "polaroid"
+        for result in status_json["results"]
+    )
+    forbidden_recognition_keys = {
+        "date",
+        "bbox",
+        "pattern",
+        "candidates",
+        "prototype",
+        "polaroid_result_id",
+        "ink_result_id",
+    }
+    assert forbidden_recognition_keys.isdisjoint(status_json)
+    assert all(
+        forbidden_recognition_keys.isdisjoint(result)
+        for result in status_json["results"]
+    )
     assert status_json["results"][0]["id"] == 0
     assert status_json["results"][39]["id"] == 39
     assert status_json["results"][40]["id"] == 40
@@ -106,8 +125,14 @@ def main():
     assert fresh.status_code == 200, fresh.get_data(as_text=True)
     fresh_json = fresh.get_json()
     assert fresh_json["status"] == "queued"
+    assert forbidden_recognition_keys.isdisjoint(fresh_json)
     assert fresh_json["task_id"] in backend_app.task_store
     assert fresh_json["task_id"] in backend_app.task_queue
+
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    health_json = health.get_json()
+    assert set(health_json) == {"status", "time", "token_source"}
 
     print("large result route checks passed")
     print("status_results_count", status_json["results_count"])

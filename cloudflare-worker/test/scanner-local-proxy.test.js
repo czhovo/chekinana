@@ -27,55 +27,6 @@ async function responseBytes(response) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-test("keeps the default production RunPod proxy request and response contract unchanged", async () => {
-  let calls = 0;
-  const response = await handleRequest(new Request(
-    "https://api.chekinana.top/api/status/task123?preserved=1",
-    {
-      headers: {
-        "x-cheki-token": "productiontestpod",
-        "x-client-marker": "preserved",
-      },
-    },
-  ), {}, async (value, init = {}) => {
-    calls += 1;
-    assert.equal(
-      value.url,
-      "https://productiontestpod-8080.proxy.runpod.net/api/status/task123?preserved=1",
-    );
-    assert.equal(value.method, "GET");
-    assert.equal(value.headers.get("x-cheki-token"), "productiontestpod");
-    assert.equal(value.headers.get("x-client-marker"), "preserved");
-    assert.deepEqual(init, {});
-    return new Response(IMAGE_BYTES, {
-      status: 201,
-      headers: {
-        "content-type": "image/png",
-        "x-upstream-marker": "preserved",
-      },
-    });
-  });
-
-  assert.equal(calls, 1);
-  assert.equal(response.status, 201);
-  assert.equal(response.headers.get("content-type"), "image/png");
-  assert.equal(response.headers.get("x-upstream-marker"), "preserved");
-  assert.deepEqual(await responseBytes(response), IMAGE_BYTES);
-});
-
-test("keeps the production query-token fallback unchanged", async () => {
-  const response = await handleRequest(new Request(
-    "https://api.chekinana.top/api/status/task123?token=productiontestpod",
-  ), {}, async (value) => {
-    assert.equal(
-      value.url,
-      "https://productiontestpod-8080.proxy.runpod.net/api/status/task123?token=productiontestpod",
-    );
-    return new Response("production");
-  });
-  assert.equal(await response.text(), "production");
-});
-
 test("pins local upstream requests to the configured loopback origin", async () => {
   const response = await handleRequest(scannerRequest(
     "/api/status/task123?next=https%3A%2F%2Fevil.example%2F&token=must-not-forward",
@@ -362,20 +313,46 @@ test("maps local upstream failures to a fixed error without leaking details", as
   assert.doesNotMatch(JSON.stringify(body), /private|127\.0\.0\.1|8080/u);
 });
 
-test("preserves date annotation behavior in local mode without forwarding the scanner token", async () => {
+test("ordinary local result download never calls Qwen and preserves image bytes", async () => {
   let backendCalls = 0;
   let qwenCalls = 0;
-  const limiterKeys = [];
   const env = {
     ...LOCAL_ENV,
     CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
     CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-    CHEKI_DATE_RATE_LIMITER: {
-      limit: async ({ key }) => {
-        limiterKeys.push(key);
-        return { success: true };
-      },
-    },
+  };
+  const response = await handleRequest(scannerRequest(
+    "/api/result/task123/0",
+  ), env, async (value) => {
+    const url = new URL(value instanceof Request ? value.url : value);
+    if (url.hostname === "127.0.0.1") {
+      backendCalls += 1;
+      assert.equal(url.toString(), "http://127.0.0.1:8080/api/result/task123/0");
+      return new Response(IMAGE_BYTES, {
+        headers: {
+          "content-type": "image/png",
+          "x-upstream-marker": "preserved",
+        },
+      });
+    }
+    qwenCalls += 1;
+    return Response.json({});
+  });
+
+  assert.equal(backendCalls, 1);
+  assert.equal(qwenCalls, 0);
+  assert.equal(response.headers.get("x-cheki-date-status"), null);
+  assert.equal(response.headers.get("x-upstream-marker"), "preserved");
+  assert.deepEqual(await responseBytes(response), IMAGE_BYTES);
+});
+
+test("preserves date annotation behavior in local mode without forwarding the scanner token", async () => {
+  let backendCalls = 0;
+  let qwenCalls = 0;
+  const env = {
+    ...LOCAL_ENV,
+    CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
+    CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
   };
   const response = await handleRequest(scannerRequest(
     "/api/result/task123/0?date_annotation=1",
@@ -414,7 +391,6 @@ test("preserves date annotation behavior in local mode without forwarding the sc
 
   assert.equal(backendCalls, 1);
   assert.equal(qwenCalls, 1);
-  assert.deepEqual(limiterKeys, ["local-scanner"]);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-upstream-marker"), "preserved");
   assert.equal(response.headers.get("x-cheki-date-status"), "detected");
@@ -423,23 +399,18 @@ test("preserves date annotation behavior in local mode without forwarding the sc
   assert.deepEqual(await responseBytes(response), IMAGE_BYTES);
 });
 
-test("uses one unspoofable local date-limit key across rotating forwarding headers", async () => {
-  const limiterKeys = [];
+test("repeated local date annotations need no limiter and still scrub forwarding headers", async () => {
+  let backendCalls = 0;
   let qwenCalls = 0;
   const env = {
     ...LOCAL_ENV,
     CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
     CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-    CHEKI_DATE_RATE_LIMITER: {
-      limit: async ({ key }) => {
-        limiterKeys.push(key);
-        return { success: limiterKeys.length <= 5 };
-      },
-    },
   };
   const fetchImpl = async (value) => {
     const url = new URL(value instanceof Request ? value.url : value);
     if (url.hostname === "127.0.0.1") {
+      backendCalls += 1;
       assert.equal(value.headers.get("cf-connecting-ip"), null);
       assert.equal(value.headers.get("forwarded"), null);
       assert.equal(value.headers.get("x-forwarded-for"), null);
@@ -473,61 +444,11 @@ test("uses one unspoofable local date-limit key across rotating forwarding heade
         },
       },
     ), env, fetchImpl);
-    assert.equal(
-      response.headers.get("x-cheki-date-status"),
-      index < 5 ? "not_detected" : "unavailable",
-    );
-    if (index === 5) {
-      assert.equal(response.headers.get("x-cheki-date-error"), "rate_limited");
-    }
+    assert.equal(response.headers.get("x-cheki-date-status"), "not_detected");
+    assert.equal(response.headers.get("x-cheki-date-error"), null);
     await response.arrayBuffer();
   }
 
-  assert.deepEqual(limiterKeys, Array(6).fill("local-scanner"));
-  assert.equal(qwenCalls, 5);
-});
-
-test("keeps the production date-limit client IP key unchanged", async () => {
-  const limiterKeys = [];
-  const env = {
-    CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
-    CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-    CHEKI_DATE_RATE_LIMITER: {
-      limit: async ({ key }) => {
-        limiterKeys.push(key);
-        return { success: true };
-      },
-    },
-  };
-  const response = await handleRequest(new Request(
-    "https://api.chekinana.top/api/result/task123/0?date_annotation=1",
-    {
-      headers: {
-        "x-cheki-token": "productiontestpod",
-        "cf-connecting-ip": "192.0.2.44",
-        "x-forwarded-for": "198.51.100.44",
-      },
-    },
-  ), env, async (value) => {
-    const url = new URL(value instanceof Request ? value.url : value);
-    if (url.hostname.endsWith(".proxy.runpod.net")) {
-      return new Response(IMAGE_BYTES, {
-        headers: { "content-type": "image/png" },
-      });
-    }
-    return Response.json({
-      choices: [{
-        message: {
-          content: JSON.stringify({
-            reasoning: "none",
-            Date: null,
-          }),
-        },
-      }],
-    });
-  });
-
-  assert.deepEqual(limiterKeys, ["192.0.2.44"]);
-  assert.equal(response.headers.get("x-cheki-date-status"), "not_detected");
-  await response.arrayBuffer();
+  assert.equal(backendCalls, 6);
+  assert.equal(qwenCalls, 6);
 });

@@ -4,6 +4,410 @@ import XCTest
 
 @MainActor
 final class ChekinanaConversationCoordinatorTests: XCTestCase {
+    func testEventChoicesSubtitleUsesStoredDateOnlyValueInNegativeTimeZone() throws {
+        let fixture = try makeFixture()
+        let canonicalDate = try XCTUnwrap(
+            ChekinanaDateOnly.canonicalDate(year: 2026, month: 8, day: 4)
+        )
+        fixture.context.insert(Event(name: "Night Live", date: canonicalDate))
+        try fixture.context.save()
+
+        var losAngeles = Calendar(identifier: .gregorian)
+        losAngeles.timeZone = try XCTUnwrap(
+            TimeZone(identifier: "America/Los_Angeles")
+        )
+        XCTAssertEqual(
+            ChekinanaNLInterpretClient.localDateString(
+                canonicalDate,
+                calendar: losAngeles
+            ),
+            "2026-08-03",
+            "A live instant formatter would shift the canonical carrier in this zone"
+        )
+
+        let choices = ChekinanaConversationCoordinator.eventChoices(
+            modelContext: fixture.context
+        )
+        let choice = try XCTUnwrap(choices.first { $0.title == "Night Live" })
+        XCTAssertEqual(choice.subtitle, "2026-08-04")
+    }
+
+    func testLongCandidateScrollPolicyKeepsResponseTopAndRestoreDoesNothing() {
+        XCTAssertEqual(
+            ChekinanaTranscriptScrollPolicy.behavior(
+                for: .idolCandidates(count: 10),
+                isRestoringHistory: false
+            ),
+            .responseTop
+        )
+        XCTAssertEqual(
+            ChekinanaTranscriptScrollPolicy.behavior(
+                for: .idolCandidates(count: 5),
+                isRestoringHistory: false
+            ),
+            .bottom
+        )
+        XCTAssertEqual(
+            ChekinanaTranscriptScrollPolicy.behavior(
+                for: .userText,
+                isRestoringHistory: true
+            ),
+            .none
+        )
+    }
+
+    func testAssistantHistorySanitizesBothRolesAndExcludesRichInteractions() throws {
+        let card = ChekinanaIdolCard(
+            id: UUID(), catalogueID: nil, name: "Not persisted", group: nil,
+            color: nil, birthday: nil, verification: nil, bio: nil,
+            avatarImageRef: nil, avatarThumbnailData: nil, avatarIdentity: nil,
+            detail: .addCandidate, confirmationCode: nil, selectionToken: "ephemeral"
+        )
+        let explicitSecrets = [
+            "password=value",
+            "passwd: value",
+            "passcode：value",
+            "api_key=value",
+            "api-key: value",
+            "apikey：value",
+            "client_secret=value",
+            "client-secret: value",
+            "secret：value",
+            "session=value",
+            "session_id=value",
+            "session-id: value",
+            "sessionid：value",
+            "session_key=value",
+            "session-key: value",
+            "sessiontoken=value",
+            "private key: value",
+            "private_key=value",
+            "private-key: value",
+        ]
+        let explicitSecretMessages = explicitSecrets.enumerated().map { index, text in
+            TranscriptMessage(
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                content: .text(text)
+            )
+        }
+        let messages = [
+            TranscriptMessage(role: .user, content: .text("ordinary user text")),
+            TranscriptMessage(content: .text("ordinary assistant text")),
+            TranscriptMessage(
+                role: .user,
+                content: .text("Please explain password managers and API key rotation.")
+            ),
+            TranscriptMessage(content: .text("Session key documentation is public.")),
+            TranscriptMessage(
+                role: .user,
+                content: .text("Session IDs and session tokens are security concepts.")
+            ),
+            TranscriptMessage(
+                content: .text("Private key rotation guidance contains no credential value.")
+            ),
+            TranscriptMessage(
+                content: .text("error: invalid or expired confirmation code: deadbeef")
+            ),
+            TranscriptMessage(
+                role: .user,
+                content: .text("addevent https://user:password@example.com/live")
+            ),
+            TranscriptMessage(role: .user, content: .text("Authorization: secret-value")),
+            TranscriptMessage(role: .user, content: .text("refresh_token=secret-value")),
+            TranscriptMessage(content: .text("Bearer assistant-echoed-secret")),
+            TranscriptMessage(
+                role: .user,
+                content: .text("object 00000000-0000-4000-8000-000000000000")
+            ),
+            TranscriptMessage(role: .user, content: .text("scancheki pod=secret123")),
+            TranscriptMessage(content: .idolCards([card])),
+        ] + explicitSecretMessages
+        let records = ChekinanaAssistantHistoryStore.persistableRecords(from: messages)
+        XCTAssertEqual(records.count, 7)
+        XCTAssertEqual(
+            records.map(\.text),
+            [
+                "ordinary user text",
+                "ordinary assistant text",
+                "Please explain password managers and API key rotation.",
+                "Session key documentation is public.",
+                "Session IDs and session tokens are security concepts.",
+                "Private key rotation guidance contains no credential value.",
+                "Idol：Not persisted",
+            ]
+        )
+        XCTAssertFalse(records.contains {
+            $0.text.contains("deadbeef")
+                || $0.text.contains("secret")
+                || $0.text.contains("00000000")
+                || $0.text.contains("ephemeral")
+        })
+        for explicitSecret in explicitSecrets {
+            XCTAssertFalse(records.contains { $0.text == explicitSecret }, explicitSecret)
+        }
+    }
+
+    func testAssistantHistorySaveLoadBoundsAndAtomicallyReplacesFile() throws {
+        let ordinaryRecords = (0...ChekinanaAssistantHistoryStore.maximumRecords).map {
+            ChekinanaPersistedTranscriptRecord(role: .user, text: "ordinary \($0)")
+        }
+        let boundary = ChekinanaPersistedTranscriptRecord(
+            role: .assistant,
+            text: String(repeating: "x", count: ChekinanaAssistantHistoryStore.maximumTextCharacters + 1)
+        )
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-history-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        ChekinanaAssistantHistoryStore.save(
+            [ChekinanaPersistedTranscriptRecord(role: .assistant, text: "stale")],
+            to: url
+        )
+        ChekinanaAssistantHistoryStore.save(
+            ordinaryRecords + [
+                ChekinanaPersistedTranscriptRecord(role: .user, text: "api_key=direct-save-secret"),
+                boundary,
+            ],
+            to: url
+        )
+        let restored = ChekinanaAssistantHistoryStore.load(from: url)
+        XCTAssertEqual(restored.count, ChekinanaAssistantHistoryStore.maximumRecords)
+        XCTAssertEqual(restored.first?.text, "ordinary 2")
+        XCTAssertEqual(restored.last?.role, .assistant)
+        XCTAssertEqual(restored.last?.text.count, ChekinanaAssistantHistoryStore.maximumTextCharacters)
+        XCTAssertFalse(restored.contains { $0.text == "stale" })
+
+        let onDisk = try JSONDecoder().decode(
+            [ChekinanaPersistedTranscriptRecord].self,
+            from: Data(contentsOf: url)
+        )
+        XCTAssertEqual(onDisk, restored)
+    }
+
+    func testAssistantHistoryLoadFailsClosedForLegacySensitiveFile() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-history-legacy-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let legacy = [
+            ChekinanaPersistedTranscriptRecord(role: .assistant, text: "ordinary"),
+            ChekinanaPersistedTranscriptRecord(
+                role: .assistant,
+                text: "error: confirmation code expired: cafebabe"
+            ),
+        ]
+        try JSONEncoder().encode(legacy).write(to: url)
+
+        XCTAssertEqual(
+            ChekinanaAssistantHistoryStore.load(from: url),
+            [ChekinanaPersistedTranscriptRecord(role: .assistant, text: "ordinary")]
+        )
+        let scrubbedOnDisk = try JSONDecoder().decode(
+            [ChekinanaPersistedTranscriptRecord].self,
+            from: Data(contentsOf: url)
+        )
+        XCTAssertEqual(
+            scrubbedOnDisk,
+            [ChekinanaPersistedTranscriptRecord(role: .assistant, text: "ordinary")]
+        )
+
+        let sensitiveOnlyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-history-sensitive-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: sensitiveOnlyURL) }
+        try JSONEncoder().encode(Array(legacy.dropFirst())).write(to: sensitiveOnlyURL)
+        XCTAssertTrue(ChekinanaAssistantHistoryStore.load(from: sensitiveOnlyURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sensitiveOnlyURL.path))
+    }
+
+    func testPatternCountLabelUsesCorrectPluralization() {
+        XCTAssertEqual(ChekinanaPatternCountLabel.text(0), "No patterns")
+        XCTAssertEqual(ChekinanaPatternCountLabel.text(0, whenEmpty: "No pattern"), "No pattern")
+        XCTAssertEqual(ChekinanaPatternCountLabel.text(1), "1 pattern")
+        XCTAssertEqual(ChekinanaPatternCountLabel.text(2), "2 patterns")
+    }
+
+    func testChekiCountLabelUsesLowercaseEnglishPluralization() throws {
+        let bundle = try XCTUnwrap(
+            Bundle(path: try XCTUnwrap(Bundle.main.path(forResource: "en", ofType: "lproj")))
+        )
+        let locale = Locale(identifier: "en")
+        XCTAssertEqual(
+            ChekinanaRecordKind.cheki.countLabel(0, bundle: bundle, locale: locale),
+            "0 chekis"
+        )
+        XCTAssertEqual(
+            ChekinanaRecordKind.cheki.countLabel(1, bundle: bundle, locale: locale),
+            "1 Cheki"
+        )
+        XCTAssertEqual(
+            ChekinanaRecordKind.cheki.countLabel(2, bundle: bundle, locale: locale),
+            "2 chekis"
+        )
+    }
+
+    func testMiniChekiIconUsesPhysicalFrameAspectRatio() {
+        XCTAssertEqual(
+            ChekinanaMiniChekiIconMetrics.outerAspectRatio,
+            CGFloat(1_200) / CGFloat(1_908),
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            ChekinanaMiniChekiIconMetrics.width / ChekinanaMiniChekiIconMetrics.height,
+            ChekinanaMiniChekiIconMetrics.outerAspectRatio,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testIdolPatternStatusUsesOnlyStoredStateForZeroOneAndTwoPatterns() {
+        let statuses = [0, 1, 2].map {
+            ChekinanaIdolPatternStatus.make(hasRecognitionPatterns: $0 > 0)
+        }
+        XCTAssertEqual(statuses.map(\.systemImageName), [
+            "circle.dashed", "checkmark.seal", "checkmark.seal",
+        ])
+        XCTAssertEqual(statuses.map(\.accessibilityValue), [
+            "No stored pattern", "Stored pattern available", "Stored pattern available",
+        ])
+    }
+
+    func testIdolDragPreviewMovesInRealTimeAndRejectsFavoriteBoundary() {
+        let favorite = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let source = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let sameGroup = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+        let orderedIDs = [favorite, source, sameGroup]
+        let favoriteByID = [favorite: true, source: false, sameGroup: false]
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.previewMove(
+                source,
+                onto: sameGroup,
+                in: orderedIDs,
+                favoriteByID: favoriteByID
+            ),
+            [favorite, sameGroup, source]
+        )
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.previewMove(
+                source,
+                onto: favorite,
+                in: orderedIDs,
+                favoriteByID: favoriteByID
+            ),
+            orderedIDs
+        )
+    }
+
+    func testIdolOrderingUsesFavoriteFirstLegacyFallbackAndProtectedGroupMoves() throws {
+        let base = Date(timeIntervalSince1970: 1_000)
+        let first = Idol(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            name: "First", createdAt: base
+        )
+        let second = Idol(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            name: "Second", createdAt: base.addingTimeInterval(1)
+        )
+        let appended = Idol(name: "Appended", createdAt: base.addingTimeInterval(2))
+        let favorite = Idol(name: "Favorite", isFavorite: true, createdAt: base.addingTimeInterval(3))
+        let idols = [appended, second, favorite, first]
+
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.ordered(idols).map(\.name),
+            ["Favorite", "First", "Second", "Appended"]
+        )
+        XCTAssertFalse(ChekinanaIdolOrdering.move(first.id, before: favorite.id, in: idols))
+        XCTAssertTrue(ChekinanaIdolOrdering.move(appended.id, offset: -1, in: idols))
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.ordered(idols).filter { !$0.isFavorite }.map(\.name),
+            ["First", "Appended", "Second"]
+        )
+
+        let preview = ChekinanaIdolOrdering.previewMove(
+            second.id,
+            onto: first.id,
+            in: ChekinanaIdolOrdering.ordered(idols).map(\.id),
+            favoriteByID: Dictionary(uniqueKeysWithValues: idols.map { ($0.id, $0.isFavorite) })
+        )
+        XCTAssertTrue(
+            ChekinanaIdolOrdering.applyPreviewOrder(
+                preview,
+                favorite: false,
+                in: idols
+            )
+        )
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.ordered(idols).filter { !$0.isFavorite }.map(\.name),
+            ["Second", "First", "Appended"]
+        )
+
+        ChekinanaIdolOrdering.toggleFavorite(second, in: idols)
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.ordered(idols).map(\.name),
+            ["Favorite", "Second", "First", "Appended"]
+        )
+
+        let fixture = try makeFixture()
+        idols.forEach(fixture.context.insert)
+        try fixture.context.save()
+        let fetched = try fixture.context.fetch(FetchDescriptor<Idol>())
+        XCTAssertEqual(
+            ChekinanaIdolOrdering.ordered(fetched).map(\.name),
+            ["Favorite", "Second", "First", "Appended"]
+        )
+        XCTAssertTrue(fetched.contains { $0.sortOrder != nil })
+    }
+
+    func testListAndDetailFavoriteEntrancesUseIdenticalTargetGroupAppendOrdering() throws {
+        func toggledOrder() throws -> [String] {
+            let fixture = try makeFixture()
+            let favorite = Idol(
+                name: "Existing Favorite",
+                isFavorite: true,
+                sortOrder: 0
+            )
+            let target = Idol(name: "Target", sortOrder: 0)
+            let other = Idol(name: "Other", sortOrder: 1)
+            [favorite, target, other].forEach(fixture.context.insert)
+            try fixture.context.save()
+            try ChekinanaIdolFavoriteAction.toggle(
+                target,
+                in: [favorite, target, other],
+                modelContext: fixture.context,
+                now: Date(timeIntervalSince1970: 123)
+            )
+            return ChekinanaIdolOrdering.ordered(
+                try fixture.context.fetch(FetchDescriptor<Idol>())
+            ).map(\.name)
+        }
+
+        let listEntranceOrder = try toggledOrder()
+        let detailEntranceOrder = try toggledOrder()
+        XCTAssertEqual(listEntranceOrder, ["Existing Favorite", "Target", "Other"])
+        XCTAssertEqual(detailEntranceOrder, listEntranceOrder)
+    }
+
+    func testCandidateSelectionDefaultsOnceAndPreservesIntentionalEmptySelection() {
+        let first = UUID()
+        let second = UUID()
+        let newlyEligible = UUID()
+        var state = ChekinanaCandidateSelectionState()
+
+        state.reconcile(validIDs: [first, second])
+        XCTAssertEqual(state.selectedIDs, [first, second])
+
+        state.selectedIDs.removeAll()
+        state.reconcile(validIDs: [first, second])
+        XCTAssertTrue(state.selectedIDs.isEmpty)
+
+        state.selectedIDs = [first, UUID()]
+        state.reconcile(validIDs: [first, second])
+        XCTAssertEqual(state.selectedIDs, [first])
+
+        state.reconcile(validIDs: [first, second, newlyEligible])
+        XCTAssertEqual(state.selectedIDs, [first, newlyEligible])
+
+        state.reconcile(validIDs: [second, newlyEligible])
+        XCTAssertEqual(state.selectedIDs, [newlyEligible])
+    }
     func testGreetingIsHandledLocallyWithoutSwallowingARequestedAction() {
         XCTAssertEqual(
             ChekinanaGreetingLanguage.response(for: "你好，Chekinana！"),
@@ -51,46 +455,6 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         }
     }
 
-    func testPromptRoutingKeepsOnlyLocalStateControlsOffNetwork() {
-        for input in ["确认上一步", "confirm deadbeef", "取消全部操作", "清空聊天记录"] {
-            XCTAssertNotNil(ChekinanaPromptRouting.localStateCommand(from: input), input)
-        }
-        for input in [
-            "你好",
-            "列出所有偶像",
-            "添加活动 Summer Live 2026-08-01",
-            "查看这张切",
-            "扫描这些切",
-            "https://weibo.com/123456/AbC123",
-            "创建 Event https://weibo.com/123456/AbC123",
-            "listidol",
-        ] {
-            XCTAssertNil(ChekinanaPromptRouting.localStateCommand(from: input), input)
-        }
-    }
-
-    func testPromptRoutingAllowsOnlyExactBareScannerCommandLocally() {
-        for input in ["scancheki", "  SCANCHEKI\n"] {
-            XCTAssertEqual(
-                ChekinanaPromptRouting.localBareScannerCommand(from: input),
-                "scancheki",
-                input
-            )
-        }
-        for input in [
-            "scancheki pod=fakevalue",
-            "scancheki expected=2",
-            "scancheki extra",
-            "ſcancheki",
-            "ｓｃａｎｃｈｅｋｉ",
-            "scan cheki",
-            "扫描这些切",
-            "listidol",
-        ] {
-            XCTAssertNil(ChekinanaPromptRouting.localBareScannerCommand(from: input), input)
-        }
-    }
-
     func testQuickActionsPrefillOnlyEmptyPromptAndUseProductLabels() throws {
         XCTAssertEqual(
             ChekinanaQuickActions.all.map(\.label),
@@ -133,7 +497,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         XCTAssertEqual(scan.suggestedPrompt(hasSelectedPhotos: true), "扫描已选择的照片")
     }
 
-    func testIdolCardPresentationUsesExactlyFourStateSpecificInformationLines() {
+    func testIdolCardPresentationUsesExactlyThreeStateSpecificInformationLines() {
         func card(
             detail: ChekinanaIdolCardDetail,
             verification: String? = "verified",
@@ -150,6 +514,8 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
                 verification: verification,
                 bio: "bio-hidden",
                 avatarImageRef: nil,
+                avatarThumbnailData: nil,
+                avatarIdentity: nil,
                 detail: detail,
                 confirmationCode: confirmationCode,
                 selectionToken: selectionToken
@@ -165,24 +531,32 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             confirmationCode: "deadbeef"
         ))
         XCTAssertEqual(multiCandidate.lines, [
-            "Aina", "空色轨迹", "Birthday: 2000-01-01", "Verification: verified",
+            "Aina", "空色轨迹", "verified",
         ])
         XCTAssertEqual(singleCandidate.lines, multiCandidate.lines)
-        XCTAssertEqual(multiCandidate.fourthLineKind, .verification)
+        XCTAssertEqual(multiCandidate.thirdLineKind, .verification)
+
+        let bioFallback = ChekinanaIdolCardPresentation(idol: card(
+            detail: .addCandidate,
+            verification: " "
+        ))
+        XCTAssertEqual(bioFallback.lines, ["Aina", "空色轨迹", "bio-hidden"])
+        XCTAssertEqual(bioFallback.thirdLineKind, .bio)
 
         let saved = ChekinanaIdolCardPresentation(idol: card(detail: .chekiCount(2)))
         XCTAssertEqual(saved.lines, [
-            "Aina", "空色轨迹", "Birthday: 2000-01-01", "2 chekis",
+            "Aina", "空色轨迹", "2 Cheki",
         ])
-        XCTAssertEqual(saved.fourthLineKind, .chekiCount)
+        XCTAssertEqual(saved.thirdLineKind, .chekiCount)
 
         let pendingDelete = ChekinanaIdolCardPresentation(idol: card(detail: .deleteCandidate))
-        XCTAssertEqual(pendingDelete.lines.count, 4)
-        XCTAssertEqual(pendingDelete.lines[3], "0 cheki")
+        XCTAssertEqual(pendingDelete.lines.count, 3)
+        XCTAssertEqual(pendingDelete.lines[2], "0 Cheki")
 
-        for presentation in [multiCandidate, singleCandidate, saved, pendingDelete] {
-            XCTAssertEqual(presentation.lines.count, 4)
+        for presentation in [multiCandidate, singleCandidate, bioFallback, saved, pendingDelete] {
+            XCTAssertEqual(presentation.lines.count, 3)
             let visibleText = presentation.lines.joined(separator: "\n")
+            XCTAssertFalse(visibleText.contains("Birthday"))
             XCTAssertFalse(visibleText.contains("Catalogue"))
             XCTAssertFalse(visibleText.contains("Bio"))
             XCTAssertFalse(visibleText.contains("待确认"))
@@ -190,32 +564,47 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         }
     }
 
-    func testChekiPreviewPolicyPrefersSavedImageRefAndSupportsTemporaryFallback() {
+    func testChekiPreviewPolicyCarriesDateOverlayOnlyForTemporaryFallback() throws {
         let embedded = Data([1, 2, 3, 4])
+        let boundingBox = try XCTUnwrap(ChekinanaChekiDateBoundingBox(
+            x1: 100,
+            y1: 200,
+            x2: 400,
+            y2: 300
+        ))
+        let annotation = try XCTUnwrap(ChekinanaChekiDateAnnotation(
+            text: "2026.07.04",
+            precision: .fullDate,
+            boundingBox: boundingBox
+        ))
         let savedCard = ChekinanaChekiCard(
             id: UUID(),
             imageRef: "saved-cheki.jpg",
             createdAt: Date(),
             confirmationCode: nil,
-            thumbnailImageData: embedded
+            thumbnailImageData: embedded,
+            idx: 1,
+            dateAnnotationState: .detected(annotation)
         )
         let saved = ChekinanaChekiPreviewSource(cheki: savedCard)
         XCTAssertEqual(saved.preferredKind, .imageRef)
         XCTAssertEqual(saved.imageRef, "saved-cheki.jpg")
         XCTAssertEqual(saved.embeddedThumbnailData, embedded)
+        XCTAssertNil(saved.transientDateAnnotation)
 
         let temporaryCard = ChekinanaChekiCard(
             id: UUID(),
             imageRef: nil,
             createdAt: Date(),
-            confirmationCode: "deadbeef",
-            thumbnailImageData: embedded
+            confirmationCode: nil,
+            thumbnailImageData: embedded,
+            dateAnnotationState: .detected(annotation)
         )
         let temporary = ChekinanaChekiPreviewSource(cheki: temporaryCard)
         XCTAssertEqual(temporary.preferredKind, .embeddedThumbnail)
         XCTAssertNil(temporary.imageRef)
         XCTAssertEqual(temporary.embeddedThumbnailData, embedded)
-
+        XCTAssertEqual(temporary.transientDateAnnotation, annotation)
         let unavailableCard = ChekinanaChekiCard(
             id: UUID(),
             imageRef: nil,
@@ -223,10 +612,9 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             confirmationCode: nil,
             thumbnailImageData: nil
         )
-        XCTAssertEqual(
-            ChekinanaChekiPreviewSource(cheki: unavailableCard).preferredKind,
-            .unavailable
-        )
+        let unavailable = ChekinanaChekiPreviewSource(cheki: unavailableCard)
+        XCTAssertEqual(unavailable.preferredKind, .unavailable)
+        XCTAssertNil(unavailable.transientDateAnnotation)
 
         var presentation = ChekinanaChekiPreviewPresentationState()
         XCTAssertFalse(presentation.isPresented)
@@ -236,162 +624,132 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         XCTAssertFalse(presentation.isPresented)
     }
 
-    func testTranscriptEmptyStatePolicyIsNonPersistentAndExclusive() {
-        XCTAssertTrue(ChekinanaTranscriptEmptyStatePolicy.shouldShow(
-            messageCount: 0,
-            hasDraft: false,
-            hasEventCandidatePanel: false
-        ))
-        XCTAssertFalse(ChekinanaTranscriptEmptyStatePolicy.shouldShow(
-            messageCount: 1,
-            hasDraft: false,
-            hasEventCandidatePanel: false
-        ))
-        XCTAssertFalse(ChekinanaTranscriptEmptyStatePolicy.shouldShow(
-            messageCount: 0,
-            hasDraft: true,
-            hasEventCandidatePanel: false
-        ))
-        XCTAssertFalse(ChekinanaTranscriptEmptyStatePolicy.shouldShow(
-            messageCount: 0,
-            hasDraft: false,
-            hasEventCandidatePanel: true
-        ))
+    func testMinimumTouchTargetIsAtLeast44Points() {
+        XCTAssertGreaterThanOrEqual(
+            ChekinanaAccessibilityMetrics.minimumTouchTarget,
+            44
+        )
     }
 
-    func testTypedScannerCommandInjectsOnlyValidatedLocalConfiguration() {
-        let configuredValue = "scanner-test-123"
-        XCTAssertEqual(
-            ChekinanaScannerConfiguration.configuredPodID(infoDictionary: [
-                ChekinanaScannerConfiguration.infoDictionaryKey: "  \(configuredValue)  ",
-            ]),
-            configuredValue
+    func testTypedScannerCommandUsesManagedProxyWithoutCredentialArguments() throws {
+        let fixedBounds = try XCTUnwrap(
+            ChekinanaScannerDateBounds.fixed(
+                try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-07-16T12:00:00Z")),
+                calendar: Calendar(identifier: .gregorian)
+            )
         )
         XCTAssertEqual(
             ChekinanaScannerConfiguration.prepareTypedCommands(
-                ["listidol", "scancheki"],
-                configuredPodID: configuredValue
+                ["listidol", "scancheki"]
             ),
-            .ready(["listidol", "scancheki pod=\(configuredValue)"])
+            .ready(["listidol", "scancheki"])
         )
         XCTAssertEqual(
             ChekinanaScannerConfiguration.prepareTypedCommands(
                 ["listidol", "scancheki"],
-                configuredPodID: configuredValue,
-                dateAnnotationEnabled: true
+                dateRecognitionEnabled: true,
+                dateBounds: fixedBounds,
+                idolRecognitionEnabled: true,
+                idolCandidateIDs: [
+                    UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+                ]
             ),
             .ready([
                 "listidol",
-                "scancheki pod=\(configuredValue) date_annotation=true",
+                "scancheki date_recognition=true date_scope=fixed date_from=2026-07-16 date_to=2026-07-16 idol_recognition=true candidates=11111111-1111-1111-1111-111111111111,unassigned",
             ])
         )
         XCTAssertEqual(
             ChekinanaScannerConfiguration.prepareTypedCommands(
-                ["scancheki pod=model-supplied"],
-                configuredPodID: configuredValue
+                ["scancheki"],
+                dateRecognitionEnabled: true,
+                dateBounds: fixedBounds
+            ),
+            .ready(["scancheki date_recognition=true date_scope=fixed date_from=2026-07-16 date_to=2026-07-16"])
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki"],
+                directInputEnabled: true
+            ),
+            .ready(["scancheki direct=true scanner_size=mini"])
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki"],
+                idolRecognitionEnabled: true,
+                idolCandidateIDs: []
+            ),
+            .ready([
+                "scancheki idol_recognition=true candidates=unassigned",
+            ])
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki"],
+                idolRecognitionEnabled: true,
+                idolCandidateIDs: [
+                    UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+                ],
+                includeUnassignedCandidate: false
+            ),
+            .ready([
+                "scancheki idol_recognition=true candidates=22222222-2222-2222-2222-222222222222",
+            ])
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki"],
+                idolRecognitionEnabled: true,
+                idolCandidateIDs: [],
+                includeUnassignedCandidate: false
+            ),
+            .rejected(.invalidScannerPlan)
+        )
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(
+                ["scancheki pod=model-supplied"]
             ),
             .rejected(.invalidScannerPlan)
         )
     }
 
-    func testScannerBaseURLConfigurationFallbackNormalizationAndBuildPolicy() throws {
+    func testScannerConfigurationIgnoresLocalOverridesAndClientTokens() throws {
         let productionURL = ChekinanaScannerConfiguration.productionBaseURL
-        for rawValue in [nil, "", "   ", "$(CHEKINANA_SCANNER_BASE_URL)"] as [String?] {
+        let overrides = [
+            nil,
+            "",
+            "http://localhost:8787",
+            "http://192.168.1.50:8787",
+            "https://scanner.example.test",
+            "not a URL",
+        ] as [String?]
+        for rawValue in overrides {
             XCTAssertEqual(
                 ChekinanaScannerConfiguration.resolveBaseURL(
                     rawValue,
-                    allowsInsecureLocalHTTP: false
+                    allowsInsecureLocalHTTP: true
                 ),
                 .resolved(productionURL)
             )
         }
-
         XCTAssertEqual(
-            ChekinanaScannerConfiguration.resolveBaseURL(
-                "  https://scanner.example.test:9443/  ",
-                allowsInsecureLocalHTTP: false
-            ),
-            .resolved(try XCTUnwrap(URL(string: "https://scanner.example.test:9443")))
-        )
-
-        let debugLANURLs = [
-            "http://localhost:8787",
-            "http://scanner-pc:8787",
-            "http://scanner-pc.local:8787",
-            "http://10.2.3.4:8787",
-            "http://127.0.0.1:8787",
-            "http://172.16.0.1:8787",
-            "http://172.31.4.5:8787",
-            "http://192.168.50.20:8787",
-            "http://169.254.10.20:8787",
-            "http://[::1]:8787",
-            "http://[fd00::20]:8787",
-            "http://[fe80::20]:8787",
-        ]
-        for value in debugLANURLs {
-            guard case .resolved = ChekinanaScannerConfiguration.resolveBaseURL(
-                value,
+            ChekinanaScannerConfiguration.configuredBaseURL(
+                infoDictionary: [
+                    ChekinanaScannerConfiguration.baseURLInfoDictionaryKey:
+                        "http://192.168.1.50:8787",
+                ],
                 allowsInsecureLocalHTTP: true
-            ) else {
-                return XCTFail("expected Debug LAN URL to be accepted: \(value)")
-            }
-            XCTAssertEqual(
-                ChekinanaScannerConfiguration.resolveBaseURL(
-                    value,
-                    allowsInsecureLocalHTTP: false
-                ),
-                .invalid,
-                "Release policy must reject HTTP: \(value)"
-            )
-        }
-
-#if DEBUG
-        XCTAssertTrue(ChekinanaScannerConfiguration.currentBuildAllowsInsecureLocalHTTP)
-#else
+            ),
+            .resolved(productionURL)
+        )
         XCTAssertFalse(ChekinanaScannerConfiguration.currentBuildAllowsInsecureLocalHTTP)
-#endif
-    }
-
-    func testScannerBaseURLConfigurationRejectsUnsafeOrMalformedValues() {
-        let invalidValues = [
-            "http://8.8.8.8:8787",
-            "http://example.com:8787",
-            "http://0x08080808:8787",
-            "http://134744072:8787",
-            "http://010.010.010.010:8787",
-            "http://127.1:8787",
-            "http://0x7f.0.0.1:8787",
-            "http://2130706433:8787",
-            "http://172.32.0.1:8787",
-            "http://[2001:4860:4860::8888]:8787",
-            "http://[fe80::gg]:8787",
-            "http://[fe80::1.example.local]:8787",
-            "http://[fe80:::1]:8787",
-            "http://192.168.1.50:8787/api",
-            "https://scanner.example.test/api",
-            "https://user@scanner.example.test",
-            "https://scanner.example.test?mode=test",
-            "https://scanner.example.test#fragment",
-            "ftp://192.168.1.50",
-            "not a URL",
-        ]
-        for value in invalidValues {
-            XCTAssertEqual(
-                ChekinanaScannerConfiguration.resolveBaseURL(
-                    value,
-                    allowsInsecureLocalHTTP: true
-                ),
-                .invalid,
-                value
-            )
-        }
     }
 
     func testInvalidScannerBaseURLRejectsTypedScanBeforePhotoReadMessage() {
         XCTAssertEqual(
             ChekinanaScannerConfiguration.prepareTypedCommands(
                 ["scancheki"],
-                configuredPodID: "scanner-test-123",
                 baseURLResolution: .invalid
             ),
             .rejected(.invalidScannerConfiguration)
@@ -405,20 +763,11 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         XCTAssertFalse(message.contains("http"))
     }
 
-    func testMissingOrMalformedScannerConfigurationRejectsBeforeExecutionWithoutDisclosure() {
-        for value in [nil, "", "$(UNRESOLVED)", "contains spaces", "short"] as [String?] {
-            XCTAssertEqual(
-                ChekinanaScannerConfiguration.prepareTypedCommands(
-                    ["scancheki"],
-                    configuredPodID: value
-                ),
-                .rejected(.scannerNotConfigured)
-            )
-        }
-        let message = ChekinanaTypedCommandPreparationFailure.scannerNotConfigured.userMessage
-        XCTAssertTrue(message.contains("未读取照片"))
-        XCTAssertTrue(message.contains("未发起扫描请求"))
-        XCTAssertFalse(message.contains("scanner-test-123"))
+    func testProductionScannerPreparationRequiresNoClientCredential() {
+        XCTAssertEqual(
+            ChekinanaScannerConfiguration.prepareTypedCommands(["scancheki"]),
+            .ready(["scancheki"])
+        )
     }
 
     func testEverySupportedTypedIntentCompilesOnlyToWhitelistedCommands() throws {
@@ -431,6 +780,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
 
         let cases: [(ChekinanaNLOperation, String)] = [
             (.init(intent: .addidol, slots: .init(name: "New Idol")), "addidol \"New Idol\""),
+            (.init(intent: .editidol, slots: .init(name: "Renamed", target: "A")), "editidol \(shortID(idol.id)) name=Renamed"),
             (.init(intent: .addevent, slots: .init(name: "New Event", url: "https://example.com/live", date: "2026-07-16")), "addevent https://example.com/live name=\"New Event\" date=2026-07-16"),
             (.init(intent: .listidol), "listidol"),
             (.init(intent: .listevent), "listevent"),
@@ -454,7 +804,6 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
 
     func testTypedScannerPlanReachesLocalConfigurationPreparation() throws {
         let fixture = try makeFixture()
-        let configuredValue = "scanner-review-123"
         let compiled = ChekinanaConversationCoordinator.compile(
             [.init(intent: .scancheki)],
             modelContext: fixture.context
@@ -464,11 +813,8 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(commands, ["scancheki"])
         XCTAssertEqual(
-            ChekinanaScannerConfiguration.prepareTypedCommands(
-                commands,
-                configuredPodID: configuredValue
-            ),
-            .ready(["scancheki pod=\(configuredValue)"])
+            ChekinanaScannerConfiguration.prepareTypedCommands(commands),
+            .ready(["scancheki"])
         )
     }
 
@@ -498,6 +844,46 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
                 modelContext: fixture.context
             ),
             .message(.invalidPlan)
+        )
+
+        let rawText = "添加 Event：8 月 3 日上海公演，场地 MAO Livehouse"
+        let textResult = ChekinanaConversationCoordinator.compile(
+            [.init(intent: .addevent, slots: .init(name: "上海公演", date: "2026-08-03"))],
+            modelContext: fixture.context
+        )
+        XCTAssertEqual(textResult, .eventCandidateText)
+        XCTAssertEqual(
+            ChekinanaEventCandidateConversationRoute.resolve(
+                textResult,
+                originalUtterance: rawText
+            ),
+            .text(rawText),
+            "An Add Event without a public Weibo URL must send the unmodified user utterance to the shared text parser."
+        )
+        XCTAssertEqual(
+            ChekinanaEventCandidateConversationRoute.resolve(
+                .eventCandidateURL(url),
+                originalUtterance: rawText
+            ),
+            .weiboURL(url),
+            "Conversation URL parsing must use the same Weibo candidate fetch route as Add Event."
+        )
+        XCTAssertNil(
+            ChekinanaEventCandidateConversationRoute.resolve(
+                .eventCandidateText,
+                originalUtterance: "   "
+            )
+        )
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [
+                    .init(intent: .addevent, slots: .init(url: url)),
+                    .init(intent: .listevent),
+                ],
+                modelContext: fixture.context
+            ),
+            .message(.invalidPlan),
+            "A conversation may add only one Event and may not mix it with other operations."
         )
     }
 
@@ -570,6 +956,8 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             ("查看这张切", "查看Cheki \(id.uuidString.lowercased())"),
             ("把这张切的备注改成 after live", "把Cheki \(id.uuidString.lowercased())的备注改成 after live"),
             ("删除刚才那张 Cheki", "删除Cheki \(id.uuidString.lowercased())"),
+            ("edit the selected Cheki", "edit Cheki \(id.uuidString.lowercased())"),
+            ("選択したチェキを編集", "Cheki \(id.uuidString.lowercased())を編集"),
         ]
 
         for (input, expected) in cases {
@@ -587,27 +975,13 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         ))
     }
 
-    func testNaturalScanPhrasesWithoutPodAskLocallyForPod() {
+    func testNaturalScanPhrasesCompileWithoutBackendIdentifiers() {
         for input in ["扫描这些切", "帮我记录这些切"] {
             let translation = ChekinanaNaturalLanguageTranslator.translate(input)
-            XCTAssertNil(translation.command, input)
-            XCTAssertEqual(translation.disposition, .localClarification, input)
-            XCTAssertTrue(translation.needsClarification, input)
-            XCTAssertTrue(translation.message.contains("Pod"), input)
-        }
-    }
-
-    func testNaturalPodScanPhrasesCompileLocallyWithoutRemoteInterpretation() {
-        for (input, podID) in [
-            ("使用 Pod testpod123 扫描这些切", "testpod123"),
-            ("用 Pod abcdefghi 扫描这些切", "abcdefghi"),
-        ] {
-            let translation = ChekinanaNaturalLanguageTranslator.translate(input)
-            XCTAssertEqual(translation.command, "scancheki pod=\(podID)", input)
+            XCTAssertEqual(translation.command, "scancheki", input)
             XCTAssertEqual(translation.source, .rule, input)
             XCTAssertEqual(translation.disposition, .localCommand, input)
             XCTAssertFalse(translation.needsClarification, input)
-            XCTAssertFalse(ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(input), input)
         }
     }
 
@@ -624,6 +998,128 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             return XCTFail("expected commands")
         }
         XCTAssertEqual(commands, ["addidol A", "addidol \"B Idol\""])
+    }
+
+    func testPlanCardinalityAllowsTwentyFiveAddIdolsButRejectsSixAddEvents() throws {
+        let addIdols = (1...25).map {
+            ChekinanaNLOperation(intent: .addidol, slots: .init(name: "Idol \($0)"))
+        }
+        XCTAssertNoThrow(try ChekinanaNLSchemaValidator.validatePlan(addIdols))
+        let fixture = try makeFixture()
+        guard case .commands(let commands) = ChekinanaConversationCoordinator.compile(
+            addIdols,
+            modelContext: fixture.context
+        ) else {
+            return XCTFail("expected all Add Idol operations to compile")
+        }
+        XCTAssertEqual(commands.count, 25)
+        XCTAssertEqual(commands.first, "addidol \"Idol 1\"")
+        XCTAssertEqual(commands.last, "addidol \"Idol 25\"")
+
+        let addEvents = (1...6).map {
+            ChekinanaNLOperation(
+                intent: .addevent,
+                slots: .init(name: "Event \($0)", date: "2026-07-24")
+            )
+        }
+        XCTAssertThrowsError(try ChekinanaNLSchemaValidator.validatePlan(addEvents)) {
+            XCTAssertEqual($0 as? ChekinanaNLClientError, .invalidSchema)
+        }
+    }
+
+    func testDetectedDateScanPlanCanReachExecutorWithoutEventOrDate() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "巫歌")
+        fixture.context.insert(idol)
+        try fixture.context.save()
+        let operation = ChekinanaNLOperation(
+            intent: .addscancheki,
+            slots: .init(idols: ["巫歌"], temporary: "all")
+        )
+        XCTAssertEqual(ChekinanaNLSchemaValidator.expectedMissing(for: operation), [])
+        guard case .commands(let commands) = ChekinanaConversationCoordinator.compile(
+            [operation],
+            modelContext: fixture.context
+        ) else {
+            return XCTFail("expected addscancheki command")
+        }
+        XCTAssertEqual(
+            commands,
+            ["addscancheki all idols=\(shortID(idol.id))"]
+        )
+
+        let autoAssociation = ChekinanaNLOperation(
+            intent: .addscancheki,
+            slots: .init(temporary: "all")
+        )
+        XCTAssertEqual(
+            ChekinanaNLSchemaValidator.expectedMissing(for: autoAssociation),
+            []
+        )
+        guard case .commands(let autoCommands) = ChekinanaConversationCoordinator.compile(
+            [autoAssociation],
+            modelContext: fixture.context
+        ) else {
+            return XCTFail("pattern association must be allowed to reach the executor")
+        }
+        XCTAssertEqual(autoCommands, ["addscancheki all"])
+        XCTAssertEqual(
+            ChekinanaNaturalLanguageTranslator.translate("addscancheki all").command,
+            "addscancheki all"
+        )
+    }
+
+    func testMediaOnlyChekiPlansCompileWithoutIdolEventOrDate() throws {
+        let fixture = try makeFixture()
+
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [.init(intent: .addcheki)],
+                modelContext: fixture.context
+            ),
+            .commands(["addcheki"])
+        )
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [.init(intent: .addscancheki)],
+                modelContext: fixture.context
+            ),
+            .commands(["addscancheki all"])
+        )
+    }
+
+    func testEditIdolNaturalLanguageClearsOptionalFieldsAndCoordinatorKeepsDash() throws {
+        let phrases: [(String, String)] = [
+            ("把巫歌的团体清空", "group"),
+            ("移除巫歌的生日", "birthday"),
+            ("删除巫歌的颜色", "color"),
+            ("清空巫歌的认证", "verification"),
+            ("把巫歌的简介删除掉", "bio"),
+            ("移除巫歌的头像", "avatar"),
+        ]
+        for (utterance, field) in phrases {
+            XCTAssertEqual(
+                ChekinanaNaturalLanguageTranslator.translate(utterance).command,
+                "editidol 巫歌 \(field)=-",
+                utterance
+            )
+        }
+
+        let fixture = try makeFixture()
+        let idol = Idol(name: "巫歌")
+        fixture.context.insert(idol)
+        try fixture.context.save()
+        let operation = ChekinanaNLOperation(
+            intent: .editidol,
+            slots: .init(target: "巫歌", bio: "-")
+        )
+        guard case .commands(let commands) = ChekinanaConversationCoordinator.compile(
+            [operation],
+            modelContext: fixture.context
+        ) else {
+            return XCTFail("expected editidol clear command")
+        }
+        XCTAssertEqual(commands, ["editidol \(shortID(idol.id)) bio=-"])
     }
 
     func testEventResolutionIsExactFirstThenAmbiguousOrNotFound() throws {
@@ -673,14 +1169,22 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         let fixture = try makeFixture()
         let idolA = Idol(name: "Alice")
         let idolB = Idol(name: "Bob")
-        let event = Event(name: "Live")
+        let eventDate = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-07-16T00:00:00Z")
+        )
+        let event = Event(name: "Live", date: eventDate)
         [idolA, idolB].forEach(fixture.context.insert)
         fixture.context.insert(event)
         try fixture.context.save()
 
         let operation = ChekinanaNLOperation(
             intent: .addcheki,
-            slots: .init(idols: ["Ali", "Bob"], event: "Live", note: "双人切")
+            slots: .init(
+                date: "2026-07-16",
+                idols: ["Ali", "Bob"],
+                event: "Live",
+                note: "双人切"
+            )
         )
         guard case .commands(let commands) = ChekinanaConversationCoordinator.compile(
             [operation],
@@ -690,11 +1194,11 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(
             commands,
-            ["addcheki idols=\(shortID(idolA.id)),\(shortID(idolB.id)) event=\(shortID(event.id)) note=双人切"]
+            ["addcheki idols=\(shortID(idolA.id)),\(shortID(idolB.id)) event=\(shortID(event.id)) date=2026-07-16 note=双人切"]
         )
     }
 
-    func testEventDateConflictAndMixedIntentPlansAreRejected() throws {
+    func testEventAndDateCanCoexistWhileMixedIntentPlansAreRejected() throws {
         let fixture = try makeFixture()
         let idol = Idol(name: "A")
         let event = Event(name: "E")
@@ -702,13 +1206,15 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         fixture.context.insert(event)
         try fixture.context.save()
 
-        let conflict = ChekinanaNLOperation(
+        let combined = ChekinanaNLOperation(
             intent: .addcheki,
             slots: .init(date: "2026-07-16", idols: ["A"], event: "E")
         )
         XCTAssertEqual(
-            ChekinanaConversationCoordinator.compile([conflict], modelContext: fixture.context),
-            .message(.invalidPlan)
+            ChekinanaConversationCoordinator.compile([combined], modelContext: fixture.context),
+            .commands([
+                "addcheki idols=\(shortID(idol.id)) event=\(shortID(event.id)) date=2026-07-16",
+            ])
         )
 
         let mixed = [
@@ -923,6 +1429,60 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             XCTAssertEqual(translation.disposition, .localCommand, "\(input): \(translation.message)")
         }
 
+        XCTAssertEqual(
+            ChekinanaNaturalLanguageTranslator.translate(
+                "我要添加一些idol：巫歌，饭饭，木兰，mina，aina，eriko"
+            ).commands,
+            [
+                "addidol 巫歌",
+                "addidol 饭饭",
+                "addidol 木兰",
+                "addidol mina",
+                "addidol aina",
+                "addidol eriko",
+            ]
+        )
+
+        let nineNames = ["巫歌", "饭饭", "木兰", "aina", "eriko", "mina", "萝北", "石榴", "优子"]
+        XCTAssertEqual(
+            ChekinanaNaturalLanguageTranslator.translate(
+                "添加以下几个偶像：\(nineNames.joined(separator: " "))"
+            ).commands,
+            nineNames.map { "addidol \($0)" }
+        )
+        let screenshotNames = ["巫歌", "饭饭", "木兰", "aina", "eriko", "mina", "石榴", "优子", "萝北"]
+        let screenshotBulk = ChekinanaNaturalLanguageTranslator.translate(
+            "添加以下这些idol：\(screenshotNames.joined(separator: " "))"
+        )
+        XCTAssertEqual(screenshotBulk.disposition, .localCommand)
+        XCTAssertEqual(screenshotBulk.intent, "addidol")
+        XCTAssertEqual(screenshotBulk.commands, screenshotNames.map { "addidol \($0)" })
+        XCTAssertEqual(
+            ChekinanaNaturalLanguageTranslator.translate(
+                "添加下列 Idol：巫歌、\"Bob Idol\"，mina 和 eriko"
+            ).commands,
+            ["addidol 巫歌", "addidol \"Bob Idol\"", "addidol mina", "addidol eriko"]
+        )
+        XCTAssertEqual(
+            ChekinanaNaturalLanguageTranslator.translate("添加 Idol Bob Idol").commands,
+            ["addidol \"Bob Idol\""]
+        )
+        let malformedBulk = ChekinanaNaturalLanguageTranslator.translate(
+            "添加下列 Idol：Alice、、Bob"
+        )
+        XCTAssertEqual(malformedBulk.disposition, .localClarification)
+        XCTAssertTrue(malformedBulk.commands.isEmpty)
+
+        let manyNames = (1...25).map { "偶像\($0)" }
+        let manyTranslation = ChekinanaNaturalLanguageTranslator.translate(
+            "添加多个idol：\(manyNames.joined(separator: "、"))"
+        )
+        XCTAssertEqual(manyTranslation.disposition, .localCommand)
+        XCTAssertEqual(
+            manyTranslation.commands,
+            manyNames.map { "addidol \($0)" }
+        )
+
         let missingEventDate = ChekinanaNaturalLanguageTranslator.translate("添加 Event Summer Live")
         XCTAssertEqual(missingEventDate.disposition, .localClarification)
         XCTAssertTrue(missingEventDate.message.contains("日期"))
@@ -1082,7 +1642,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         )
         let operation = ChekinanaNLOperation(
             intent: .addscancheki,
-            slots: .init(idols: ["A"], event: "E", temporary: "all")
+            slots: .init(date: "2026-07-16", idols: ["A"], event: "E", temporary: "all")
         )
         guard case .commands(let commands) = ChekinanaConversationCoordinator.compile(
             [operation],
@@ -1101,8 +1661,53 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
     }
 
+    func testWorkerParityCompilesExplicitIdolClearsAndChekiUserPatchesWithoutSentinels() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Mina", bio: "bio")
+        fixture.context.insert(idol)
+        let cheki = Cheki(userAppears: true)
+        fixture.context.insert(cheki)
+        cheki.idols = [idol]
+        try fixture.context.save()
+        var selections = ChekinanaConversationSelections()
+        selections.selectedChekiID = cheki.id
+
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [.init(intent: .editidol, slots: .init(
+                    target: "Mina",
+                    clearFields: ["avatar", "bio"]
+                ))],
+                modelContext: fixture.context
+            ),
+            .commands(["editidol \(shortID(idol.id)) clear_fields=avatar,bio"])
+        )
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [.init(intent: .editcheki, slots: .init(
+                    user: "false",
+                    target: "the selected Cheki"
+                ))],
+                selections: selections,
+                modelContext: fixture.context
+            ),
+            .commands(["editrecord cheki target=\(shortID(cheki.id)) user=false"])
+        )
+        XCTAssertEqual(
+            ChekinanaConversationCoordinator.compile(
+                [.init(intent: .editcheki, slots: .init(
+                    target: "the selected Cheki",
+                    clearFields: ["user"]
+                ))],
+                selections: selections,
+                modelContext: fixture.context
+            ),
+            .commands(["editrecord cheki target=\(shortID(cheki.id)) clear_fields=user"])
+        )
+    }
+
     private func makeFixture() throws -> Fixture {
-        let schema = Schema([Idol.self, Event.self, Cheki.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -1114,6 +1719,21 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             ledger: ledger,
             executor: ChekinanaCommandExecutor(modelContext: context, confirmationLedger: ledger)
         )
+    }
+
+    func testOfflineChekiEditMapsExplicitAssociationClearsToDash() {
+        let expectations = [
+            ("把 Cheki deadbeef 的 idol 清空", "editcheki deadbeef idols=-"),
+            ("把 Cheki deadbeef 的 event 删除掉", "editcheki deadbeef event=-"),
+            ("把 Cheki deadbeef 的日期改为 无", "editcheki deadbeef date=-"),
+        ]
+        for (utterance, command) in expectations {
+            XCTAssertEqual(
+                ChekinanaNaturalLanguageTranslator.translate(utterance).command,
+                command,
+                utterance
+            )
+        }
     }
 
     private func shortID(_ id: UUID) -> String {

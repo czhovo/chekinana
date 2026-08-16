@@ -177,10 +177,9 @@ enum ChekinanaNaturalLanguageTranslator {
         if cleaned.contains("\\") {
             return clarification("输入参数无法由 App parser 无损表示")
         }
-        let withoutAssignmentQuotes = replacing(#"\b[A-Za-z_][A-Za-z0-9_]*=\"[^\"]*\""#, in: cleaned, with: "")
-        if withoutAssignmentQuotes.contains("\"") {
-            return clarification("输入参数无法由 App parser 无损表示")
-        }
+        // An explicitly introduced Idol list is deterministic and stays on
+        // device. Parse it before the generic quote guard so a quoted name
+        // such as "Bob Idol" remains one list item.
         if let commands = ruleAddMultipleIdols(cleaned), commands.count > 1 {
             return .init(
                 command: commands[0],
@@ -192,6 +191,16 @@ enum ChekinanaNaturalLanguageTranslator {
                 message: "识别为批量添加 Idol",
                 candidates: []
             )
+        }
+        if hasExplicitBulkIdolPrefix(cleaned) {
+            return clarification(
+                "批量添加 Idol 需要至少两个非空名称；请用空格、顿号、逗号或“和”分隔。",
+                intent: "addidol"
+            )
+        }
+        let withoutAssignmentQuotes = replacing(#"\b[A-Za-z_][A-Za-z0-9_]*=\"[^\"]*\""#, in: cleaned, with: "")
+        if withoutAssignmentQuotes.contains("\"") {
+            return clarification("输入参数无法由 App parser 无损表示")
         }
         if detectsMultipleIntents(cleaned) {
             return clarification("一次只能转换一个操作，请拆开描述")
@@ -267,24 +276,6 @@ enum ChekinanaASCIIScannerCommand {
     }
 }
 
-enum ChekinanaPromptRouting {
-    static func localBareScannerCommand(from input: String) -> String? {
-        ChekinanaASCIIScannerCommand.exactCanonical(from: input)
-    }
-
-    static func localStateCommand(from input: String) -> String? {
-        let translation = ChekinanaNaturalLanguageTranslator.translate(input)
-        guard translation.additionalCommands.isEmpty,
-              !translation.needsClarification,
-              let intent = translation.intent,
-              ["confirm", "cancel", "clear"].contains(intent),
-              let command = translation.command else {
-            return nil
-        }
-        return command
-    }
-}
-
 struct ChekinanaQuickActionDefinition: Identifiable, Equatable, Sendable {
     enum Kind: String, Sendable {
         case addIdol = "add-idol"
@@ -333,16 +324,6 @@ enum ChekinanaQuickActions {
 
     static func shouldApply(to currentPrompt: String) -> Bool {
         currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
-enum ChekinanaTranscriptEmptyStatePolicy {
-    static func shouldShow(
-        messageCount: Int,
-        hasDraft: Bool,
-        hasEventCandidatePanel: Bool
-    ) -> Bool {
-        messageCount == 0 && !hasDraft && !hasEventCandidatePanel
     }
 }
 
@@ -522,13 +503,12 @@ private extension ChekinanaNaturalLanguageTranslator {
                 }
             case "scancheki":
                 let allowed: Set<String> = [
-                    "pod", "expected", "scanner_size", "postprocess", "wb", "date_annotation",
+                    "expected", "scanner_size", "postprocess", "wb",
+                    "date_recognition", "idol_recognition", "candidates",
                 ]
-                guard split.positional.count <= 1,
-                      keys.isSubset(of: allowed),
-                      !(split.positional.count == 1 && keys.contains("pod")),
-                      split.positional.count == 1 || keys.contains("pod") else {
-                    throw TranslationError.invalidCommand("scancheki 需要指定 Pod")
+                guard split.positional.isEmpty,
+                      keys.isSubset(of: allowed) else {
+                    throw TranslationError.invalidCommand("scancheki 不接受后端凭据或位置参数")
                 }
             case "confirm":
                 guard split.values.isEmpty, split.positional.count <= 1 else {
@@ -593,14 +573,10 @@ private extension ChekinanaNaturalLanguageTranslator {
                     throw TranslationError.invalidCommand("addcheki 参数不符合注册表")
                 }
                 guard !(split.positional.count == 1 && !keys.intersection(["idol", "idols"]).isEmpty),
-                      !keys.isSuperset(of: ["idol", "idols"]),
-                      split.positional.count == 1 || !keys.intersection(["idol", "idols"]).isEmpty else {
-                    throw TranslationError.invalidCommand("addcheki 缺少或重复 Idol")
+                      !keys.isSuperset(of: ["idol", "idols"]) else {
+                    throw TranslationError.invalidCommand("addcheki Idol 参数重复")
                 }
                 let values = Dictionary(uniqueKeysWithValues: split.values)
-                guard keys.intersection(["event", "date"]).count == 1 else {
-                    throw TranslationError.invalidCommand("addcheki 必须且只能提供 event 或 date")
-                }
                 for key in ["user", "userappears"] {
                     if let value = values[key], !["true", "false", "?", "-"].contains(value.lowercased()) {
                         throw TranslationError.invalidCommand("user 必须是 true、false、? 或 -")
@@ -611,19 +587,14 @@ private extension ChekinanaNaturalLanguageTranslator {
                 }
             case "addscancheki":
                 let allowed: Set<String> = ["idol", "idols", "event", "date", "user", "userappears", "size", "note"]
-                guard split.positional.count == 1,
+                guard split.positional.count <= 1,
                       keys.isSubset(of: allowed),
-                      !keys.isSuperset(of: ["idol", "idols"]),
-                      !keys.intersection(["idol", "idols"]).isEmpty,
-                      keys.intersection(["event", "date"]).count == 1 else {
-                    throw TranslationError.invalidCommand("addscancheki 需要临时 Cheki、idol，以及 event/date 二选一")
+                      !keys.isSuperset(of: ["idol", "idols"]) else {
+                    throw TranslationError.invalidCommand("addscancheki 参数不符合注册表")
                 }
             case "listcheki":
                 guard split.positional.isEmpty, keys.isSubset(of: ["idol", "event", "date"]) else {
                     throw TranslationError.invalidCommand("listcheki 只接受 idol/event/date 字段")
-                }
-                guard !keys.isSuperset(of: ["event", "date"]) else {
-                    throw TranslationError.invalidCommand("listcheki 的 event/date 不能同时提供")
                 }
             case "editcheki":
                 let allowed: Set<String> = ["idol", "idols", "event", "date", "user", "userappears", "size", "note"]
@@ -631,9 +602,8 @@ private extension ChekinanaNaturalLanguageTranslator {
                       !split.values.isEmpty,
                       keys.isSubset(of: allowed),
                       !keys.isSuperset(of: ["idol", "idols"]),
-                      !keys.isSuperset(of: ["user", "userappears"]),
-                      !keys.isSuperset(of: ["event", "date"]) else {
-                    throw TranslationError.invalidCommand("editcheki 需要目标和有效字段；event/date 不能同时提供")
+                      !keys.isSuperset(of: ["user", "userappears"]) else {
+                    throw TranslationError.invalidCommand("editcheki 需要目标和有效字段")
                 }
             default:
                 throw TranslationError.invalidCommand("未注册命令：\(name)")
@@ -730,26 +700,139 @@ private extension ChekinanaNaturalLanguageTranslator {
     }
 
     static func ruleAddMultipleIdols(_ text: String) -> [String]? {
-        guard let raw = firstCapture(#"^(?:添加|新增|加入|录入)(?:多个|几位|一些)?\s*(?:idol|偶像|爱豆)\s+(.+)$"#, in: text) else {
+        let explicitBulkPattern = #"^(?:添加|新增|加入|录入)\s*(?:(?:以下几个|以下这些|下列)\s*(?:idol|偶像|爱豆)|(?:多个|几位|一些)\s*(?:idol|偶像|爱豆))\s*:\s*(.+)$"#
+        let colonPattern = #"^(?:添加|新增|加入|录入)\s*(?:idol|偶像|爱豆)\s*:\s*(.+)$"#
+        let spacedPattern = #"^(?:添加|新增|加入|录入)\s*(?:idol|偶像|爱豆)\s+(.+)$"#
+
+        let raw: String
+        let allowsWhitespaceSeparator: Bool
+        if let value = firstCapture(explicitBulkPattern, in: text) {
+            raw = value
+            allowsWhitespaceSeparator = true
+        } else if let value = firstCapture(colonPattern, in: text) {
+            raw = value
+            allowsWhitespaceSeparator = false
+        } else if let value = firstCapture(spacedPattern, in: text) {
+            raw = value
+            allowsWhitespaceSeparator = false
+        } else {
             return nil
         }
-        guard let regex = try? NSRegularExpression(pattern: #"\s*(?:、|，|,|和|以及)\s*"#) else { return nil }
-        let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
-        var names: [String] = []
-        var start = raw.startIndex
-        for match in regex.matches(in: raw, range: range) {
-            guard let matchRange = Range(match.range, in: raw) else { continue }
-            names.append(cleanPhrase(String(raw[start..<matchRange.lowerBound])))
-            start = matchRange.upperBound
-        }
-        names.append(cleanPhrase(String(raw[start...])))
-        names = names.filter { !$0.isEmpty }
-        guard (2...5).contains(names.count) else { return nil }
+
+        guard let names = splitExplicitIdolList(
+            raw,
+            allowsWhitespaceSeparator: allowsWhitespaceSeparator
+        ) else { return nil }
+        guard names.count >= 2 else { return nil }
         let commands = names.compactMap { name -> String? in
             guard let quoted = try? quoteValue(name) else { return nil }
             return validateCommand("addidol \(quoted)").command
         }
         return commands.count == names.count ? commands : nil
+    }
+
+    static func hasExplicitBulkIdolPrefix(_ text: String) -> Bool {
+        fullMatch(
+            #"(?:添加|新增|加入|录入)\s*(?:(?:以下几个|以下这些|下列)\s*(?:idol|偶像|爱豆)|(?:多个|几位|一些)\s*(?:idol|偶像|爱豆))\s*:.*"#,
+            text
+        ) != nil
+    }
+
+    static func splitExplicitIdolList(
+        _ raw: String,
+        allowsWhitespaceSeparator: Bool
+    ) -> [String]? {
+        var names: [String] = []
+        var current = ""
+        var isQuoted = false
+        var justClosedQuote = false
+        var index = raw.startIndex
+
+        func appendCurrent() -> Bool {
+            let name = cleanPhrase(current)
+            guard !name.isEmpty else { return false }
+            names.append(name)
+            current = ""
+            justClosedQuote = false
+            return true
+        }
+
+        while index < raw.endIndex {
+            let character = raw[index]
+            if character == "\"" {
+                if isQuoted {
+                    isQuoted = false
+                    justClosedQuote = true
+                } else {
+                    guard current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          !justClosedQuote else { return nil }
+                    current = ""
+                    isQuoted = true
+                }
+                index = raw.index(after: index)
+                continue
+            }
+
+            if !isQuoted {
+                if allowsWhitespaceSeparator, character.isWhitespace {
+                    var next = index
+                    while next < raw.endIndex, raw[next].isWhitespace {
+                        next = raw.index(after: next)
+                    }
+                    let separatorFollows: Bool
+                    if next < raw.endIndex {
+                        let nextRemainder = raw[next...]
+                        separatorFollows = nextRemainder.hasPrefix("以及")
+                            || raw[next] == "和"
+                            || ["、", "，", ","].contains(raw[next])
+                    } else {
+                        separatorFollows = false
+                    }
+                    if separatorFollows {
+                        index = next
+                        continue
+                    }
+                    guard appendCurrent() else { return nil }
+                    index = next
+                    continue
+                }
+                let remainder = raw[index...]
+                let wordSeparatorLength: Int
+                if remainder.hasPrefix("以及") {
+                    wordSeparatorLength = 2
+                } else if character == "和" {
+                    wordSeparatorLength = 1
+                } else {
+                    wordSeparatorLength = 0
+                }
+                let isPunctuationSeparator = ["、", "，", ","].contains(character)
+                if isPunctuationSeparator || wordSeparatorLength > 0 {
+                    guard appendCurrent() else { return nil }
+                    if wordSeparatorLength > 0 {
+                        index = raw.index(index, offsetBy: wordSeparatorLength)
+                    } else {
+                        index = raw.index(after: index)
+                    }
+                    while index < raw.endIndex, raw[index].isWhitespace {
+                        index = raw.index(after: index)
+                    }
+                    continue
+                }
+                if justClosedQuote {
+                    if character.isWhitespace {
+                        index = raw.index(after: index)
+                        continue
+                    }
+                    return nil
+                }
+            }
+
+            current.append(character)
+            index = raw.index(after: index)
+        }
+
+        guard !isQuoted, appendCurrent(), names.count >= 2 else { return nil }
+        return names
     }
 
     static func ruleDeleteIdol(_ text: String) -> RuleMatch? {
@@ -773,6 +856,33 @@ private extension ChekinanaNaturalLanguageTranslator {
     }
 
     static func ruleEditIdol(_ text: String) -> RuleMatch? {
+        let optionalAliases = [
+            "团体": "group", "组合": "group", "group": "group",
+            "生日": "birthday", "birthday": "birthday",
+            "颜色": "color", "color": "color",
+            "认证": "verification", "verification": "verification",
+            "简介": "bio", "bio": "bio",
+            "头像": "avatar", "avatar": "avatar",
+        ]
+        let clearPatterns = [
+            #"^(?:把|将)?(.+?)的(团体|组合|group|生日|birthday|颜色|color|认证|verification|简介|bio|头像|avatar)(?:清空|移除|删除)(?:掉)?$"#,
+            #"^(?:清空|移除|删除)(.+?)的(团体|组合|group|生日|birthday|颜色|color|认证|verification|简介|bio|头像|avatar)$"#,
+        ]
+        for pattern in clearPatterns {
+            if let groups = captures(pattern, in: text), groups.count >= 2 {
+                let target = cleanPhrase(groups[0])
+                if let field = optionalAliases[groups[1].lowercased()],
+                   !target.isEmpty,
+                   let quotedTarget = try? quoteValue(target) {
+                    return resultFromCommand(
+                        "editidol \(quotedTarget) \(field)=-",
+                        intent: "editidol",
+                        confidence: 0.96,
+                        message: "识别为清空 Idol 字段；执行仍需确认"
+                    )
+                }
+            }
+        }
         if let groups = captures(#"^(?:把|将)?(?:idol|偶像|爱豆)?\s*(.+?)\s*的\s*(名字|名称|name|团体|组合|group|生日|birthday|颜色|color|认证|verification|简介|bio|头像|avatar)\s*(?:修改|改|更新|设置|设)?(?:成|为|成了|到)?\s*(.+)$"#, in: text), groups.count >= 3 {
             let aliases = ["名字": "name", "名称": "name", "name": "name", "团体": "group", "组合": "group", "group": "group", "生日": "birthday", "birthday": "birthday", "颜色": "color", "color": "color", "认证": "verification", "verification": "verification", "简介": "bio", "bio": "bio", "头像": "avatar", "avatar": "avatar"]
             let target = cleanPhrase(groups[0])
@@ -798,23 +908,12 @@ private extension ChekinanaNaturalLanguageTranslator {
 
     static func ruleScanDiscard(_ text: String) -> RuleMatch? {
         let compact = replacing(#"\s+"#, in: text, with: "")
-        if let podID = firstCapture(
-            #"^(?:使用|用)(?:runpod)?pod(?:id)?[：:=]?([a-zA-Z0-9_-]{6,})(?:来)?(?:扫描|扫描选中的照片|扫描已选照片|扫描这些切|扫描这些照片|识别选中的照片)$"#,
-            in: compact
-        ) {
-            return resultFromCommand(
-                "scancheki pod=\(podID)",
-                intent: "scancheki",
-                confidence: 0.99,
-                message: "识别为使用指定 Pod 扫描已选照片；扫描结果仍需补充信息并确认"
-            )
-        }
         if fullMatch(#"(?:扫描|扫描选中的照片|扫描已选照片|扫描这些切|帮我扫描这些切|帮我记录这些切|记录这些切|创建临时cheki|创建扫描临时cheki|把选中照片变成临时cheki|识别选中的照片)"#, compact) != nil {
-            return .init(
-                command: nil,
+            return resultFromCommand(
+                "scancheki",
                 intent: "scancheki",
-                confidence: 0,
-                message: "请指定已启动的 Pod，例如“使用 Pod <pod_id> 扫描这些切”。Pod ID 只用于本次扫描，不会发送给自然语言服务。"
+                confidence: 0.96,
+                message: "识别为扫描已选照片；后端会在需要时自动启动"
             )
         }
         let patterns = [
@@ -900,8 +999,8 @@ private extension ChekinanaNaturalLanguageTranslator {
                 intent: "addcheki",
                 confidence: 0,
                 message: !values.contains(where: { $0.0 == "idol" || $0.0 == "idols" })
-                    ? "还需要一个或多个 Idol，并选择 Event 或日期。"
-                    : "还需要选择 Event 或日期。"
+                    ? "还需要一个或多个 Idol，并填写日期；Event 可选。"
+                    : "还需要填写日期；Event 可选。"
             )
         }
         let patterns = [
@@ -1006,10 +1105,20 @@ private extension ChekinanaNaturalLanguageTranslator {
            let target = try? quoteValue(cleanPhrase(value)) {
             return resultFromCommand("showcheki \(target)", intent: "showcheki", confidence: 0.97, message: "识别为查看 Cheki")
         }
+        if let groups = captures(#"^(?:把|将)?\s*(?:cheki|切己|切)\s*(.+?)\s*的\s*(idol|偶像|爱豆|event|活动|场次|日期|date)\s*(?:清空|移除|删除)(?:掉)?$"#, in: text), groups.count >= 2 {
+            let aliases = ["idol": "idols", "偶像": "idols", "爱豆": "idols", "event": "event", "活动": "event", "场次": "event", "日期": "date", "date": "date"]
+            if let field = aliases[groups[1].lowercased()],
+               let quotedTarget = try? quoteValue(cleanPhrase(groups[0])) {
+                return resultFromCommand("editcheki \(quotedTarget) \(field)=-", intent: "editcheki", confidence: 0.97, message: "识别为清空 Cheki 关联；执行仍需确认")
+            }
+        }
         if let groups = captures(#"^(?:把|将)?\s*(?:cheki|切己|切)\s*(.+?)\s*的\s*(idol|偶像|爱豆|event|活动|场次|日期|date|备注|note|用户|user|尺寸|size)\s*(?:修改|改|更新|设置|设)?(?:成|为|到)?\s*(.+)$"#, in: text), groups.count >= 3 {
             let aliases = ["idol": "idols", "偶像": "idols", "爱豆": "idols", "event": "event", "活动": "event", "场次": "event", "日期": "date", "date": "date", "备注": "note", "note": "note", "用户": "user", "user": "user", "尺寸": "size", "size": "size"]
             let target = cleanPhrase(groups[0])
             var value = cleanPhrase(groups[2])
+            if ["清空", "移除", "删除", "无", "none", "nil", "-"].contains(value.lowercased()) {
+                value = "-"
+            }
             if aliases[groups[1].lowercased()] == "idols" {
                 value = replacing(#"\s*[、，]\s*"#, in: value, with: ",")
             }

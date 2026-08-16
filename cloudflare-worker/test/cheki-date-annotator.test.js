@@ -3,17 +3,53 @@ import assert from "node:assert/strict";
 
 import {
   CHEKI_DATE_MAX_IMAGE_BYTES,
+  CHEKI_DATE_QWEN_TIMEOUT_MS,
   annotateChekiDateResponse,
   normalizeQwenDateOutput,
 } from "../src/cheki-date-annotator.js";
-import { handleRequest } from "../src/worker.js";
+import { CHEKI_DATE_PROMPT } from "../src/cheki-date-prompt.js";
+import { handleRequest as workerHandleRequest } from "../src/worker.js";
 
 const IMAGE_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
 const TEST_ENV = {
   CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
   CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-  CHEKI_DATE_RATE_LIMITER: { limit: async () => ({ success: true }) },
 };
+
+test("uses a 90-second total Qwen request-and-response deadline", () => {
+  assert.equal(CHEKI_DATE_QWEN_TIMEOUT_MS, 90_000);
+});
+
+function withMockRuntime(env, fetchImpl) {
+  return {
+    ...env,
+    SCANNER_RUNTIME: {
+      idFromName: () => "test-runtime",
+      get: () => ({
+        async fetch(request) {
+          const url = new URL(request.url);
+          url.protocol = "https:";
+          url.hostname = "testpod-8080.proxy.runpod.net";
+          url.searchParams.delete("token");
+          if (/^\/api\/result\/[^/]+\/\d+$/u.test(url.pathname)) {
+            url.searchParams.delete("date_annotation");
+          }
+          const headers = new Headers(request.headers);
+          headers.set("x-cheki-token", "testpod");
+          return fetchImpl(new Request(url.toString(), {
+            method: request.method,
+            headers,
+            redirect: "manual",
+          }));
+        },
+      }),
+    },
+  };
+}
+
+function handleRequest(request, env = {}, fetchImpl = fetch) {
+  return workerHandleRequest(request, withMockRuntime(env, fetchImpl), fetchImpl);
+}
 
 function resultRequest(path = "/api/result/task123/0?date_annotation=1", headers = {}) {
   return new Request(`https://api.chekinana.top${path}`, {
@@ -42,6 +78,292 @@ function detectedCandidate(text = "2026.07.04", bbox = [100, 700, 450, 820]) {
     Date: { bbox, text },
   };
 }
+
+function standaloneDateRequest({
+  bytes = IMAGE_BYTES,
+  mediaType = "image/png",
+  headers = {},
+  body = bytes,
+  signal,
+} = {}) {
+  return new Request("https://api.chekinana.top/api/cheki/date-annotation", {
+    method: "POST",
+    headers: {
+      "content-type": mediaType,
+      ...headers,
+    },
+    body,
+    ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+test("date prompt uses a recent-past preference only to break visually plausible ties", () => {
+  assert.match(CHEKI_DATE_PROMPT, /参考日期为 2026 年 8 月 2 日/u);
+  assert.match(CHEKI_DATE_PROMPT, /仅用于视觉平局裁决/u);
+  assert.match(CHEKI_DATE_PROMPT, /优先不晚于参考日期且距离它较近的候选/u);
+  assert.match(CHEKI_DATE_PROMPT, /2026 是可见笔画允许的合法候选时，优先转录为 2026/u);
+  assert.match(CHEKI_DATE_PROMPT, /只有可见笔画明确支持未来日期时才允许输出/u);
+  assert.match(CHEKI_DATE_PROMPT, /不确定时输出 null/u);
+});
+
+test("date prompt keeps month-day output and forbids inventing a year", () => {
+  assert.match(CHEKI_DATE_PROMPT, /不脑补年份/u);
+  assert.match(CHEKI_DATE_PROMPT, /只有月日时必须输出 `MM\.DD`/u);
+  assert.match(CHEKI_DATE_PROMPT, /不得给只有月日的图像补全年份/u);
+});
+
+for (const mediaType of ["image/jpeg", "image/png", "image/webp"]) {
+  test(`standalone date endpoint accepts ${mediaType} without RunPod`, async () => {
+    let qwenCalls = 0;
+    const response = await workerHandleRequest(standaloneDateRequest({
+      mediaType,
+      headers: {
+        authorization: "Bearer client-secret-must-not-forward",
+        cookie: "client-private=true",
+      },
+    }), TEST_ENV, async (value, init = {}) => {
+      qwenCalls += 1;
+      assert.equal(new URL(value).hostname, "qwen.test");
+      const requestHeaders = new Headers(init.headers);
+      assert.equal(requestHeaders.get("authorization"), "Bearer test-only-qwen-key");
+      assert.equal(requestHeaders.get("cookie"), null);
+      assert.doesNotMatch(init.body, /client-secret-must-not-forward|client-private/u);
+      const qwenBody = JSON.parse(init.body);
+      assert.match(
+        qwenBody.messages[1].content[0].image_url.url,
+        new RegExp(`^data:${mediaType.replace("/", "\\/")};base64,`, "u"),
+      );
+      return qwenEnvelope(detectedCandidate());
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("access-control-allow-origin"), "*");
+    assert.deepEqual(await response.json(), {
+      status: "detected",
+      text: "2026.07.04",
+      precision: "full_date",
+      bbox: [100, 700, 450, 820],
+    });
+    assert.equal(qwenCalls, 1);
+  });
+}
+
+test("standalone date endpoint returns not_detected as bounded JSON", async () => {
+  const response = await workerHandleRequest(
+    standaloneDateRequest(),
+    TEST_ENV,
+    async () => qwenEnvelope({ reasoning: "none", Date: null }),
+  );
+  assert.deepEqual(await response.json(), { status: "not_detected" });
+});
+
+test("standalone date endpoint preserves bytes across incremental Base64 blocks", async () => {
+  const bytes = Uint8Array.from(
+    { length: (3 * 0x2000) + 5 },
+    (_, index) => index % 251,
+  );
+  let qwenCalls = 0;
+  const response = await workerHandleRequest(
+    standaloneDateRequest({ bytes }),
+    TEST_ENV,
+    async (_url, init) => {
+      qwenCalls += 1;
+      const body = JSON.parse(init.body);
+      const dataURL = body.messages[1].content[0].image_url.url;
+      assert.equal(
+        dataURL,
+        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
+      );
+      return qwenEnvelope({ reasoning: "none", Date: null });
+    },
+  );
+  assert.equal(qwenCalls, 1);
+  assert.deepEqual(await response.json(), { status: "not_detected" });
+});
+
+test("standalone date endpoint rejects unsupported and declared oversized images before Qwen", async () => {
+  for (const [request, expectedError] of [
+    [standaloneDateRequest({ mediaType: "application/octet-stream" }), "unsupported_image_type"],
+    [standaloneDateRequest({
+      headers: { "content-length": String(CHEKI_DATE_MAX_IMAGE_BYTES + 1) },
+    }), "image_too_large"],
+  ]) {
+    let fetched = false;
+    const response = await workerHandleRequest(request, TEST_ENV, async () => {
+      fetched = true;
+      throw new Error("must not call Qwen");
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      status: "unavailable",
+      error: expectedError,
+    });
+    assert.equal(fetched, false);
+  }
+});
+
+test("standalone date endpoint bounds an undeclared oversized stream before Qwen", async () => {
+  let qwenCalls = 0;
+  const chunk = new Uint8Array(1024 * 1024);
+  let remaining = 17;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (remaining === 0) {
+        controller.close();
+        return;
+      }
+      remaining -= 1;
+      controller.enqueue(chunk);
+    },
+  });
+  const response = await workerHandleRequest(
+    standaloneDateRequest({ body }),
+    TEST_ENV,
+    async () => {
+      qwenCalls += 1;
+      throw new Error("must not call Qwen");
+    },
+  );
+  assert.deepEqual(await response.json(), {
+    status: "unavailable",
+    error: "image_too_large",
+  });
+  assert.equal(qwenCalls, 0);
+});
+
+test("standalone date endpoint bounds a stalled image body and cancels it", async () => {
+  let canceled = false;
+  let qwenCalls = 0;
+  const body = new ReadableStream({
+    pull() {},
+    cancel() { canceled = true; },
+  });
+  const response = await workerHandleRequest(
+    standaloneDateRequest({ body }),
+    {
+      ...TEST_ENV,
+      __TEST_CHEKI_DATE_IMAGE_TIMEOUT_MS: 5,
+    },
+    async () => {
+      qwenCalls += 1;
+      throw new Error("must not call Qwen");
+    },
+  );
+  assert.deepEqual(await response.json(), {
+    status: "unavailable",
+    error: "image_read_timeout",
+  });
+  assert.equal(canceled, true);
+  assert.equal(qwenCalls, 0);
+});
+
+test("standalone date endpoint bounds Qwen and returns only a safe failure", async () => {
+  let qwenCalls = 0;
+  const response = await workerHandleRequest(
+    standaloneDateRequest(),
+    {
+      ...TEST_ENV,
+      __TEST_CHEKI_DATE_QWEN_TIMEOUT_MS: 5,
+    },
+    async () => {
+      qwenCalls += 1;
+      return new Promise(() => {});
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "unavailable",
+    error: "qwen_timeout",
+  });
+  assert.equal(qwenCalls, 1);
+});
+
+test("client cancellation aborts an in-flight Qwen request", async () => {
+  const controller = new AbortController();
+  let qwenSignal;
+  let notifyStarted;
+  const started = new Promise((resolve) => { notifyStarted = resolve; });
+  const pending = workerHandleRequest(
+    standaloneDateRequest({ signal: controller.signal }),
+    TEST_ENV,
+    async (_url, init) => {
+      qwenSignal = init.signal;
+      notifyStarted();
+      return new Promise((resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), {
+          once: true,
+        });
+      });
+    },
+  );
+  await started;
+  assert.equal(qwenSignal.aborted, false);
+  controller.abort("client canceled");
+  const response = await pending;
+  assert.equal(qwenSignal.aborted, true);
+  assert.deepEqual(await response.json(), {
+    status: "unavailable",
+    error: "qwen_unavailable",
+  });
+});
+
+test("standalone date endpoint rejects invalid model output without echoing it", async () => {
+  const unsafeModelText = "private-model-output-must-not-leak";
+  const response = await workerHandleRequest(
+    standaloneDateRequest(),
+    TEST_ENV,
+    async () => qwenEnvelope(unsafeModelText),
+  );
+  const responseText = await response.text();
+  assert.deepEqual(JSON.parse(responseText), {
+    status: "unavailable",
+    error: "invalid_model_output",
+  });
+  assert.doesNotMatch(responseText, new RegExp(unsafeModelText, "u"));
+});
+
+test("standalone date endpoint handles method, service failure, and CORS without echoing input", async () => {
+  let fetched = false;
+  const method = await workerHandleRequest(new Request(
+    "https://api.chekinana.top/api/cheki/date-annotation",
+  ), TEST_ENV, async () => {
+    fetched = true;
+    throw new Error("must not fetch");
+  });
+  assert.equal(method.status, 405);
+  assert.deepEqual(await method.json(), {
+    status: "unavailable",
+    error: "method_not_allowed",
+  });
+
+  const unavailableResponse = await workerHandleRequest(
+    standaloneDateRequest(),
+    {},
+    async () => {
+      fetched = true;
+      throw new Error("must not fetch");
+    },
+  );
+  assert.deepEqual(await unavailableResponse.json(), {
+    status: "unavailable",
+    error: "service_unavailable",
+  });
+
+  const preflight = await workerHandleRequest(new Request(
+    "https://api.chekinana.top/api/cheki/date-annotation",
+    { method: "OPTIONS" },
+  ), {}, async () => {
+    fetched = true;
+    throw new Error("must not fetch");
+  });
+  assert.equal(preflight.status, 200);
+  assert.equal(preflight.headers.get("cache-control"), "no-store");
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.match(preflight.headers.get("access-control-allow-methods") || "", /POST/u);
+  assert.equal(fetched, false);
+});
 
 function makeProxyAndQwenFetch({
   candidate = detectedCandidate(),
@@ -285,28 +607,9 @@ for (const {
   expectedQwenCalls,
 } of [
   {
-    label: "missing rate limiter",
-    env: {
-      CHEKI_DATE_QWEN_API_KEY: "test-only-qwen-key",
-      CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-    },
-    expectedError: "rate_limit_unavailable",
-    expectedQwenCalls: 0,
-  },
-  {
-    label: "denied rate limit",
-    env: {
-      ...TEST_ENV,
-      CHEKI_DATE_RATE_LIMITER: { limit: async () => ({ success: false }) },
-    },
-    expectedError: "rate_limited",
-    expectedQwenCalls: 0,
-  },
-  {
     label: "missing Qwen key",
     env: {
       CHEKI_DATE_QWEN_BASE_URL: "https://qwen.test/compatible/v1",
-      CHEKI_DATE_RATE_LIMITER: { limit: async () => ({ success: true }) },
     },
     expectedError: "service_unavailable",
     expectedQwenCalls: 0,

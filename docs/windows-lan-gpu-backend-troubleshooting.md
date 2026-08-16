@@ -47,7 +47,10 @@ wb = 可选的白平衡开关
 ```
 
 这里上传的是输入图片，不是处理后的输出图片。输出拍立得图片不会放在
-`POST /api/process` 的响应中，而是在任务完成后通过结果路由逐张下载。
+`POST /api/process` 的响应中，而是通过结果路由逐张下载。Python 只会在一张
+PNG 的完整字节已生成后才把它加入 `status.results`；因此任务仍为
+`processing` 时，已出现在该列表中的 result ID 也可安全下载，未发布的
+ID 返回 HTTP 202。
 
 Python 接收并创建任务后，`POST /api/process` 返回的是一小段 queued JSON，
 形态如下：
@@ -127,9 +130,9 @@ CHEKINANA_SCANNER_LOCAL_UPSTREAM
 CHEKINANA_SCANNER_LOCAL_TOKEN
 ```
 
-需要日期注释时，还应确认 Qwen 配置和 `CHEKI_DATE_RATE_LIMITER` binding
-已加载。修改 `.dev.vars` 后必须重启 Wrangler；仅编辑文件不会更新已经运行
-的进程。
+需要日期注释时，还应确认 Qwen 配置已加载。日期注释没有专用的
+限频 binding。修改 `.dev.vars` 后必须重启 Wrangler；仅编辑文件不会
+更新已经运行的进程。
 
 客户端侧的忽略文件可使用以下占位形式：
 
@@ -363,14 +366,13 @@ Python:   提交 -> queued -> GPU 完成
 
 ## 12. Qwen 日期功能要单独判断
 
-Wrangler 调用 Qwen 需要本地 Qwen API key、合法的 HTTPS base URL，以及
-可用的 `CHEKI_DATE_RATE_LIMITER` binding。只确认配置加载时，不需要调用
-Qwen 接口，也不应输出任何配置值。
+Wrangler 调用 Qwen 需要本地 Qwen API key 和合法的 HTTPS base URL。
+日期注释不再依赖专用限频 binding，但仍必须通过 Scanner token 认证。
+只确认配置加载时，不需要调用 Qwen 接口，也不应输出任何配置值。
 
 常见固定错误分类：
 
 - `service_unavailable`：Qwen 本地配置缺失或不合法，请求尚未进入模型服务；
-- `rate_limit_unavailable`：限流 binding 缺失或不可用；
 - `qwen_timeout`：模型请求超时；
 - `qwen_unavailable`：模型服务不可用；
 - `invalid_model_output`：模型输出不符合约定格式。
@@ -429,7 +431,6 @@ git diff --check
 | 大图 502 且 Python 已 queued | 响应代理/传输状态 | `Expect` 清理、当前 Worker 代码、是否已重启 | 自动重试 |
 | Python done，但没有完整 ID | 提交响应丢失 | 停止重试，修复代理 | 用 8 位日志前缀轮询 |
 | 日期 `service_unavailable` | Qwen 配置 | key/base 是否已加载且格式合法 | 修改 Python |
-| 日期 `rate_limit_unavailable` | Worker binding | `CHEKI_DATE_RATE_LIMITER` | 绕过限流 |
 
 ## 15. 最终经验
 
@@ -442,4 +443,3 @@ git diff --check
 6. mock 测试验证安全契约和字节一致性，Windows 真机测试验证 workerd 的
    HTTP 状态机；二者缺一不可。
 7. 任何修复都必须保持认证、loopback 隔离、防火墙和生产路径边界。
-

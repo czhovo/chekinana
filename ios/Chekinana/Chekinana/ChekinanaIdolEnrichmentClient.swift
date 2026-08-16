@@ -1,5 +1,19 @@
 import Foundation
 
+enum ChekinanaCatalogueNetworkPolicy {
+    // The typed CFNetwork proxy constants are unavailable on iOS even though
+    // URLSessionConfiguration accepts these dictionary keys. Return a fresh
+    // bridge dictionary per session instead of sharing a non-Sendable value.
+    static func directConnectionProxyDictionary() -> [AnyHashable: Any] {
+        [
+            "HTTPEnable": false,
+            "HTTPSEnable": false,
+            "SOCKSEnable": false,
+            "ProxyAutoConfigEnable": false,
+        ]
+    }
+}
+
 enum ChekinanaIdolEnrichmentError: LocalizedError {
     case invalidEndpoint
     case network(String)
@@ -23,12 +37,13 @@ enum ChekinanaIdolEnrichmentError: LocalizedError {
     }
 }
 
-struct ChekinanaEnrichedIdol: Decodable {
+struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
     let sourceId: String
     let idolName: String
     let groupName: String?
     let color: String?
     let birthday: String?
+    let birthdayIsInvalid: Bool
     let verification: String?
     let bio: String?
     let avatarUrl: String?
@@ -59,7 +74,11 @@ struct ChekinanaEnrichedIdol: Decodable {
         idolName = try container.decode(String.self, forKey: .idolName)
         groupName = try container.decodeIfPresent(String.self, forKey: .groupName)
         color = try container.decodeIfPresent(String.self, forKey: .color)
-        birthday = try container.decodeIfPresent(String.self, forKey: .birthday)
+        let birthdayState = Self.normalizedBirthday(
+            try container.decodeIfPresent(String.self, forKey: .birthday)
+        )
+        birthday = birthdayState.value
+        birthdayIsInvalid = birthdayState.isInvalid
         verification = try container.decodeIfPresent(String.self, forKey: .verification)
         bio = try container.decodeIfPresent(String.self, forKey: .bio)
         avatarUrl = try container.decodeIfPresent(String.self, forKey: .avatarUrl)
@@ -79,19 +98,71 @@ struct ChekinanaEnrichedIdol: Decodable {
         self.idolName = idolName
         self.groupName = groupName
         self.color = color
-        self.birthday = birthday
+        let birthdayState = Self.normalizedBirthday(birthday)
+        self.birthday = birthdayState.value
+        self.birthdayIsInvalid = birthdayState.isInvalid
         self.verification = verification
         self.bio = bio
         self.avatarUrl = avatarUrl
     }
+
+    private static func normalizedBirthday(
+        _ rawValue: String?
+    ) -> (value: String?, isInvalid: Bool) {
+        let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return (nil, false) }
+        do {
+            return (try ChekinanaBirthdayValue.normalizedStorage(trimmed), false)
+        } catch {
+            // Keep the rejected source value only so its individual result can
+            // explain the problem. It can never enter confirmation or storage.
+            return (trimmed, true)
+        }
+    }
 }
 
 struct ChekinanaIdolEnrichmentClient {
+    static let requestTimeout: TimeInterval = 12
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = 15
+        configuration.waitsForConnectivity = false
+        configuration.httpMaximumConnectionsPerHost = 4
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        // Catalogue search is a public, credential-free endpoint. Keeping this
+        // direct avoids a broken system PAC from serially stalling every name;
+        // no other API/session inherits this policy.
+        configuration.connectionProxyDictionary =
+            ChekinanaCatalogueNetworkPolicy.directConnectionProxyDictionary()
+        return URLSession(configuration: configuration)
+    }()
+
+    static func request(for rawName: String) throws -> URLRequest {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        var components = URLComponents(string: "https://idol.chekinana.top/api/search/idol")
+        components?.queryItems = [
+            URLQueryItem(name: "idolName", value: name),
+            URLQueryItem(name: "limit", value: "200"),
+        ]
+        guard let url = components?.url else {
+            throw ChekinanaIdolEnrichmentError.invalidEndpoint
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = requestTimeout
+        return request
+    }
+
     func search(for rawName: String) async throws -> [ChekinanaEnrichedIdol] {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
 #if DEBUG
         let fixtureMode = ProcessInfo.processInfo.environment["CHEKINANA_IDOL_UI_STUB"]
-        if fixtureMode == "fixture" || fixtureMode == "multi_fixture" {
+        if fixtureMode == "fixture"
+            || fixtureMode == "multi_fixture"
+            || fixtureMode == "nine_fixture" {
             let sourceSuffix = name.unicodeScalars
                 .map { String(format: "%04x", $0.value) }
                 .joined(separator: "-")
@@ -105,6 +176,20 @@ struct ChekinanaIdolEnrichmentClient {
                     bio: nil,
                     avatarUrl: nil
                 )
+            if fixtureMode == "nine_fixture" {
+                return (1...9).map { index in
+                    ChekinanaEnrichedIdol(
+                        sourceId: "ui-fixture-nine-\(index)-\(sourceSuffix)",
+                        idolName: "\(name) \(index)",
+                        groupName: "UI Fixture Nine",
+                        color: "#3366CC",
+                        birthday: nil,
+                        verification: nil,
+                        bio: nil,
+                        avatarUrl: nil
+                    )
+                }
+            }
             guard fixtureMode == "multi_fixture" else { return [first] }
             return [
                 first,
@@ -121,21 +206,13 @@ struct ChekinanaIdolEnrichmentClient {
             ]
         }
 #endif
-        var components = URLComponents(string: "https://idol.chekinana.top/api/search/idol")
-        components?.queryItems = [
-            URLQueryItem(name: "idolName", value: name),
-            URLQueryItem(name: "limit", value: "200"),
-        ]
-
-        guard let url = components?.url else {
-            throw ChekinanaIdolEnrichmentError.invalidEndpoint
-        }
+        let request = try Self.request(for: name)
 
         let data: Data
         let response: URLResponse
 
         do {
-            (data, response) = try await URLSession.shared.data(from: url)
+            (data, response) = try await Self.session.data(for: request)
         } catch {
             throw ChekinanaIdolEnrichmentError.network(error.localizedDescription)
         }

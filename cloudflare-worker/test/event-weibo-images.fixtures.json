@@ -1,0 +1,136 @@
+[
+  {
+    "id": "multiple_images_preserve_order_and_deduplicate",
+    "statusPayload": {
+      "text_raw": "活动名称：多图公演<img src=\"https://wx6.sinaimg.cn/large/inline.jpg\">",
+      "user": {
+        "avatar_hd": "https://tvax1.sinaimg.cn/large/author-avatar.jpg"
+      },
+      "pic_ids": ["second", "first", "second"],
+      "pic_infos": {
+        "first": {
+          "largest": {
+            "url": "https://wx1.sinaimg.cn/large/first.jpg"
+          }
+        },
+        "second": {
+          "largest": {
+            "url": "http://wx2.sinaimg.cn/large/second.jpg"
+          }
+        }
+      },
+      "pics": [
+        {
+          "pid": "first",
+          "large": {
+            "url": "https://wx1.sinaimg.cn/large/first.jpg"
+          }
+        },
+        {
+          "large": {
+            "url": "https://wx3.sinaimg.cn/large/third.jpg"
+          }
+        },
+        {
+          "large": {
+            "url": "https://wx3.sinaimg.cn/large/third.jpg#duplicate"
+          }
+        }
+      ],
+      "mix_media_info": {
+        "items": [
+          {
+            "type": "video",
+            "data": {
+              "url": "https://wx4.sinaimg.cn/large/video-poster.jpg"
+            }
+          },
+          {
+            "type": "pic",
+            "data": {
+              "largest": {
+                "url": "https://wx4.sinaimg.cn/large/fourth.jpg"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "expected": [
+      "https://wx2.sinaimg.cn/large/second.jpg",
+      "https://wx1.sinaimg.cn/large/first.jpg",
+      "https://wx3.sinaimg.cn/large/third.jpg",
+      "https://wx4.sinaimg.cn/large/fourth.jpg",
+      "https://wx6.sinaimg.cn/large/inline.jpg"
+    ]
+  },
+  {
+    "id": "no_post_images_does_not_reuse_author_avatar",
+    "statusPayload": {
+      "text_raw": "活动名称：无图公演",
+      "user": {
+        "avatar_hd": "https://tvax2.sinaimg.cn/large/author-only.jpg"
+      }
+    },
+    "expected": []
+  },
+  {
+    "id": "malicious_and_malformed_urls_fail_open_individually",
+    "statusPayload": {
+      "text_raw": "活动名称：安全公演<img src=\"data:image/png;base64,AAAA\"><img src=\"https://wx9.sinaimg.cn/large/inline-safe.jpg\">",
+      "user": {
+        "avatar_hd": "https://tvax3.sinaimg.cn/large/not-a-post-image.jpg"
+      },
+      "pic_ids": ["bad-scheme", "bad-host", "credentials", "port"],
+      "pic_infos": {
+        "bad-scheme": {
+          "largest": {
+            "url": "javascript:alert(1)"
+          },
+          "large": {
+            "url": "https://wx7.sinaimg.cn/large/safe-fallback.jpg"
+          }
+        },
+        "bad-host": {
+          "largest": {
+            "url": "https://images.example.com/untrusted.jpg"
+          }
+        },
+        "credentials": {
+          "largest": {
+            "url": "https://user:password@wx7.sinaimg.cn/large/credentialed.jpg"
+          }
+        },
+        "port": {
+          "largest": {
+            "url": "https://wx7.sinaimg.cn:8443/large/ported.jpg"
+          }
+        }
+      },
+      "mix_media_info": {
+        "items": [
+          null,
+          {
+            "type": "pic",
+            "data": {
+              "url": "https://wx8.sinaimg.cn/large/structured-safe.jpg"
+            }
+          }
+        ]
+      },
+      "url_struct": [
+        null,
+        {
+          "pic_info": {
+            "url": "ftp://wx8.sinaimg.cn/large/not-https.jpg"
+          }
+        }
+      ]
+    },
+    "expected": [
+      "https://wx7.sinaimg.cn/large/safe-fallback.jpg",
+      "https://wx8.sinaimg.cn/large/structured-safe.jpg",
+      "https://wx9.sinaimg.cn/large/inline-safe.jpg"
+    ]
+  }
+]

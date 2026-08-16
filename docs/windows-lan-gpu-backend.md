@@ -16,6 +16,18 @@ This procedure never deploys a Worker and never redirects production. The
 Python port must remain loopback-only. The local Worker port is the only port
 opened to the private LAN.
 
+The local and production Scanner contracts are intentionally identical:
+
+- Python Backend/RunPod performs SAM3 polaroid extraction only and returns only
+  clean `polaroid` results.
+- Wrangler/Cloudflare Worker calls Qwen only for an exact single-result
+  `GET ...?date_annotation=1` request and returns date/bbox response headers.
+- The Worker never draws the bbox, modifies the result body, or stores a
+  marked-up image.
+- Encoder inference, Idol candidate selection, prototype comparison, and the
+  `unassigned` choice belong to iOS. No candidate, prototype, Pattern ID, or ink
+  result crosses this backend path.
+
 ## 1. Preconditions
 
 Use:
@@ -112,21 +124,13 @@ Do not expose port 8080 in Windows Firewall.
 
 ## 4. Configure local Wrangler secrets
 
-From the repository root, install the Worker dependencies and verify Wrangler.
-Rate Limiting bindings require Wrangler 4.36.0 or later:
+From the repository root, install the Worker dependencies and verify Wrangler:
 
 ```powershell
 Set-Location .\cloudflare-worker
 npm ci
 npx wrangler@latest --version
 ```
-
-Cloudflare currently lists Rate Limiting bindings as supported in local
-development. The checked-in `CHEKI_DATE_RATE_LIMITER` binding therefore remains
-fail-closed and is used without a weaker fallback:
-
-- <https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/>
-- <https://developers.cloudflare.com/workers/local-development/bindings-per-env/>
 
 Create `cloudflare-worker\.dev.vars`. It is ignored by Git. Use placeholders
 first; never commit real values:
@@ -179,9 +183,8 @@ Keep the backend running. In the Worker PowerShell window:
 npx wrangler@latest dev --local --ip 0.0.0.0 --port 8787
 ```
 
-Confirm Wrangler reports the three local Scanner variables, the Qwen values
-when configured, and the `CHEKI_DATE_RATE_LIMITER` binding. Stop if the limiter
-binding is absent.
+Confirm Wrangler reports the three local Scanner variables and the Qwen values
+when configured. Date annotation has no dedicated rate-limiter binding.
 
 Wrangler may listen on all interfaces; the Python backend must still listen
 only on `127.0.0.1:8080`.
@@ -264,9 +267,10 @@ if ($BackendLanProbe.TcpTestSucceeded) {
 
 In local mode the Worker removes client-supplied forwarding headers before
 calling Python. Python uses the actual loopback peer for allowlisting and upload
-rate limiting, while date annotation uses one fixed `local-scanner` limiter key.
-Rotating `Forwarded`, `X-Forwarded-For`, `X-Real-IP`, or Cloudflare-style
-headers cannot create extra local date or upload allowance.
+rate limiting. Rotating `Forwarded`, `X-Forwarded-For`, `X-Real-IP`, or
+Cloudflare-style headers cannot influence Python's client identity. Date
+annotation has no dedicated frequency limit but remains protected by the
+Scanner token.
 
 ## 8. Run a complete ScanCheki test
 
@@ -314,6 +318,11 @@ $Polaroids = @($Status.results | Where-Object { $_.type -eq "polaroid" })
 if ($Polaroids.Count -eq 0) { throw "No polaroid results returned" }
 ```
 
+Python appends a result only after its PNG bytes are complete. Any result ID
+already listed by a status response can be downloaded safely while that status
+is still `processing`; an unpublished ID returns HTTP 202. The example above
+waits for `done` only to keep the manual smoke test simple.
+
 Download every returned polaroid. Add `date_annotation=1` only when the Qwen
 values are configured:
 
@@ -340,9 +349,13 @@ foreach ($Result in $Polaroids) {
 ```
 
 Expected date outcomes are `detected`, `not_detected`, or `unavailable`. With
-valid Qwen configuration and a working local Rate Limiting binding, the Worker
-makes the same single Qwen request and returns the same date headers as
-production. It never changes the returned image bytes.
+valid Qwen configuration, the Worker makes the same single Qwen request and
+returns the same date headers as production. It never changes the returned
+image bytes.
+
+With `$EnableDateAnnotation = $false`, the download is an ordinary result
+request: the Worker must make zero Qwen calls and return no
+`X-Cheki-Date-*` headers.
 
 ## 9. Point an iOS Debug build at Wrangler
 
@@ -350,7 +363,7 @@ The iPhone and Windows machine must be on the same private LAN. In the ignored
 `ios\Chekinana\Config\Secrets.xcconfig`, set:
 
 ```xcconfig
-CHEKINANA_SCANNER_POD_ID = <same-local-scanner-token>
+CHEKINANA_LOCAL_SCANNER_TOKEN = <same-local-scanner-token>
 CHEKINANA_SCANNER_BASE_URL = http:/$()/<Windows-private-LAN-IP>:8787
 ```
 
@@ -360,6 +373,10 @@ Debug build: local HTTP is rejected outside the Debug policy, while leaving
 
 Grant the App local-network permission when iOS asks. Do not put Qwen secrets,
 the Python loopback address, or any production Pod ID into the App.
+
+`CHEKINANA_LOCAL_SCANNER_TOKEN` is the iOS Debug build setting. The Wrangler
+environment intentionally uses the distinct server-side name
+`CHEKINANA_SCANNER_LOCAL_TOKEN`; both values must match for this local session.
 
 ## 10. Stop and clean up
 
@@ -401,9 +418,6 @@ download/cache is no longer needed.
   PyTorch wheel; do not continue on an unintended CPU fallback.
 - SAM3 load failure: run from the repository root and confirm
   `.\sam3_model\facebook\sam3` exists.
-- `X-Cheki-Date-Status: unavailable` with `rate_limit_unavailable`: use
-  Wrangler 4.36.0 or newer and confirm `CHEKI_DATE_RATE_LIMITER` appears at
-  startup. Production remains fail-closed; there is no local bypass.
 - `service_unavailable`: Qwen local secrets are absent or invalid.
 - `qwen_timeout`, `qwen_unavailable`, or `invalid_model_output`: inspect only
   the fixed code and local service health; do not log model bodies or secrets.

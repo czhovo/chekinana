@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import SwiftData
 
 enum ChekinanaTypedCommandPreparation: Equatable, Sendable {
@@ -8,18 +7,21 @@ enum ChekinanaTypedCommandPreparation: Equatable, Sendable {
 }
 
 enum ChekinanaTypedCommandPreparationFailure: Equatable, Sendable {
-    case scannerNotConfigured
     case invalidScannerConfiguration
     case invalidScannerPlan
 
     var userMessage: String {
         switch self {
-        case .scannerNotConfigured:
-            "扫描服务尚未配置；未读取照片，也未发起扫描请求。"
         case .invalidScannerConfiguration:
-            "扫描服务地址配置无效；未读取照片，也未发起扫描请求。"
+            ChekinanaL10n.text(
+                "assistant.scanner.invalid_configuration",
+                fallback: "The scanner service address is invalid. No photos were read and no request was sent."
+            )
         case .invalidScannerPlan:
-            "扫描请求未通过本地安全校验；未读取照片，也未发起扫描请求。"
+            ChekinanaL10n.text(
+                "assistant.scanner.invalid_plan",
+                fallback: "The scan request failed local safety validation. No photos were read and no request was sent."
+            )
         }
     }
 }
@@ -30,93 +32,51 @@ enum ChekinanaScannerBaseURLResolution: Equatable, Sendable {
 }
 
 enum ChekinanaScannerConfiguration {
-    static let infoDictionaryKey = "ChekinanaScannerPodID"
+    // Production Scanner traffic is always routed through Cloudflare. Pod
+    // identity and runtime credentials remain exclusively server-side.
     static let baseURLInfoDictionaryKey = "ChekinanaScannerBaseURL"
     static let productionBaseURL = URL(string: "https://api.chekinana.top")!
 
     static var currentBuildAllowsInsecureLocalHTTP: Bool {
-#if DEBUG
-        true
-#else
         false
-#endif
-    }
-
-    static func configuredPodID(bundle: Bundle = .main) -> String? {
-        configuredPodID(infoDictionary: bundle.infoDictionary)
-    }
-
-    static func configuredPodID(infoDictionary: [String: Any]?) -> String? {
-        guard let rawValue = infoDictionary?[infoDictionaryKey] as? String else {
-            return nil
-        }
-        return normalizedPodID(rawValue)
     }
 
     static func configuredBaseURL(
         bundle: Bundle = .main
     ) -> ChekinanaScannerBaseURLResolution {
-        configuredBaseURL(
-            infoDictionary: bundle.infoDictionary,
-            allowsInsecureLocalHTTP: currentBuildAllowsInsecureLocalHTTP
-        )
+        _ = bundle
+        return .resolved(productionBaseURL)
     }
 
     static func configuredBaseURL(
         infoDictionary: [String: Any]?,
         allowsInsecureLocalHTTP: Bool
     ) -> ChekinanaScannerBaseURLResolution {
-        let rawValue = infoDictionary?[baseURLInfoDictionaryKey] as? String
-        return resolveBaseURL(
-            rawValue,
-            allowsInsecureLocalHTTP: allowsInsecureLocalHTTP
-        )
+        _ = infoDictionary
+        _ = allowsInsecureLocalHTTP
+        return .resolved(productionBaseURL)
     }
 
     static func resolveBaseURL(
         _ rawValue: String?,
         allowsInsecureLocalHTTP: Bool
     ) -> ChekinanaScannerBaseURLResolution {
-        guard let rawValue else {
-            return .resolved(productionBaseURL)
-        }
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, !isUnresolvedBuildSetting(value) else {
-            return .resolved(productionBaseURL)
-        }
-        guard var components = URLComponents(string: value),
-              components.user == nil,
-              components.password == nil,
-              components.query == nil,
-              components.fragment == nil,
-              components.percentEncodedPath.isEmpty || components.percentEncodedPath == "/",
-              let scheme = components.scheme?.lowercased(),
-              let host = components.host,
-              !host.isEmpty,
-              components.port.map({ (1...65_535).contains($0) }) ?? true,
-              scheme == "https"
-                || (
-                    scheme == "http"
-                    && allowsInsecureLocalHTTP
-                    && isPrivateLANHost(host)
-                ) else {
-            return .invalid
-        }
-
-        components.scheme = scheme
-        components.host = host.lowercased()
-        components.percentEncodedPath = ""
-        guard let url = components.url else {
-            return .invalid
-        }
-        return .resolved(url)
+        _ = rawValue
+        _ = allowsInsecureLocalHTTP
+        return .resolved(productionBaseURL)
     }
 
     static func prepareTypedCommands(
         _ commands: [String],
-        configuredPodID: String?,
         baseURLResolution: ChekinanaScannerBaseURLResolution = .resolved(productionBaseURL),
-        dateAnnotationEnabled: Bool = false
+        dateRecognitionEnabled: Bool = false,
+        dateBounds: ChekinanaScannerDateBounds? = nil,
+        idolRecognitionEnabled: Bool = false,
+        idolCandidateIDs: [UUID] = [],
+        includeUnassignedCandidate: Bool = true,
+        idolSimilarityThreshold: Float? = nil,
+        sleevesEnabled: Bool = false,
+        directInputEnabled: Bool = false
     ) -> ChekinanaTypedCommandPreparation {
         var prepared: [String] = []
         prepared.reserveCapacity(commands.count)
@@ -138,139 +98,66 @@ enum ChekinanaScannerConfiguration {
             guard case .resolved = baseURLResolution else {
                 return .rejected(.invalidScannerConfiguration)
             }
-            guard let podID = configuredPodID.flatMap(normalizedPodID) else {
-                return .rejected(.scannerNotConfigured)
+            var arguments = ["scancheki"]
+            if sleevesEnabled && !directInputEnabled {
+                arguments.append("sleeves=true")
             }
-            // `normalizedPodID` restricts this value to an unquoted parser-safe
-            // token. This command is internal and is never echoed to the user.
-            let annotationArgument = dateAnnotationEnabled
-                ? " date_annotation=true"
-                : ""
-            prepared.append("scancheki pod=\(podID)\(annotationArgument)")
+            if directInputEnabled {
+                arguments.append("direct=true")
+                arguments.append("scanner_size=mini")
+            }
+            if dateRecognitionEnabled {
+                guard let effectiveDateBounds = dateBounds
+                    ?? ChekinanaScannerDateBounds.recent(relativeTo: Date()) else {
+                    return .rejected(.invalidScannerPlan)
+                }
+                arguments.append("date_recognition=true")
+                arguments.append("date_scope=\(effectiveDateBounds.scope.rawValue)")
+                arguments.append(
+                    "date_from=\(ChekinanaScannerDateBounds.commandDate(effectiveDateBounds.from))"
+                )
+                arguments.append(
+                    "date_to=\(ChekinanaScannerDateBounds.commandDate(effectiveDateBounds.to))"
+                )
+            }
+            if idolRecognitionEnabled {
+                let candidateTokens = idolCandidateIDs.map {
+                    $0.uuidString.lowercased()
+                } + (includeUnassignedCandidate ? ["unassigned"] : [])
+                guard !candidateTokens.isEmpty else {
+                    return .rejected(.invalidScannerPlan)
+                }
+                arguments.append("idol_recognition=true")
+                arguments.append("candidates=\(candidateTokens.joined(separator: ","))")
+                if let idolSimilarityThreshold {
+                    arguments.append(
+                        "idol_threshold=\(String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), idolSimilarityThreshold))"
+                    )
+                }
+            }
+            prepared.append(arguments.joined(separator: " "))
         }
 
         return .ready(prepared)
     }
 
-    private static func isUnresolvedBuildSetting(_ value: String) -> Bool {
-        value.hasPrefix("$(") && value.hasSuffix(")")
+    static func isProductionProxy(_ resolution: ChekinanaScannerBaseURLResolution) -> Bool {
+        guard case .resolved(let url) = resolution else { return false }
+        return isProductionProxy(url)
     }
 
-    private static func isPrivateLANHost(_ rawHost: String) -> Bool {
-        var host = rawHost.lowercased()
-        if host.hasPrefix("["), host.hasSuffix("]") {
-            host.removeFirst()
-            host.removeLast()
-        }
-        if host.hasSuffix(".") {
-            host.removeLast()
-        }
-
-        if host == "localhost" || host.hasSuffix(".localhost") {
-            return true
-        }
-        if let octets = strictIPv4Octets(host) {
-            return octets[0] == 10
-                || octets[0] == 127
-                || (octets[0] == 169 && octets[1] == 254)
-                || (octets[0] == 172 && (16...31).contains(octets[1]))
-                || (octets[0] == 192 && octets[1] == 168)
-        }
-        if host.contains(":") {
-            return isPrivateIPv6Literal(host)
-        }
-
-        guard !resemblesLegacyIPv4Address(host),
-              isValidLocalHostname(host) else {
-            return false
-        }
-        return (!host.contains(".") && host.contains(where: \.isLetter))
-            || host.hasSuffix(".local")
+    static func isProductionProxy(_ url: URL) -> Bool {
+        guard let actual = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let production = URLComponents(
+                url: productionBaseURL,
+                resolvingAgainstBaseURL: false
+              ) else { return false }
+        return actual.scheme?.lowercased() == production.scheme?.lowercased()
+            && actual.host?.lowercased() == production.host?.lowercased()
+            && actual.port == production.port
+            && (actual.percentEncodedPath.isEmpty || actual.percentEncodedPath == "/")
     }
 
-    private static func strictIPv4Octets(_ host: String) -> [Int]? {
-        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else {
-            return nil
-        }
-        let octets = parts.compactMap { part -> Int? in
-            guard !part.isEmpty,
-                  part.utf8.allSatisfy({ (48...57).contains($0) }),
-                  part.count == 1 || part.first != "0",
-                  let value = Int(part),
-                  (0...255).contains(value) else {
-                return nil
-            }
-            return value
-        }
-        return octets.count == 4 ? octets : nil
-    }
-
-    private static func isPrivateIPv6Literal(_ host: String) -> Bool {
-        guard let address = IPv6Address(host) else {
-            return false
-        }
-        let bytes = [UInt8](address.rawValue)
-        guard bytes.count == 16 else {
-            return false
-        }
-
-        let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 }
-            && bytes.last == 1
-        let isUniqueLocal = bytes[0] & 0xfe == 0xfc
-        let isLinkLocal = bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80
-        return isLoopback || isUniqueLocal || isLinkLocal
-    }
-
-    private static func resemblesLegacyIPv4Address(_ host: String) -> Bool {
-        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard (1...4).contains(parts.count), parts.allSatisfy({ !$0.isEmpty }) else {
-            return false
-        }
-        return parts.allSatisfy { part in
-            let lowered = part.lowercased()
-            if lowered.hasPrefix("0x") {
-                let digits = lowered.dropFirst(2)
-                return !digits.isEmpty && digits.allSatisfy(\.isHexDigit)
-            }
-            return lowered.utf8.allSatisfy { (48...57).contains($0) }
-        }
-    }
-
-    private static func isValidLocalHostname(_ host: String) -> Bool {
-        guard !host.isEmpty, host.utf8.count <= 253 else {
-            return false
-        }
-        return host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
-            label in
-            guard !label.isEmpty,
-                  label.utf8.count <= 63,
-                  label.first?.isASCII == true,
-                  label.first?.isLetter == true || label.first?.isNumber == true,
-                  label.last?.isASCII == true,
-                  label.last?.isLetter == true || label.last?.isNumber == true else {
-                return false
-            }
-            return label.allSatisfy {
-                $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-")
-            }
-        }
-    }
-
-    private static func normalizedPodID(_ rawValue: String) -> String? {
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (6...128).contains(value.utf8.count),
-              value.unicodeScalars.allSatisfy({ scalar in
-                  (48...57).contains(scalar.value)
-                      || (65...90).contains(scalar.value)
-                      || (97...122).contains(scalar.value)
-                      || scalar.value == 45
-                      || scalar.value == 95
-              }) else {
-            return nil
-        }
-        return value
-    }
 }
 
 struct ChekinanaLocalChoice: Identifiable, Equatable, Sendable {
@@ -381,45 +268,45 @@ enum ChekinanaConversationMessage: Equatable, Sendable {
     var text: String {
         switch self {
         case .rejected:
-            "这项请求暂不支持，请换一种自然语言描述。"
+            ChekinanaL10n.text("assistant.error.rejected", fallback: "This request is not supported yet. Try describing it another way.")
         case .invalidPlan:
-            "没有得到可安全执行的操作，请补充对象或换一种描述。"
+            ChekinanaL10n.text("assistant.error.invalid_plan", fallback: "No safe operation was produced. Add the missing details or rephrase the request.")
         case .idolNotFound:
-            "本地没有匹配的 Idol。请先添加该 Idol，或改写名称。"
+            ChekinanaL10n.text("assistant.error.idol_not_found", fallback: "No local Idol matched. Add the Idol first or try another name.")
         case .eventNotFound:
-            "本地没有匹配的 Event。请先添加该 Event，或改用日期。"
+            ChekinanaL10n.text("assistant.error.event_not_found", fallback: "No local Event matched. Add the Event first or use a date.")
         case .localObjectChanged:
-            "刚才选择的本地对象已变化，请重新选择。"
+            ChekinanaL10n.text("assistant.error.local_changed", fallback: "The selected local item changed. Choose it again.")
         case .networkUnavailable:
-            "自然语言服务暂时不可用。已保留原输入；可以重试或取消。"
+            ChekinanaL10n.text("assistant.error.network", fallback: "The natural-language service is unavailable. Your input was preserved; retry or cancel.")
         case .cannotResolveHost:
-            "无法解析自然语言服务域名（可能是 DNS 或代理/PAC 故障）。已保留原输入；请检查当前网络后重试。"
+            ChekinanaL10n.text("assistant.error.host", fallback: "The service host could not be resolved. Your input was preserved; check the network and retry.")
         case .offline:
-            "当前无法连接网络。已保留原输入；联网后可重试。"
+            ChekinanaL10n.text("assistant.error.offline", fallback: "The device is offline. Your input was preserved; retry after reconnecting.")
         case .requestTimedOut:
-            "自然语言服务响应超时。已保留原输入；可以重试或取消。"
+            ChekinanaL10n.text("assistant.error.timeout", fallback: "The natural-language request timed out. Your input was preserved; retry or cancel.")
         case .connectionLost:
-            "请求过程中网络连接中断。已保留原输入；网络稳定后可以重试。"
+            ChekinanaL10n.text("assistant.error.connection_lost", fallback: "The connection was lost. Your input was preserved; retry when the network is stable.")
         case .serviceNotDeployed:
-            "当前公开地址尚未提供自然语言解释服务。已保留原输入；请稍后重试。"
+            ChekinanaL10n.text("assistant.error.not_deployed", fallback: "The natural-language service is not available at this address. Your input was preserved.")
         case .serviceUnavailable:
-            "自然语言服务暂时不可用。已保留原输入，请稍后重试。"
+            ChekinanaL10n.text("assistant.error.service", fallback: "The natural-language service is temporarily unavailable. Your input was preserved.")
         case .rateLimited:
-            "自然语言服务请求过于频繁。已保留原输入，请稍后重试。"
+            ChekinanaL10n.text("assistant.error.rate_limited", fallback: "Too many requests. Your input was preserved; try again later.")
         case .rateLimitUnavailable:
-            "自然语言服务暂时无法检查调用额度。已保留原输入，请稍后重试。"
+            ChekinanaL10n.text("assistant.error.rate_check", fallback: "The request allowance cannot be checked right now. Your input was preserved.")
         case .upstreamTimedOut:
-            "自然语言模型响应超时。已保留原输入，请稍后重试。"
+            ChekinanaL10n.text("assistant.error.upstream_timeout", fallback: "The language model timed out. Your input was preserved.")
         case .upstreamUnavailable:
-            "自然语言模型上游暂时不可用。已保留原输入，请稍后重试。"
+            ChekinanaL10n.text("assistant.error.upstream", fallback: "The language model is temporarily unavailable. Your input was preserved.")
         case .invalidModelOutput:
-            "自然语言模型返回了无法安全执行的结果。已保留原输入；请改写需求。"
+            ChekinanaL10n.text("assistant.error.model_output", fallback: "The model returned a result that cannot be executed safely. Rephrase the request.")
         case .invalidServiceResponse:
-            "自然语言服务返回了无法安全解析的内容，未执行任何操作。已保留原输入；请改写需求或稍后重试。"
+            ChekinanaL10n.text("assistant.error.service_response", fallback: "The service response could not be parsed safely. Nothing was executed.")
         case .requestInvalid:
-            "输入不符合自然语言服务的安全限制，未发送或执行。请缩短或改写内容。"
+            ChekinanaL10n.text("assistant.error.request", fallback: "The input did not meet safety limits and was not sent. Shorten or rephrase it.")
         case .privacyProtected:
-            "检测到可能的凭据或本地标识。为保护隐私，本次内容未发送；请移除敏感内容后重试。"
+            ChekinanaL10n.text("assistant.error.privacy", fallback: "Possible credentials or local identifiers were detected. Remove sensitive content and retry.")
         }
     }
 
@@ -470,8 +357,32 @@ enum ChekinanaConversationMessage: Equatable, Sendable {
 enum ChekinanaConversationCompileResult: Equatable, Sendable {
     case commands([String])
     case eventCandidateURL(String)
+    case eventCandidateText
     case clarification(ChekinanaConversationDraftState)
     case message(ChekinanaConversationMessage)
+}
+
+enum ChekinanaEventCandidateConversationRoute: Equatable, Sendable {
+    case weiboURL(String)
+    case text(String)
+
+    static func resolve(
+        _ result: ChekinanaConversationCompileResult,
+        originalUtterance: String?
+    ) -> Self? {
+        switch result {
+        case .eventCandidateURL(let url):
+            return .weiboURL(url)
+        case .eventCandidateText:
+            guard let originalUtterance,
+                  !originalUtterance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return .text(originalUtterance)
+        default:
+            return nil
+        }
+    }
 }
 
 @MainActor
@@ -501,8 +412,11 @@ enum ChekinanaConversationCoordinator {
             do {
                 try ChekinanaNLSchemaValidator.validateDraft(operation, missing: missing)
                 try validateSelections(selections, for: operation, modelContext: modelContext)
-                if let url = try eventCandidateURL(in: [operation]) {
-                    return .eventCandidateURL(url)
+                if operation.intent == .addevent {
+                    if let url = try eventCandidateURL(in: [operation]) {
+                        return .eventCandidateURL(url)
+                    }
+                    return .eventCandidateText
                 }
                 return .clarification(.init(
                     operation: operation,
@@ -531,8 +445,15 @@ enum ChekinanaConversationCoordinator {
                     throw ChekinanaNLClientError.invalidSchema
                 }
             }
-            if let url = try eventCandidateURL(in: operations) {
-                return .eventCandidateURL(url)
+            let addEventCount = operations.filter { $0.intent == .addevent }.count
+            if addEventCount > 0 {
+                guard operations.count == 1, addEventCount == 1 else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+                if let url = try eventCandidateURL(in: operations) {
+                    return .eventCandidateURL(url)
+                }
+                return .eventCandidateText
             }
             if operations.count > 1, selections.hasLocalValues {
                 throw ChekinanaNLClientError.invalidSchema
@@ -601,9 +522,12 @@ enum ChekinanaConversationCoordinator {
     }
 
     static func idolChoices(modelContext: ModelContext) -> [ChekinanaLocalChoice] {
-        ((try? modelContext.fetch(FetchDescriptor<Idol>(
+        let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+        return ((try? modelContext.fetch(FetchDescriptor<Idol>(
             sortBy: [SortDescriptor(\.createdAt, order: .forward)]
-        ))) ?? []).map(choice(for:))
+        ))) ?? []).filter {
+            ChekinanaVisibilityPolicy.includesIdol($0.id, hiddenIDs: hiddenIDs)
+        }.map(choice(for:))
     }
 
     static func eventChoices(modelContext: ModelContext) -> [ChekinanaLocalChoice] {
@@ -625,6 +549,8 @@ enum ChekinanaConversationCoordinator {
             rawCodes = [card.confirmationCode].compactMap { $0 }
         case .idolCards(let cards):
             rawCodes = cards.compactMap(\.confirmationCode)
+        case .idolCardsWithNotice(let cards, _):
+            rawCodes = cards.compactMap(\.confirmationCode)
         case .eventCard(let card):
             rawCodes = [card.confirmationCode].compactMap { $0 }
         case .eventCards(let cards):
@@ -635,7 +561,7 @@ enum ChekinanaConversationCoordinator {
             rawCodes = [confirmationCode]
         case .text:
             rawCodes = []
-        case .chekiAdded, .chekiScanned, .chekiScannedCards,
+        case .chekiAdded, .chekiScanned, .chekiScannedCards, .shellAction,
              .idolSections, .requestAddChekiPhoto, .clearTranscript:
             rawCodes = []
         }
@@ -686,8 +612,50 @@ private extension ChekinanaConversationCoordinator {
         var command: String
 
         switch operation.intent {
+        case .navigate:
+            command = "navigate \(try quote(required(slots.destination)))"
+            if let date = slots.date { command += " date=\(date)" }
+        case .openScan:
+            command = "openscan"
+            if let value = slots.recognizeDate { command += " recognize_date=\(value)" }
+            if let value = slots.recognizeIdol { command += " recognize_idol=\(value)" }
+            if let value = slots.includesUnassigned { command += " includes_unassigned=\(value)" }
+            if let values = slots.candidateRefs {
+                let ids = try values.map {
+                    try resolveIdol($0, overrides: selections.idolOverrides, modelContext: modelContext)
+                }
+                command += " candidate_refs=\(ids.map(shortID).joined(separator: ","))"
+            }
+            for (key, value) in [("fixed_date", slots.fixedDate), ("date_from", slots.dateFrom), ("date_to", slots.dateTo)] where value != nil { command += " \(key)=\(value!)" }
         case .addidol:
             command = "addidol \(try quote(required(slots.name)))"
+        case .editidol:
+            let idolID = try resolveIdol(
+                required(slots.target),
+                overrides: selections.idolOverrides,
+                modelContext: modelContext
+            )
+            command = "editidol \(shortID(idolID))"
+            let fields: [(String, String?)] = [
+                ("name", slots.name),
+                ("group", slots.group),
+                ("birthday", slots.birthday),
+                ("color", slots.color),
+                ("verification", slots.verification),
+                ("bio", slots.bio),
+                ("avatar", slots.avatar),
+            ]
+            for (field, value) in fields {
+                if let value {
+                    command += " \(field)=\(try quote(value))"
+                }
+            }
+            if let clear = slots.clearFields {
+                command += " clear_fields=\(clear.joined(separator: ","))"
+            }
+        case .deleteidol, .favoriteidol:
+            let idolID = try resolveIdol(required(slots.target), overrides: selections.idolOverrides, modelContext: modelContext)
+            command = operation.intent == .deleteidol ? "deleteidol \(shortID(idolID))" : "favoriteidol \(shortID(idolID)) favorite=\(slots.favorite!)"
         case .addevent:
             let eventDate = selections.selectedDate ?? slots.date
             let name = try required(slots.name)
@@ -697,6 +665,14 @@ private extension ChekinanaConversationCoordinator {
             } else {
                 command = "addevent \(try quote(name)) date=\(try quote(date))"
             }
+        case .editevent, .deleteevent:
+            let eventID = try resolveEvent(required(slots.target), overrides: selections.eventOverrides, modelContext: modelContext)
+            if operation.intent == .deleteevent { command = "deleteevent \(shortID(eventID))" }
+            else {
+                command = "editevent \(shortID(eventID))"
+                for (key, value) in [("name", slots.name), ("date", slots.date), ("city", slots.city), ("livehouse", slots.livehouse), ("price", slots.price), ("url", slots.url), ("ticket_url", slots.ticketURL), ("note", slots.note)] where value != nil { command += " \(key)=\(try quote(value!))" }
+                if let clear = slots.clearFields { command += " clear_fields=\(clear.joined(separator: ","))" }
+            }
         case .listidol:
             command = "listidol"
         case .listevent:
@@ -704,30 +680,41 @@ private extension ChekinanaConversationCoordinator {
         case .scancheki:
             command = "scancheki"
         case .addcheki, .addscancheki:
-            let idolIDs = try resolvedIdolIDs(
-                slots.idols,
-                selections: selections,
-                modelContext: modelContext
-            )
-            let idolValue = idolIDs.map(shortID).joined(separator: ",")
             if operation.intent == .addscancheki {
                 command = "addscancheki \(try quote(temporarySelection(slots.temporary, selections: selections)))"
             } else {
                 command = "addcheki"
             }
-            command += " idols=\(idolValue)"
-            if let eventID = try resolvedEventID(slots.event, selections: selections, modelContext: modelContext) {
-                guard slots.date == nil, selections.selectedDate == nil else {
-                    throw ChekinanaNLClientError.invalidSchema
-                }
+            if slots.idols?.isEmpty == false
+                || !selections.selectedIdolIDs.isEmpty {
+                let idolIDs = try resolvedIdolIDs(
+                    slots.idols,
+                    selections: selections,
+                    modelContext: modelContext
+                )
+                let idolValue = idolIDs.map(shortID).joined(separator: ",")
+                command += " idols=\(idolValue)"
+            }
+            let eventID = try resolvedEventID(
+                slots.event,
+                selections: selections,
+                modelContext: modelContext
+            )
+            if let eventID {
                 command += " event=\(shortID(eventID))"
-            } else if let date = selections.selectedDate ?? slots.date {
+            }
+            var requiredDate = selections.selectedDate ?? slots.date
+            if requiredDate == nil, let eventID {
+                let events = try modelContext.fetch(FetchDescriptor<Event>())
+                requiredDate = events.first(where: { $0.id == eventID })?
+                    .date
+                    .map(calendarDateString)
+            }
+            if let date = requiredDate {
                 guard ChekinanaNLSchemaValidator.isCalendarDate(date) else {
                     throw ChekinanaNLClientError.invalidSchema
                 }
                 command += " date=\(date)"
-            } else {
-                throw ChekinanaNLClientError.invalidSchema
             }
             if let user = slots.user { command += " user=\(user)" }
             if let size = slots.size { command += " size=\(size)" }
@@ -758,7 +745,10 @@ private extension ChekinanaConversationCoordinator {
             let target = try required(slots.target)
             if let selectedChekiID = selections.selectedChekiID,
                ChekinanaSelectedChekiLanguage.referencesSelectedCheki(target) {
-                let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? []).map(\.id))
+                let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+                let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
+                    .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+                    .map(\.id))
                 guard available.contains(selectedChekiID) else {
                     throw ResolutionError.staleLocalSelection
                 }
@@ -766,6 +756,40 @@ private extension ChekinanaConversationCoordinator {
             } else {
                 command = "showcheki \(try quote(target))"
             }
+        case .editcheki, .deletecheki:
+            let rawTarget = try required(slots.target)
+            let resolvedTarget: String
+            if let selectedChekiID = selections.selectedChekiID,
+               ChekinanaSelectedChekiLanguage.referencesSelectedCheki(rawTarget) {
+                let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+                let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
+                    .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+                    .map(\.id))
+                guard available.contains(selectedChekiID) else {
+                    throw ResolutionError.staleLocalSelection
+                }
+                resolvedTarget = shortID(selectedChekiID)
+            } else {
+                resolvedTarget = rawTarget
+            }
+            command = operation.intent == .deletecheki
+                ? "deletecheki \(try quote(resolvedTarget))"
+                : "editrecord cheki target=\(try quote(resolvedTarget))\(try recordPatchArguments(slots, selections: selections, modelContext: modelContext))"
+        case .listrecord:
+            command = "listrecord"
+            if let type = slots.recordType { command += " \(type)" }
+            command += try recordFilterArguments(slots, selections: selections, modelContext: modelContext)
+        case .showrecord:
+            let target = try resolvedRecordTarget(slots, selections: selections, modelContext: modelContext)
+            command = "showrecord \(try quote(required(slots.recordType))) target=\(try quote(target))"
+        case .addrecord:
+            command = "addrecord \(try quote(required(slots.recordType)))\(try recordPatchArguments(slots, selections: selections, modelContext: modelContext))"
+        case .editrecord:
+            let target = try resolvedRecordTarget(slots, selections: selections, modelContext: modelContext)
+            command = "editrecord \(try quote(required(slots.recordType))) target=\(try quote(target))\(try recordPatchArguments(slots, selections: selections, modelContext: modelContext))"
+        case .deleterecord:
+            let target = try resolvedRecordTarget(slots, selections: selections, modelContext: modelContext)
+            command = "deleterecord \(try quote(required(slots.recordType))) target=\(try quote(target))"
         }
 
         // The typed-plan schema has already validated that `scancheki` has no
@@ -774,13 +798,68 @@ private extension ChekinanaConversationCoordinator {
         if operation.intent == .scancheki {
             return command
         }
-        let translation = ChekinanaNaturalLanguageTranslator.translate(command)
-        guard !translation.needsClarification,
-              translation.source == .passthrough,
-              let canonical = translation.command else {
-            throw ChekinanaNLClientError.invalidSchema
+        return command
+    }
+
+    static func recordPatchArguments(
+        _ slots: ChekinanaNLSlots,
+        selections: ChekinanaConversationSelections,
+        modelContext: ModelContext
+    ) throws -> String {
+        var result = ""
+        if let idols = slots.idols {
+            let ids = try idols.map { try resolveIdol($0, overrides: selections.idolOverrides, modelContext: modelContext) }
+            result += " idols=\(ids.map(shortID).joined(separator: ","))"
         }
-        return canonical
+        if let event = slots.event {
+            let id = try resolveEvent(event, overrides: selections.eventOverrides, modelContext: modelContext)
+            result += " event=\(shortID(id))"
+        }
+        for (key, value) in [("date", slots.date), ("note", slots.note), ("size", slots.size)] where value != nil { result += " \(key)=\(try quote(value!))" }
+        if let user = slots.user { result += " user=\(user)" }
+        if let idx = slots.idx { result += " idx=\(idx)" }
+        if let favorite = slots.favorite { result += " favorite=\(favorite)" }
+        if let clear = slots.clearFields { result += " clear_fields=\(try quote(clear.joined(separator: ",")))" }
+        return result
+    }
+
+    static func recordFilterArguments(
+        _ slots: ChekinanaNLSlots,
+        selections: ChekinanaConversationSelections,
+        modelContext: ModelContext
+    ) throws -> String {
+        var result = ""
+        if let idols = slots.idols {
+            let ids = try idols.map { try resolveIdol($0, overrides: selections.idolOverrides, modelContext: modelContext) }
+            result += " idols=\(ids.map(shortID).joined(separator: ","))"
+        }
+        if let event = slots.event {
+            let id = try resolveEvent(event, overrides: selections.eventOverrides, modelContext: modelContext)
+            result += " event=\(shortID(id))"
+        }
+        for (key, value) in [("date", slots.date), ("size", slots.size)] where value != nil { result += " \(key)=\(try quote(value!))" }
+        if let idx = slots.idx { result += " idx=\(idx)" }
+        if let favorite = slots.favorite { result += " favorite=\(favorite)" }
+        return result
+    }
+
+    static func resolvedRecordTarget(
+        _ slots: ChekinanaNLSlots,
+        selections: ChekinanaConversationSelections,
+        modelContext: ModelContext
+    ) throws -> String {
+        let target = try required(slots.target)
+        guard slots.recordType == "cheki",
+              let selected = selections.selectedChekiID,
+              ChekinanaSelectedChekiLanguage.referencesSelectedCheki(target) else {
+            return target
+        }
+        let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+        let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
+            .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+            .map(\.id))
+        guard available.contains(selected) else { throw ResolutionError.staleLocalSelection }
+        return shortID(selected)
     }
 
     static func resolvedIdolIDs(
@@ -790,7 +869,10 @@ private extension ChekinanaConversationCoordinator {
     ) throws -> [UUID] {
         let ids: [UUID]
         if !selections.selectedIdolIDs.isEmpty {
-            let available = Set(((try? modelContext.fetch(FetchDescriptor<Idol>())) ?? []).map(\.id))
+            let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+            let available = Set(((try? modelContext.fetch(FetchDescriptor<Idol>())) ?? [])
+                .filter { ChekinanaVisibilityPolicy.includesIdol($0.id, hiddenIDs: hiddenIDs) }
+                .map(\.id))
             guard selections.selectedIdolIDs.allSatisfy(available.contains) else {
                 throw ResolutionError.staleLocalSelection
             }
@@ -825,6 +907,10 @@ private extension ChekinanaConversationCoordinator {
         return try resolveEvent(rawValue, overrides: selections.eventOverrides, modelContext: modelContext)
     }
 
+    static func calendarDateString(_ date: Date) -> String {
+        ChekinanaDateOnly.string(date)
+    }
+
     static func resolveIdol(
         _ query: String,
         overrides: [String: UUID],
@@ -832,7 +918,12 @@ private extension ChekinanaConversationCoordinator {
     ) throws -> UUID {
         let values = try modelContext.fetch(FetchDescriptor<Idol>(
             sortBy: [SortDescriptor(\.createdAt, order: .forward)]
-        ))
+        )).filter {
+            ChekinanaVisibilityPolicy.includesIdol(
+                $0.id,
+                hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+            )
+        }
         if let id = overrides[query] {
             guard values.contains(where: { $0.id == id }) else {
                 throw ResolutionError.staleLocalSelection
@@ -890,7 +981,7 @@ private extension ChekinanaConversationCoordinator {
     }
 
     static func choice(for event: Event) -> ChekinanaLocalChoice {
-        let date = event.date.map { ChekinanaNLInterpretClient.localDateString($0) }
+        let date = event.date.map(ChekinanaDateOnly.string)
         return .init(id: event.id, title: event.name, subtitle: date)
     }
 
@@ -902,6 +993,7 @@ private extension ChekinanaConversationCoordinator {
         if !selections.selectedTemporaryIDs.isEmpty {
             return selections.selectedTemporaryIDs.map(shortID).joined(separator: ",")
         }
+        guard rawValue != nil else { return "all" }
         let value = try required(rawValue)
         if ["这些", "全部", "所有", "all"].contains(value.lowercased()) { return "all" }
         let parts = value.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
@@ -987,7 +1079,7 @@ private extension ChekinanaConversationCoordinator {
         }
 
         if let selectedEventID = selections.selectedEventID {
-            guard isChekiAdd, slots.date == nil else {
+            guard isChekiAdd else {
                 throw ChekinanaNLClientError.invalidSchema
             }
             if let rawEvent = slots.event {
@@ -1003,7 +1095,7 @@ private extension ChekinanaConversationCoordinator {
         }
 
         if let selectedDate = selections.selectedDate {
-            guard isChekiAdd, slots.event == nil else {
+            guard isChekiAdd else {
                 throw ChekinanaNLClientError.invalidSchema
             }
             if let date = slots.date, date != selectedDate {

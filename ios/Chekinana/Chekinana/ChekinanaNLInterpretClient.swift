@@ -1,8 +1,15 @@
 import Foundation
 
 enum ChekinanaNLIntent: String, Codable, CaseIterable, Sendable {
+    case navigate
+    case openScan = "open_scan"
     case addidol
+    case editidol
+    case deleteidol
+    case favoriteidol
     case addevent
+    case editevent
+    case deleteevent
     case listidol
     case listevent
     case scancheki
@@ -12,6 +19,13 @@ enum ChekinanaNLIntent: String, Codable, CaseIterable, Sendable {
     case showidol
     case showevent
     case showcheki
+    case editcheki
+    case deletecheki
+    case listrecord
+    case showrecord
+    case addrecord
+    case editrecord
+    case deleterecord
 }
 
 enum ChekinanaNLMissing: String, Codable, CaseIterable, Sendable {
@@ -34,6 +48,28 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
     var note: String?
     var temporary: String?
     var target: String?
+    var group: String?
+    var birthday: String?
+    var color: String?
+    var verification: String?
+    var bio: String?
+    var avatar: String?
+    var destination: String?
+    var recognizeDate: Bool?
+    var recognizeIdol: Bool?
+    var includesUnassigned: Bool?
+    var candidateRefs: [String]?
+    var fixedDate: String?
+    var dateFrom: String?
+    var dateTo: String?
+    var favorite: Bool?
+    var idx: Int?
+    var recordType: String?
+    var clearFields: [String]?
+    var city: String?
+    var livehouse: String?
+    var price: String?
+    var ticketURL: String?
 
     init(
         name: String? = nil,
@@ -46,7 +82,29 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         size: String? = nil,
         note: String? = nil,
         temporary: String? = nil,
-        target: String? = nil
+        target: String? = nil,
+        group: String? = nil,
+        birthday: String? = nil,
+        color: String? = nil,
+        verification: String? = nil,
+        bio: String? = nil,
+        avatar: String? = nil,
+        destination: String? = nil,
+        recognizeDate: Bool? = nil,
+        recognizeIdol: Bool? = nil,
+        includesUnassigned: Bool? = nil,
+        candidateRefs: [String]? = nil,
+        fixedDate: String? = nil,
+        dateFrom: String? = nil,
+        dateTo: String? = nil,
+        favorite: Bool? = nil,
+        idx: Int? = nil,
+        recordType: String? = nil,
+        clearFields: [String]? = nil,
+        city: String? = nil,
+        livehouse: String? = nil,
+        price: String? = nil,
+        ticketURL: String? = nil
     ) {
         self.name = name
         self.url = url
@@ -59,6 +117,28 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         self.note = note
         self.temporary = temporary
         self.target = target
+        self.group = group
+        self.birthday = birthday
+        self.color = color
+        self.verification = verification
+        self.bio = bio
+        self.avatar = avatar
+        self.destination = destination
+        self.recognizeDate = recognizeDate
+        self.recognizeIdol = recognizeIdol
+        self.includesUnassigned = includesUnassigned
+        self.candidateRefs = candidateRefs
+        self.fixedDate = fixedDate
+        self.dateFrom = dateFrom
+        self.dateTo = dateTo
+        self.favorite = favorite
+        self.idx = idx
+        self.recordType = recordType
+        self.clearFields = clearFields
+        self.city = city
+        self.livehouse = livehouse
+        self.price = price
+        self.ticketURL = ticketURL
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -73,6 +153,28 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         case note
         case temporary
         case target
+        case group
+        case birthday
+        case color
+        case verification
+        case bio
+        case avatar
+        case destination
+        case recognizeDate = "recognize_date"
+        case recognizeIdol = "recognize_idol"
+        case includesUnassigned = "includes_unassigned"
+        case candidateRefs = "candidate_refs"
+        case fixedDate = "fixed_date"
+        case dateFrom = "date_from"
+        case dateTo = "date_to"
+        case favorite
+        case idx
+        case recordType = "record_type"
+        case clearFields = "clear_fields"
+        case city
+        case livehouse
+        case price
+        case ticketURL = "ticket_url"
     }
 
     init(from decoder: Decoder) throws {
@@ -92,6 +194,28 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         note = try container.decodeIfPresent(String.self, forKey: .note)
         temporary = try container.decodeIfPresent(String.self, forKey: .temporary)
         target = try container.decodeIfPresent(String.self, forKey: .target)
+        group = try container.decodeIfPresent(String.self, forKey: .group)
+        birthday = try container.decodeIfPresent(String.self, forKey: .birthday)
+        color = try container.decodeIfPresent(String.self, forKey: .color)
+        verification = try container.decodeIfPresent(String.self, forKey: .verification)
+        bio = try container.decodeIfPresent(String.self, forKey: .bio)
+        avatar = try container.decodeIfPresent(String.self, forKey: .avatar)
+        destination = try container.decodeIfPresent(String.self, forKey: .destination)
+        recognizeDate = try container.decodeIfPresent(Bool.self, forKey: .recognizeDate)
+        recognizeIdol = try container.decodeIfPresent(Bool.self, forKey: .recognizeIdol)
+        includesUnassigned = try container.decodeIfPresent(Bool.self, forKey: .includesUnassigned)
+        candidateRefs = try container.decodeIfPresent([String].self, forKey: .candidateRefs)
+        fixedDate = try container.decodeIfPresent(String.self, forKey: .fixedDate)
+        dateFrom = try container.decodeIfPresent(String.self, forKey: .dateFrom)
+        dateTo = try container.decodeIfPresent(String.self, forKey: .dateTo)
+        favorite = try container.decodeIfPresent(Bool.self, forKey: .favorite)
+        idx = try container.decodeIfPresent(Int.self, forKey: .idx)
+        recordType = try container.decodeIfPresent(String.self, forKey: .recordType)
+        clearFields = try container.decodeIfPresent([String].self, forKey: .clearFields)
+        city = try container.decodeIfPresent(String.self, forKey: .city)
+        livehouse = try container.decodeIfPresent(String.self, forKey: .livehouse)
+        price = try container.decodeIfPresent(String.self, forKey: .price)
+        ticketURL = try container.decodeIfPresent(String.self, forKey: .ticketURL)
     }
 
     var presentKeys: Set<String> {
@@ -107,6 +231,28 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         if note != nil { result.insert("note") }
         if temporary != nil { result.insert("temporary") }
         if target != nil { result.insert("target") }
+        if group != nil { result.insert("group") }
+        if birthday != nil { result.insert("birthday") }
+        if color != nil { result.insert("color") }
+        if verification != nil { result.insert("verification") }
+        if bio != nil { result.insert("bio") }
+        if avatar != nil { result.insert("avatar") }
+        if destination != nil { result.insert("destination") }
+        if recognizeDate != nil { result.insert("recognize_date") }
+        if recognizeIdol != nil { result.insert("recognize_idol") }
+        if includesUnassigned != nil { result.insert("includes_unassigned") }
+        if candidateRefs != nil { result.insert("candidate_refs") }
+        if fixedDate != nil { result.insert("fixed_date") }
+        if dateFrom != nil { result.insert("date_from") }
+        if dateTo != nil { result.insert("date_to") }
+        if favorite != nil { result.insert("favorite") }
+        if idx != nil { result.insert("idx") }
+        if recordType != nil { result.insert("record_type") }
+        if clearFields != nil { result.insert("clear_fields") }
+        if city != nil { result.insert("city") }
+        if livehouse != nil { result.insert("livehouse") }
+        if price != nil { result.insert("price") }
+        if ticketURL != nil { result.insert("ticket_url") }
         return result
     }
 }
@@ -280,27 +426,27 @@ enum ChekinanaNLClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidRequest:
-            "invalid natural-language request"
+            ChekinanaL10n.text("assistant.client.invalid_request", fallback: "Invalid natural-language request")
         case .sensitiveInput:
-            "natural-language request contains sensitive input"
+            ChekinanaL10n.text("assistant.client.sensitive", fallback: "The request contains sensitive input")
         case .cannotFindHost:
-            "natural-language service host could not be resolved"
+            ChekinanaL10n.text("assistant.client.host", fallback: "The service host could not be resolved")
         case .notConnectedToInternet:
-            "device is not connected to the internet"
+            ChekinanaL10n.text("assistant.client.offline", fallback: "The device is not connected to the internet")
         case .timedOut:
-            "natural-language request timed out"
+            ChekinanaL10n.text("assistant.client.timeout", fallback: "The natural-language request timed out")
         case .networkConnectionLost:
-            "natural-language network connection was lost"
+            ChekinanaL10n.text("assistant.client.connection_lost", fallback: "The network connection was lost")
         case .cancelled:
-            "natural-language request was cancelled"
+            ChekinanaL10n.text("assistant.client.cancelled", fallback: "The natural-language request was cancelled")
         case .invalidHTTPStatus(let status):
-            "natural-language service returned HTTP \(status)"
+            ChekinanaL10n.format("assistant.client.http", fallback: "The service returned HTTP %lld", Int64(status))
         case .serviceRejected(let code, let status):
-            "natural-language service rejected the request with \(code) (HTTP \(status))"
+            ChekinanaL10n.format("assistant.client.rejected", fallback: "The service rejected the request with %1$@ (HTTP %2$lld)", code, Int64(status))
         case .responseTooLarge:
-            "natural-language response exceeded the size limit"
+            ChekinanaL10n.text("assistant.client.too_large", fallback: "The service response exceeded the size limit")
         case .invalidSchema:
-            "natural-language service returned an invalid schema"
+            ChekinanaL10n.text("assistant.client.schema", fallback: "The service returned an invalid response")
         }
     }
 }
@@ -400,6 +546,11 @@ struct ChekinanaNLInterpretClient: Sendable {
             configuration.urlCache = nil
             configuration.httpCookieStorage = nil
             configuration.httpShouldSetCookies = false
+            // The production Worker is public and credential-free. Bypass a
+            // broken system PAC so UI submission does not inherit PAC/DNS
+            // evaluation stalls reported by CFNetwork.
+            configuration.connectionProxyDictionary =
+                ChekinanaCatalogueNetworkPolicy.directConnectionProxyDictionary()
             self.session = URLSession(configuration: configuration)
         }
     }
@@ -535,13 +686,11 @@ struct ChekinanaNLInterpretClient: Sendable {
     }
 
     static func localDateString(_ date: Date = Date(), calendar: Calendar = .current) -> String {
-        let components = calendar.dateComponents([.year, .month, .day], from: date)
-        return String(
-            format: "%04d-%02d-%02d",
-            components.year ?? 0,
-            components.month ?? 0,
-            components.day ?? 0
-        )
+        guard let canonical = ChekinanaDateOnly.canonicalDate(
+            from: date,
+            displayedIn: calendar
+        ) else { return "0000-00-00" }
+        return ChekinanaDateOnly.string(canonical)
     }
 }
 
@@ -689,6 +838,17 @@ private actor ChekinanaNLDebugStub {
         switch parsed.name {
         case "addidol":
             return .init(intent: .addidol, slots: .init(name: parsed.target))
+        case "editidol":
+            return .init(intent: .editidol, slots: .init(
+                name: arguments["name"],
+                target: parsed.target,
+                group: arguments["group"],
+                birthday: arguments["birthday"],
+                color: arguments["color"],
+                verification: arguments["verification"],
+                bio: arguments["bio"],
+                avatar: arguments["avatar"] ?? arguments["avatar_url"]
+            ))
         case "addevent":
             let target = parsed.target
             let isURL = target?.range(
@@ -801,7 +961,13 @@ enum ChekinanaNLSchemaValidator {
               (before.size == nil || before.size == after.size),
               (before.note == nil || before.note == after.note),
               (before.temporary == nil || before.temporary == after.temporary),
-              (before.target == nil || before.target == after.target) else {
+              (before.target == nil || before.target == after.target),
+              (before.group == nil || before.group == after.group),
+              (before.birthday == nil || before.birthday == after.birthday),
+              (before.color == nil || before.color == after.color),
+              (before.verification == nil || before.verification == after.verification),
+              (before.bio == nil || before.bio == after.bio),
+              (before.avatar == nil || before.avatar == after.avatar) else {
             throw ChekinanaNLClientError.invalidSchema
         }
 
@@ -827,15 +993,8 @@ enum ChekinanaNLSchemaValidator {
     }
 
     static func validatePlan(_ operations: [ChekinanaNLOperation]) throws {
-        guard (1...5).contains(operations.count) else {
+        guard (1...50).contains(operations.count) else {
             throw ChekinanaNLClientError.invalidSchema
-        }
-        if operations.count > 1 {
-            let intents = Set(operations.map(\.intent))
-            guard intents.count == 1,
-                  intents.first == .addidol || intents.first == .addevent else {
-                throw ChekinanaNLClientError.invalidSchema
-            }
         }
         try operations.forEach { try validateOperation($0, allowingPartial: false) }
     }
@@ -856,22 +1015,19 @@ enum ChekinanaNLSchemaValidator {
         switch operation.intent {
         case .addidol:
             return slots.name == nil ? [.idol] : []
+        case .editidol, .deleteidol, .favoriteidol, .editevent, .deleteevent,
+             .editcheki, .deletecheki, .navigate, .openScan, .listrecord,
+             .showrecord, .addrecord, .editrecord, .deleterecord:
+            return []
         case .addevent:
             var missing: [ChekinanaNLMissing] = []
             if slots.name == nil { missing.append(.eventName) }
             if slots.date == nil { missing.append(.date) }
             return missing
         case .addcheki:
-            var missing: [ChekinanaNLMissing] = []
-            if slots.idols?.isEmpty != false { missing.append(.idol) }
-            if slots.event == nil, slots.date == nil { missing.append(.eventOrDate) }
-            return missing
+            return []
         case .addscancheki:
-            var missing: [ChekinanaNLMissing] = []
-            if slots.temporary == nil { missing.append(.temporaryCheki) }
-            if slots.idols?.isEmpty != false { missing.append(.idol) }
-            if slots.event == nil, slots.date == nil { missing.append(.eventOrDate) }
-            return missing
+            return []
         case .listidol, .listevent, .scancheki, .listcheki, .showidol, .showevent, .showcheki:
             return []
         }
@@ -881,10 +1037,24 @@ enum ChekinanaNLSchemaValidator {
         let slots = operation.slots
         let allowed: Set<String>
         switch operation.intent {
+        case .navigate:
+            allowed = ["destination", "date"]
+        case .openScan:
+            allowed = ["recognize_date", "recognize_idol", "includes_unassigned", "candidate_refs", "fixed_date", "date_from", "date_to"]
         case .addidol:
             allowed = ["name"]
+        case .editidol:
+            allowed = ["target", "name", "group", "birthday", "color", "verification", "bio", "avatar", "clear_fields"]
+        case .deleteidol:
+            allowed = ["target"]
+        case .favoriteidol:
+            allowed = ["target", "favorite"]
         case .addevent:
             allowed = ["url", "name", "date"]
+        case .editevent:
+            allowed = ["target", "name", "date", "city", "livehouse", "price", "url", "ticket_url", "note", "clear_fields"]
+        case .deleteevent:
+            allowed = ["target"]
         case .listidol, .listevent, .scancheki:
             allowed = []
         case .addcheki:
@@ -895,6 +1065,18 @@ enum ChekinanaNLSchemaValidator {
             allowed = ["idol", "event", "date"]
         case .showidol, .showevent, .showcheki:
             allowed = ["target"]
+        case .editcheki:
+            allowed = ["target", "idols", "event", "date", "idx", "user", "note", "favorite", "size", "clear_fields"]
+        case .deletecheki:
+            allowed = ["target"]
+        case .listrecord:
+            allowed = ["record_type", "idols", "event", "date", "idx", "favorite", "size"]
+        case .showrecord, .deleterecord:
+            allowed = ["record_type", "target"]
+        case .addrecord:
+            allowed = ["record_type", "idols", "event", "date", "idx", "note", "favorite", "size"]
+        case .editrecord:
+            allowed = ["record_type", "target", "idols", "event", "date", "idx", "note", "favorite", "size", "clear_fields"]
         }
         guard slots.presentKeys.isSubset(of: allowed) else {
             throw ChekinanaNLClientError.invalidSchema
@@ -918,56 +1100,163 @@ enum ChekinanaNLSchemaValidator {
         if let size = slots.size, !["mini", "wide", "else", "?"].contains(size) {
             throw ChekinanaNLClientError.invalidSchema
         }
-        if slots.event != nil, slots.date != nil {
-            throw ChekinanaNLClientError.invalidSchema
-        }
+        try validateExtendedOperation(operation)
         guard !allowingPartial else { return }
 
         switch operation.intent {
+        case .navigate:
+            try require(slots.destination)
+        case .openScan:
+            break
         case .addidol:
             try require(slots.name)
+        case .editidol:
+            try require(slots.target)
+            guard [slots.name, slots.group, slots.birthday, slots.color,
+                   slots.verification, slots.bio, slots.avatar]
+                .contains(where: { $0 != nil }) || slots.clearFields?.isEmpty == false else {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+        case .deleteidol, .deleteevent, .deletecheki:
+            try require(slots.target)
+        case .favoriteidol:
+            try require(slots.target)
+            guard slots.favorite != nil else { throw ChekinanaNLClientError.invalidSchema }
         case .addevent:
             try require(slots.name)
             try require(slots.date)
-        case .addcheki:
-            try requireNonempty(slots.idols)
-            guard (slots.event != nil) != (slots.date != nil) else {
-                throw ChekinanaNLClientError.invalidSchema
-            }
-        case .addscancheki:
-            try require(slots.temporary)
-            try requireNonempty(slots.idols)
-            guard (slots.event != nil) != (slots.date != nil) else {
-                throw ChekinanaNLClientError.invalidSchema
-            }
+        case .editevent:
+            try require(slots.target)
+            guard hasEventPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
+        case .addcheki, .addscancheki:
+            // Media selection is the only required step. Associations may be
+            // absent and filled later in the picker/scan review UI.
+            break
         case .showidol, .showevent, .showcheki:
             try require(slots.target)
+        case .editcheki:
+            try require(slots.target)
+            guard hasRecordPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
+        case .showrecord, .deleterecord:
+            try require(slots.recordType); try require(slots.target)
+        case .addrecord:
+            try require(slots.recordType)
+        case .editrecord:
+            try require(slots.recordType); try require(slots.target)
+            guard hasRecordPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
+        case .listrecord:
+            break
         case .listidol, .listevent, .scancheki, .listcheki:
             break
         }
+    }
+
+    private static func validateExtendedOperation(_ operation: ChekinanaNLOperation) throws {
+        let slots = operation.slots
+        if let index = slots.idx, index < 1 { throw ChekinanaNLClientError.invalidSchema }
+        if let recordType = slots.recordType, !["cheki", "shame", "douga"].contains(recordType) { throw ChekinanaNLClientError.invalidSchema }
+        if let clear = slots.clearFields {
+            guard !clear.isEmpty, clear.count == Set(clear).count else { throw ChekinanaNLClientError.invalidSchema }
+        }
+        switch operation.intent {
+        case .navigate, .openScan, .editidol, .deleteidol, .favoriteidol, .editevent,
+             .deleteevent, .editcheki, .deletecheki, .listrecord, .showrecord,
+             .addrecord, .editrecord, .deleterecord:
+            for reference in ([slots.target, slots.event].compactMap { $0 }
+                + (slots.idols ?? []) + (slots.candidateRefs ?? [])) {
+                guard isHumanReference(reference) else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+            }
+        default:
+            break
+        }
+        switch operation.intent {
+        case .navigate:
+            guard let destination = slots.destination,
+                  ["scan", "idols", "calendar", "events", "gallery", "settings", "chekiroku_import"].contains(destination),
+                  slots.date == nil || destination == "calendar" else { throw ChekinanaNLClientError.invalidSchema }
+        case .openScan:
+            if slots.recognizeDate == false, [slots.fixedDate, slots.dateFrom, slots.dateTo].contains(where: { $0 != nil }) { throw ChekinanaNLClientError.invalidSchema }
+            if slots.recognizeIdol == false, slots.candidateRefs != nil || slots.includesUnassigned != nil { throw ChekinanaNLClientError.invalidSchema }
+            guard (slots.dateFrom == nil) == (slots.dateTo == nil), !(slots.fixedDate != nil && slots.dateFrom != nil) else { throw ChekinanaNLClientError.invalidSchema }
+            for date in [slots.fixedDate, slots.dateFrom, slots.dateTo].compactMap({ $0 }) where !isCalendarDate(date) { throw ChekinanaNLClientError.invalidSchema }
+            if let from = slots.dateFrom, let to = slots.dateTo, from > to { throw ChekinanaNLClientError.invalidSchema }
+        case .editidol:
+            let allowed = Set(["group", "birthday", "color", "verification", "bio", "avatar"])
+            if let clear = slots.clearFields {
+                guard Set(clear).isSubset(of: allowed),
+                      Set(clear).isDisjoint(with: slots.presentKeys) else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+            }
+        case .editevent:
+            let allowed = Set(["date", "city", "livehouse", "price", "url", "ticket_url", "note"])
+            if let clear = slots.clearFields, !Set(clear).isSubset(of: allowed) { throw ChekinanaNLClientError.invalidSchema }
+            if let url = slots.ticketURL, !isSafeHTTPURL(url) { throw ChekinanaNLClientError.invalidSchema }
+        case .editcheki:
+            if let clear = slots.clearFields {
+                guard Set(clear).isSubset(of: ["idols", "event", "date", "idx", "user", "note", "size"]),
+                      Set(clear).isDisjoint(with: slots.presentKeys) else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+            }
+            guard slots.size == nil || ["mini", "wide"].contains(slots.size!) else { throw ChekinanaNLClientError.invalidSchema }
+        case .listrecord, .addrecord, .editrecord:
+            let type = slots.recordType
+            if type != "cheki",
+               slots.event != nil || slots.idx != nil || slots.favorite != nil || slots.size != nil {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+            if let size = slots.size, !["mini", "wide"].contains(size) { throw ChekinanaNLClientError.invalidSchema }
+            if operation.intent == .editrecord, let clear = slots.clearFields {
+                let allowed = type == "cheki"
+                    ? Set(["idols", "event", "date", "idx", "note", "size"])
+                    : Set(["idols", "date", "note"])
+                if !Set(clear).isSubset(of: allowed) { throw ChekinanaNLClientError.invalidSchema }
+            }
+        default: break
+        }
+    }
+
+    private static func hasEventPatch(_ slots: ChekinanaNLSlots) -> Bool {
+        [slots.name, slots.date, slots.city, slots.livehouse, slots.price, slots.url, slots.ticketURL, slots.note].contains(where: { $0 != nil }) || slots.clearFields?.isEmpty == false
+    }
+
+    private static func hasRecordPatch(_ slots: ChekinanaNLSlots) -> Bool {
+        slots.idols != nil || [slots.event, slots.date, slots.user, slots.note, slots.size].contains(where: { $0 != nil }) || slots.idx != nil || slots.favorite != nil || slots.clearFields?.isEmpty == false
     }
 
     static func isCalendarDate(_ value: String) -> Bool {
         guard value.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else {
             return false
         }
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.isLenient = false
-        guard let date = formatter.date(from: value) else { return false }
-        return formatter.string(from: date) == value
+        guard let date = ChekinanaDateOnly.parse(value) else { return false }
+        return ChekinanaDateOnly.string(date) == value
     }
 
     static func isSafeHTTPURL(_ value: String) -> Bool {
         guard let components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
-              components.host != nil,
+              components.host?.isEmpty == false,
               components.user == nil,
               components.password == nil else {
+            return false
+        }
+        return true
+    }
+
+    private static func isHumanReference(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              UUID(uuidString: trimmed) == nil,
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.contains("\0"),
+              trimmed != ".",
+              trimmed != "..",
+              trimmed.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#, options: .regularExpression) == nil else {
             return false
         }
         return true
@@ -982,7 +1271,12 @@ enum ChekinanaNLSchemaValidator {
         }
         if let url = slots.url { try validateString(url, maximum: 1_000) }
         if let date = slots.date { try validateString(date, maximum: 10) }
-        for value in [slots.idol, slots.event, slots.temporary, slots.target].compactMap({ $0 }) {
+        for value in [
+            slots.idol, slots.event, slots.temporary, slots.target, slots.group,
+            slots.birthday, slots.color, slots.verification, slots.bio, slots.avatar,
+            slots.destination, slots.fixedDate, slots.dateFrom, slots.dateTo,
+            slots.recordType, slots.city, slots.livehouse, slots.price, slots.ticketURL,
+        ].compactMap({ $0 }) {
             try validateString(value, maximum: 200)
         }
         if let note = slots.note { try validateString(note, maximum: 500) }
@@ -997,6 +1291,15 @@ enum ChekinanaNLSchemaValidator {
             guard Set(normalized).count == normalized.count else {
                 throw ChekinanaNLClientError.invalidSchema
             }
+        }
+        if let refs = slots.candidateRefs {
+            guard (1...20).contains(refs.count) else { throw ChekinanaNLClientError.invalidSchema }
+            try refs.forEach { try validateString($0, maximum: 200) }
+            guard Set(refs.map(normalizedIdentity)).count == refs.count else { throw ChekinanaNLClientError.invalidSchema }
+        }
+        if let fields = slots.clearFields {
+            guard (1...12).contains(fields.count) else { throw ChekinanaNLClientError.invalidSchema }
+            try fields.forEach { try validateString($0, maximum: 32) }
         }
     }
 

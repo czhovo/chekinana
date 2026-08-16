@@ -3,15 +3,26 @@ import {
   EVENT_ENDPOINT,
   extractWeiboCandidateRequest,
 } from "./event-weibo-extractor.js";
-import { annotateChekiDateResponse } from "./cheki-date-annotator.js";
+import {
+  annotateChekiDateImageRequest,
+  annotateChekiDateResponse,
+} from "./cheki-date-annotator.js";
+import { ScannerRuntime } from "./scanner-runtime.js";
 
-const RUNPOD_HTTP_PORT = 8080;
+export { ScannerRuntime };
+
 const LOCAL_SCANNER_MODE = "CHEKINANA_SCANNER_LOCAL_MODE";
 const LOCAL_SCANNER_UPSTREAM = "CHEKINANA_SCANNER_LOCAL_UPSTREAM";
 const LOCAL_SCANNER_TOKEN = "CHEKINANA_SCANNER_LOCAL_TOKEN";
 const LOCAL_SCANNER_CONFIGURATION_ERROR = "local_scanner_configuration_invalid";
 const LOCAL_SCANNER_REQUEST_ERROR = "local_scanner_request_invalid";
 const LOCAL_SCANNER_UPSTREAM_ERROR = "local_scanner_upstream_unavailable";
+const PRODUCTION_SCANNER_UPSTREAM_ERROR = "scanner_upstream_unavailable";
+const PRODUCTION_SCANNER_RUNTIME_ERROR = "scanner_runtime_unavailable";
+const PRODUCTION_SCANNER_RUNTIME_MESSAGE = "暂时无法读取 RunPod 后端状态，请重试。";
+const RUNTIME_STATUS_DEADLINE_MS = 16_000;
+const RUNTIME_START_DEADLINE_MS = 45_000;
+const RUNTIME_STOP_DEADLINE_MS = 20_000;
 const LOCAL_SCANNER_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,256}$/u;
 const LOOPBACK_UPSTREAM_PATTERN = /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/?$/u;
 const LOCAL_CLIENT_SOURCE_HEADERS = [
@@ -31,6 +42,7 @@ const LOCAL_CLIENT_SOURCE_HEADERS = [
   "x-real-ip",
 ];
 const DATE_ANNOTATION_QUERY = "date_annotation";
+const DATE_ANNOTATION_ENDPOINT = "/api/cheki/date-annotation";
 const DATE_RESPONSE_HEADERS = [
   "x-cheki-date-status",
   "x-cheki-date-text",
@@ -50,28 +62,6 @@ function json(body, status = 200, extraHeaders = {}) {
       ...extraHeaders,
     },
   });
-}
-
-function normalizePodId(value) {
-  const raw = (value || "").trim();
-  const urlMatch = raw.match(/^https?:\/\/([a-z0-9]+)-\d+\.proxy\.runpod\.net/i);
-  if (urlMatch) return urlMatch[1];
-
-  const host = raw.replace(/^https?:\/\//i, "").split(/[/?#:\s]/)[0];
-  const hostMatch = host.match(/^([a-z0-9]+)-\d+\.proxy\.runpod\.net/i);
-  if (hostMatch) return hostMatch[1];
-
-  return /^[a-z0-9]+$/i.test(host) ? host : "";
-}
-
-function getRequestToken(request, url) {
-  const headerToken = request.headers.get("x-cheki-token");
-  if (headerToken) return headerToken;
-
-  const queryToken = url.searchParams.get("token");
-  if (queryToken) return queryToken;
-
-  return "";
 }
 
 function hasEnvironmentValue(env, name) {
@@ -240,6 +230,7 @@ async function localUpstreamRequest(request, url, configuration) {
     headers,
     body: preparedBody.body,
     redirect: "manual",
+    signal: request.signal,
   });
 }
 
@@ -290,12 +281,137 @@ function applyDateAnnotationHeaders(headers, annotation) {
   exposeDateHeaders(headers);
 }
 
+function isScannerRuntimePath(pathname) {
+  return pathname === "/api/scanner/runtime"
+    || pathname === "/api/scanner/runtime/start"
+    || pathname === "/api/scanner/runtime/stop";
+}
+
+function localRuntimeResponse(request, url) {
+  const isStatus = url.pathname === "/api/scanner/runtime";
+  const validMethod = isStatus ? request.method === "GET" : request.method === "POST";
+  if (!validMethod) {
+    return json(
+      { ok: false, error: "method_not_allowed" },
+      405,
+      { "cache-control": "no-store" },
+    );
+  }
+  if (url.pathname === "/api/scanner/runtime/stop") {
+    return json({
+      ok: false,
+      state: "ready",
+      phase: "ready",
+      message: "本地 Scanner 进程需要在 Windows 主机上手动关闭。",
+      retryAllowed: false,
+      canStart: false,
+      canTerminate: false,
+      updatedAt: null,
+      error: "local_scanner_stop_unavailable",
+    }, 409, { "cache-control": "no-store" });
+  }
+  return json({
+    ok: true,
+    state: "ready",
+    phase: "ready",
+    message: null,
+    retryAllowed: true,
+    canStart: false,
+    canTerminate: false,
+    updatedAt: null,
+  }, 200, { "cache-control": "no-store" });
+}
+
+function scannerRuntimeStub(env) {
+  const binding = env?.SCANNER_RUNTIME;
+  if (!binding || typeof binding.idFromName !== "function"
+    || typeof binding.get !== "function") return null;
+  return binding.get(binding.idFromName("production"));
+}
+
+function runtimeControlDeadline(request, env) {
+  const testValue = env?.__TEST_SCANNER_RUNTIME_CONTROL_DEADLINE_MS;
+  if (Number.isFinite(testValue) && testValue >= 1 && testValue <= 60_000) {
+    return testValue;
+  }
+  const pathname = new URL(request.url).pathname;
+  if (pathname === "/api/scanner/runtime/start") return RUNTIME_START_DEADLINE_MS;
+  if (pathname === "/api/scanner/runtime/stop") return RUNTIME_STOP_DEADLINE_MS;
+  return RUNTIME_STATUS_DEADLINE_MS;
+}
+
+function runtimeControlFailure(request) {
+  const url = new URL(request.url);
+  const isStatus = request.method === "GET"
+    && url.pathname === "/api/scanner/runtime";
+  return json({
+    ok: true,
+    state: "closed",
+    phase: "closed",
+    message: PRODUCTION_SCANNER_RUNTIME_MESSAGE,
+    retryAllowed: true,
+    canStart: false,
+    canTerminate: false,
+    updatedAt: null,
+  }, isStatus ? 200 : 503, { "cache-control": "no-store" });
+}
+
+async function productionRuntimeControlRequest(request, env) {
+  const stub = scannerRuntimeStub(env);
+  if (!stub || typeof stub.fetch !== "function") {
+    return runtimeControlFailure(request);
+  }
+  const timeoutSentinel = Symbol("scanner-runtime-control-timeout");
+  let timeout;
+  try {
+    const deadline = new Promise((resolve) => {
+      timeout = setTimeout(
+        () => resolve(timeoutSentinel),
+        runtimeControlDeadline(request, env),
+      );
+    });
+    const operation = Promise.resolve().then(() => stub.fetch(request)).then(
+      (response) => ({ response }),
+      () => ({ response: null }),
+    );
+    const outcome = await Promise.race([operation, deadline]);
+    if (outcome === timeoutSentinel || !(outcome?.response instanceof Response)) {
+      return runtimeControlFailure(request);
+    }
+    return outcome.response;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function productionRuntimeRequest(request, env) {
+  const stub = scannerRuntimeStub(env);
+  if (!stub || typeof stub.fetch !== "function") {
+    return json(
+      { ok: false, error: PRODUCTION_SCANNER_RUNTIME_ERROR },
+      503,
+      { "cache-control": "no-store" },
+    );
+  }
+  try {
+    return await stub.fetch(request);
+  } catch {
+    return json(
+      { ok: false, error: PRODUCTION_SCANNER_RUNTIME_ERROR },
+      503,
+      { "cache-control": "no-store" },
+    );
+  }
+}
+
 export async function handleRequest(request, env = {}, fetchImpl = fetch) {
   const url = new URL(request.url);
   const dateAnnotationRequested = requestsDateAnnotation(request, url);
 
   if (request.method === "OPTIONS") {
-    const headers = (url.pathname === "/api/nl/interpret" || url.pathname === EVENT_ENDPOINT)
+    const headers = (url.pathname === "/api/nl/interpret"
+      || url.pathname === EVENT_ENDPOINT
+      || url.pathname === DATE_ANNOTATION_ENDPOINT)
       ? { "cache-control": "no-store" }
       : {};
     if (isCurrentResultPartPath(url.pathname)
@@ -316,12 +432,46 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
     return json(result.body, result.status, { "cache-control": "no-store" });
   }
 
+  if (url.pathname === DATE_ANNOTATION_ENDPOINT) {
+    if (request.method !== "POST") {
+      return json(
+        { status: "unavailable", error: "method_not_allowed" },
+        405,
+        { "cache-control": "no-store" },
+      );
+    }
+    const annotation = await annotateChekiDateImageRequest(request, env, {
+      fetchImpl,
+      imageReadTimeoutMs: env?.__TEST_CHEKI_DATE_IMAGE_TIMEOUT_MS,
+      qwenTimeoutMs: env?.__TEST_CHEKI_DATE_QWEN_TIMEOUT_MS,
+    });
+    return json(annotation, 200, { "cache-control": "no-store" });
+  }
+
   const scannerConfiguration = parseLocalScannerConfiguration(env);
   if (scannerConfiguration.kind === "invalid") {
     return localScannerConfigurationError();
   }
 
+  if (isScannerRuntimePath(url.pathname)) {
+    const runtimeResponse = scannerConfiguration.kind === "local"
+      ? localRuntimeResponse(request, url)
+      : await productionRuntimeControlRequest(request, env);
+    if (runtimeResponse.status === 101) return runtimeResponse;
+    const runtimeHeaders = new Headers(runtimeResponse.headers);
+    runtimeHeaders.set("access-control-allow-origin", "*");
+    runtimeHeaders.set("access-control-allow-methods", "GET,POST,OPTIONS");
+    runtimeHeaders.set("access-control-allow-headers", "content-type,x-cheki-token");
+    runtimeHeaders.set("cache-control", "no-store");
+    return new Response(runtimeResponse.body, {
+      status: runtimeResponse.status,
+      statusText: runtimeResponse.statusText,
+      headers: runtimeHeaders,
+    });
+  }
+
   let upstreamRequest;
+  let upstreamResponse;
   if (scannerConfiguration.kind === "local") {
     const providedToken = request.headers.get("x-cheki-token") || "";
     if (!await timingSafeTokenEqual(scannerConfiguration.token, providedToken)) {
@@ -330,29 +480,11 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
     upstreamRequest = await localUpstreamRequest(request, url, scannerConfiguration);
     if (!upstreamRequest) return localScannerRequestError();
   } else {
-    const podId = normalizePodId(getRequestToken(request, url));
-    if (!podId) {
-      return json({ ok: false, error: "Token 无效或已过期" }, 401);
-    }
-
-    const upstreamUrl = new URL(request.url);
-    upstreamUrl.protocol = "https:";
-    upstreamUrl.hostname = `${podId}-${RUNPOD_HTTP_PORT}.proxy.runpod.net`;
-    upstreamUrl.port = "";
-    if (isCurrentResultPartPath(url.pathname)) {
-      upstreamUrl.searchParams.delete(DATE_ANNOTATION_QUERY);
-    }
-
-    upstreamRequest = new Request(upstreamUrl.toString(), {
-      method: request.method,
-      headers: copyHeaders(request),
-      body: request.body,
-      redirect: "manual",
-    });
+    upstreamResponse = await productionRuntimeRequest(request, env);
   }
 
   try {
-    const upstreamResponse = await fetchImpl(upstreamRequest);
+    if (!upstreamResponse) upstreamResponse = await fetchImpl(upstreamRequest);
     let annotation = null;
     if (dateAnnotationRequested) {
       try {
@@ -374,7 +506,7 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
       statusText: upstreamResponse.statusText,
       headers: responseHeaders,
     });
-  } catch (error) {
+  } catch {
     if (scannerConfiguration.kind === "local") {
       return json(
         { ok: false, error: LOCAL_SCANNER_UPSTREAM_ERROR },
@@ -382,7 +514,11 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
         { "cache-control": "no-store" },
       );
     }
-    return json({ ok: false, error: `RunPod proxy failed: ${error.message}` }, 502);
+    return json(
+      { ok: false, error: PRODUCTION_SCANNER_UPSTREAM_ERROR },
+      502,
+      { "cache-control": "no-store" },
+    );
   }
 }
 
