@@ -174,6 +174,8 @@ struct ChekinanaEventCard: Identifiable, Equatable {
     let price: String
     let weiboURL: String
     let ticketURL: String
+    let openTime: String?
+    let startTime: String?
     let note: String
     let confirmationCode: String?
 }
@@ -975,6 +977,8 @@ final class ChekinanaConfirmationLedger {
         let price: String?
         let weiboURL: URL?
         let ticketURL: URL?
+        let openTime: String?
+        let startTime: String?
         let note: String
 
         init(
@@ -986,6 +990,8 @@ final class ChekinanaConfirmationLedger {
             price: String? = nil,
             weiboURL: URL? = nil,
             ticketURL: URL? = nil,
+            openTime: String? = nil,
+            startTime: String? = nil,
             note: String = ""
         ) {
             self.name = name
@@ -996,6 +1002,8 @@ final class ChekinanaConfirmationLedger {
             self.price = price
             self.weiboURL = weiboURL
             self.ticketURL = ticketURL
+            self.openTime = ChekinanaEventTime.normalized(openTime)
+            self.startTime = ChekinanaEventTime.normalized(startTime)
             self.note = note
         }
     }
@@ -1010,6 +1018,8 @@ final class ChekinanaConfirmationLedger {
         let price: String?
         let weiboURL: URL?
         let ticketURL: URL?
+        let openTime: String?
+        let startTime: String?
         let note: String
     }
 
@@ -1079,6 +1089,8 @@ final class ChekinanaConfirmationLedger {
         let userAppears: Bool?
         let favorite: Bool
         let size: ChekiSize?
+        let count: Int
+        let expectedChekiRecordSnapshot: ChekinanaChekiRecordSnapshot?
     }
 
     enum DeleteChekiPhase {
@@ -2328,6 +2340,7 @@ struct ChekinanaCommandExecutor {
     typealias ScanProgressObserver = (ChekinanaScanProgress) -> Void
     typealias ScannerTaskObserver = @MainActor (_ taskID: String, _ isActive: Bool) -> Void
     typealias PatternEncode = (Data) async throws -> [Float]
+    typealias PatternResolve = @Sendable ([String]) async throws -> [[Float]]
     typealias UserAppearsDetect = @Sendable (Data) async throws -> Bool
     typealias IdolSearch = @MainActor @Sendable (String) async throws -> [ChekinanaEnrichedIdol]
     typealias IdolAvatarPrepare = @Sendable (ChekinanaEnrichedIdol) async throws -> Data?
@@ -2534,6 +2547,7 @@ struct ChekinanaCommandExecutor {
     private let scannerProcessWithProgress: ScannerProcessWithProgress
     private let scanProgressObserver: ScanProgressObserver?
     private let patternEncode: PatternEncode
+    private let patternResolve: PatternResolve
     private let userAppearsDetect: UserAppearsDetect
     private let bodyPoseLimiter: ChekinanaBodyPoseLimiter
     private let idolSearch: IdolSearch
@@ -2555,6 +2569,7 @@ struct ChekinanaCommandExecutor {
         confirmationLedger: ChekinanaConfirmationLedger,
         scannerProcess: ScannerProcess? = nil,
         patternEncode: PatternEncode? = nil,
+        patternResolve: PatternResolve? = nil,
         userAppearsDetect: UserAppearsDetect? = nil,
         bodyPoseLimiter: ChekinanaBodyPoseLimiter = .init(),
         idolSearch: @escaping IdolSearch = { name in
@@ -2610,6 +2625,11 @@ struct ChekinanaCommandExecutor {
         self.batchBeforeLiveIndexValidation = batchBeforeLiveIndexValidation
         self.patternEncode = patternEncode ?? { imageData in
             try await ChekinanaPatternEncoder.shared.encode(imageData)
+        }
+        self.patternResolve = patternResolve ?? { patternIDs in
+            try await ChekinanaRemotePatternResources.shared.patterns(
+                for: patternIDs
+            )
         }
         self.userAppearsDetect = userAppearsDetect ?? { imageData in
             try await ChekinanaHumanBodyPoseDetector.detect(in: imageData)
@@ -2874,6 +2894,8 @@ struct ChekinanaCommandExecutor {
             avatarURL: rawFields.avatarURL.trimmingCharacters(in: .whitespacesAndNewlines),
             weiboURL: rawFields.weiboURL.trimmingCharacters(in: .whitespacesAndNewlines),
             ticketURL: rawFields.ticketURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            openTime: ChekinanaEventTime.normalized(rawFields.openTime),
+            startTime: ChekinanaEventTime.normalized(rawFields.startTime),
             note: ""
         )
         let blockers = ChekinanaEventCandidateValidator.blockers(for: fields)
@@ -2904,6 +2926,8 @@ struct ChekinanaCommandExecutor {
                 price: optionalNonempty(fields.price),
                 weiboURL: weiboURL,
                 ticketURL: ticketURL,
+                openTime: fields.openTime,
+                startTime: fields.startTime,
                 note: fields.note
             )))
             return .eventCard(eventCard(fields, confirmationCode: code))
@@ -3041,15 +3065,10 @@ struct ChekinanaCommandExecutor {
                 guard idol.updatedAt == payload.expectedUpdatedAt else {
                     throw ChekinanaNLClientError.invalidSchema
                 }
-                let recordCount = try associatedRecordCount(for: idol.id)
-                guard recordCount == 0 else {
-                    throw ChekinanaDeleteError.idolHasChekis(recordCount)
-                }
-                modelContext.delete(idol)
-                do { try modelContext.save() } catch {
-                    modelContext.rollback()
-                    throw error
-                }
+                _ = try ChekinanaIdolPersistence.delete(
+                    idol,
+                    from: modelContext
+                )
                 response = .text(ChekinanaCommandCopy.text(
                     "idol.deleted",
                     fallback: "Deleted the Idol."
@@ -3090,18 +3109,22 @@ struct ChekinanaCommandExecutor {
                         eventID: event.id
                     )
                 }
-                modelContext.insert(event)
                 do {
-                    try modelContext.save()
+                    try ChekinanaEventPersistence.save(
+                        event,
+                        inserting: true,
+                        images: [],
+                        schedule: ChekinanaEventScheduleValue(
+                            openTime: payload.openTime,
+                            startTime: payload.startTime
+                        ),
+                        previousAvatarRef: nil,
+                        in: modelContext
+                    )
                 } catch {
-                    modelContext.delete(event)
-                    modelContext.rollback()
                     ChekinanaEventAvatarStore.remove(event.avatarImageRef)
                     throw error
                 }
-                ChekinanaEventMediaJournal.clearPending(
-                    [event.avatarImageRef].compactMap { $0 }
-                )
                 response = .eventCard(eventCard(event))
 
             case .editEvent(let payload):
@@ -3109,31 +3132,38 @@ struct ChekinanaCommandExecutor {
                 guard event.updatedAt == payload.expectedUpdatedAt else {
                     throw ChekinanaEditConflictError.staleEvent(entry.code)
                 }
-                event.name = payload.name
-                event.date = payload.date
-                event.city = payload.city
-                event.livehouse = payload.livehouse
-                event.price = payload.price
-                event.weiboURL = payload.weiboURL
-                event.ticketURL = payload.ticketURL
-                event.note = payload.note
-                event.updatedAt = Date()
+                let updatedEvent: Event
                 do {
-                    try modelContext.save()
+                    updatedEvent = try ChekinanaEventPersistence.update(
+                        eventID: event.id,
+                        expectedUpdatedAt: payload.expectedUpdatedAt,
+                        schedule: ChekinanaEventScheduleValue(
+                            openTime: payload.openTime,
+                            startTime: payload.startTime
+                        ),
+                        in: modelContext
+                    ) { liveEvent in
+                        liveEvent.name = payload.name
+                        liveEvent.date = payload.date
+                        liveEvent.city = payload.city
+                        liveEvent.livehouse = payload.livehouse
+                        liveEvent.price = payload.price
+                        liveEvent.weiboURL = payload.weiboURL
+                        liveEvent.ticketURL = payload.ticketURL
+                        liveEvent.note = payload.note
+                        liveEvent.updatedAt = Date()
+                    }
+                } catch is ChekinanaEventMutationError {
+                    throw ChekinanaEditConflictError.staleEvent(entry.code)
                 } catch {
-                    modelContext.rollback()
                     throw error
                 }
-                response = .eventCard(eventCard(event))
+                response = .eventCard(eventCard(updatedEvent))
 
             case .deleteEvent(let payload):
                 let event = try refetchEventByRequiredID(payload.eventID)
                 guard event.updatedAt == payload.expectedUpdatedAt else {
                     throw ChekinanaNLClientError.invalidSchema
-                }
-                let recordCount = event.chekis.count
-                guard recordCount == 0 else {
-                    throw ChekinanaDeleteError.eventHasChekis(recordCount)
                 }
                 try ChekinanaEventPersistence.delete(event, from: modelContext)
                 response = .text(ChekinanaCommandCopy.text(
@@ -3155,10 +3185,18 @@ struct ChekinanaCommandExecutor {
                 let event: Event?
                 if explicitEvent {
                     event = try refetchEventByID(payload.eventID)
-                } else if let existingEvent {
-                    event = existingEvent
                 } else {
-                    event = try uniqueEvent(for: payload.date)
+                    let eligibleExistingEvent = existingEvent.flatMap { candidate in
+                        ChekinanaChekiEventSelectionPolicy.includes(
+                            recordDate: payload.date,
+                            eventDate: candidate.date
+                        ) ? candidate : nil
+                    }
+                    if let eligibleExistingEvent {
+                        event = eligibleExistingEvent
+                    } else {
+                        event = try uniqueEvent(for: payload.date)
+                    }
                 }
                 try validateChekiAssociations(
                     idols: idols,
@@ -3270,7 +3308,7 @@ struct ChekinanaCommandExecutor {
                 cheki.event = event
                 cheki.date = payload.date
                 cheki.idx = idx
-                cheki.userAppears = payload.userAppears
+                cheki.userAppears = payload.userAppears ?? false
                 cheki.size = payload.size
                 cheki.isFavorite = payload.isFavorite
                 cheki.hasPostedToSNS = payload.hasPostedToSNS
@@ -3315,34 +3353,40 @@ struct ChekinanaCommandExecutor {
         let event = payload.kind == .cheki
             ? try refetchEventByID(payload.eventID)
             : nil
-        func validateChekiRecord(excluding id: UUID?) throws {
+        func validateChekiRecord() throws {
             try validateChekiAssociations(idols: idols, event: event, eventDate: payload.date)
-            guard let idx = payload.idx else { return }
-            guard idx > 0,
-                  let group = ChekinanaChekiGroupKey(idolIDs: idols.map(\.id), date: payload.date) else {
-                throw ChekinanaNLClientError.invalidSchema
-            }
-            let collision = try modelContext.fetch(FetchDescriptor<Cheki>()).contains {
-                $0.id != id
-                    && ChekinanaChekiGroupKey(idolIDs: $0.idols.map(\.id), date: $0.date) == group
-                    && $0.idx == idx
-            }
-            guard !collision else { throw ChekinanaAddChekiError.duplicateIndex(idx) }
         }
         switch (payload.kind, payload.mutation) {
         case (.cheki, .add):
-            try validateChekiRecord(excluding: nil)
-            let record = Cheki(date: payload.date, idx: payload.idx, userAppears: payload.userAppears, size: payload.size, isFavorite: payload.favorite, note: payload.note)
-            modelContext.insert(record); record.idols = idols; record.event = event
+            try validateChekiRecord()
+            _ = try ChekinanaChekiRecordStore.upsert(
+                idols: idols,
+                event: event,
+                date: payload.date,
+                size: payload.size,
+                note: payload.note,
+                adding: payload.count,
+                in: modelContext
+            )
         case (.shame, .add):
             throw ChekinanaMediaBackedCreationError.shameRequiresImage
         case (.douga, .add):
             throw ChekinanaMediaBackedCreationError.dougaRequiresVideo
         case (.cheki, .edit(let id)):
-            let record = try refetchChekiByID(id)
+            let record = try refetchChekiRecordByID(id)
             guard recordFingerprint(record) == payload.expectedFingerprint else { throw ChekinanaEditConflictError.staleCheki("") }
-            try validateChekiRecord(excluding: id)
-            record.idols = idols; record.event = event; record.date = payload.date; record.idx = payload.idx; record.note = payload.note; record.userAppears = payload.userAppears; record.isFavorite = payload.favorite; record.size = payload.size; record.updatedAt = Date()
+            try validateChekiRecord()
+            _ = try ChekinanaChekiRecordStore.update(
+                record,
+                idols: idols,
+                event: event,
+                date: payload.date,
+                size: payload.size,
+                note: payload.note,
+                count: payload.count,
+                expected: payload.expectedChekiRecordSnapshot,
+                in: modelContext
+            )
         case (.shame, .edit(let id)):
             let record = try refetchShameByID(id)
             guard recordFingerprint(record) == payload.expectedFingerprint else { throw ChekinanaNLClientError.invalidSchema }
@@ -3352,12 +3396,15 @@ struct ChekinanaCommandExecutor {
             guard recordFingerprint(record) == payload.expectedFingerprint else { throw ChekinanaNLClientError.invalidSchema }
             record.idols = idols; record.date = payload.date; record.note = payload.note
         case (.cheki, .delete(let id)):
-            let record = try refetchChekiByID(id)
-            guard recordFingerprint(record) == payload.expectedFingerprint,
-                  ChekinanaNoMediaPolicy.hasNoImage(record.imageRef) else {
+            let record = try refetchChekiRecordByID(id)
+            guard recordFingerprint(record) == payload.expectedFingerprint else {
                 throw ChekinanaNLClientError.invalidSchema
             }
-            modelContext.delete(record)
+            try ChekinanaChekiRecordStore.delete(
+                record,
+                expected: payload.expectedChekiRecordSnapshot,
+                in: modelContext
+            )
         case (.shame, .delete(let id)):
             let record = try refetchShameByID(id)
             guard recordFingerprint(record) == payload.expectedFingerprint else { throw ChekinanaNLClientError.invalidSchema }
@@ -3481,7 +3528,7 @@ struct ChekinanaCommandExecutor {
                                 quarantineURL: quarantineURL
                             )
                         ),
-                        for: confirmationCode
+                         for: confirmationCode
                     )
                     throw ChekinanaDeleteError.databaseSaveAndImageRestoreFailed(
                         save: error.localizedDescription,
@@ -4254,7 +4301,8 @@ struct ChekinanaCommandExecutor {
             birthday: editedOptional(candidate.birthday, field: "birthday", values: values, clearFields: clearFields),
             verification: editedOptional(candidate.verification, field: "verification", values: values, clearFields: clearFields),
             bio: editedOptional(candidate.bio, field: "bio", values: values, clearFields: clearFields),
-            avatarUrl: editedOptional(candidate.avatarUrl, field: "avatar", values: values, clearFields: clearFields)
+            avatarUrl: editedOptional(candidate.avatarUrl, field: "avatar", values: values, clearFields: clearFields),
+            patternIds: candidate.patternIds
         )
     }
 
@@ -4283,7 +4331,10 @@ struct ChekinanaCommandExecutor {
         )
     }
 
-    private func catalogueIdol(from candidate: ChekinanaEnrichedIdol) throws -> Idol {
+    private func catalogueIdol(
+        from candidate: ChekinanaEnrichedIdol,
+        patterns: [[Float]]
+    ) throws -> Idol {
         let birthday = try ChekinanaBirthdayValue.normalizedStorage(
             candidate.birthday
         )
@@ -4296,20 +4347,28 @@ struct ChekinanaCommandExecutor {
             avatarImageRef: nil,
             verification: candidate.verification,
             bio: candidate.bio,
-            patterns: ChekinanaLocalPatternRegistry.mergedPatterns([
-                ChekinanaLocalPatternRegistry.patterns(for: candidate.sourceId),
-            ])
+            patterns: patterns
         )
     }
 
     private func persistCatalogueIdol(
         _ prepared: ChekinanaPreparedIdolCandidate
     ) async throws -> Idol {
-        let idol = try catalogueIdol(from: prepared.candidate)
+        let patterns = try await patternResolve(prepared.candidate.patternIds)
+        let idol = try catalogueIdol(
+            from: prepared.candidate,
+            patterns: patterns
+        )
         let stagedAvatar = try await ChekinanaCatalogueIdolAvatarLocalizer.stage(
             prepared,
             idolID: idol.id
         )
+        modelContext.insert(IdolPatternState(
+            idolID: idol.id,
+            encoderVersion: ChekinanaPatternContract.encoderVersion,
+            cataloguePatternIDs: prepared.candidate.patternIds,
+            cataloguePatternCount: patterns.count
+        ))
         let result = try ChekinanaIdolPersistence.save(
             idol,
             inserting: true,
@@ -4628,6 +4687,10 @@ struct ChekinanaCommandExecutor {
             var price = event.price
             var url = event.weiboURL
             var ticketURL = event.ticketURL
+            let schedule = try ChekinanaEventSchedulePersistence.value(
+                for: event.id,
+                in: modelContext
+            )
             var note = event.note
 
             let clearFields = Set(
@@ -4679,6 +4742,8 @@ struct ChekinanaCommandExecutor {
                 price: price,
                 weiboURL: url,
                 ticketURL: ticketURL,
+                openTime: schedule.openTime,
+                startTime: schedule.startTime,
                 note: note
             )))
             return .confirmationText(eventPreviewDetails(
@@ -4703,7 +4768,12 @@ struct ChekinanaCommandExecutor {
         }
         do {
             let event = try resolveUniqueEvent(target)
-            let recordCount = event.chekis.count
+            let simpleRecordCount = try modelContext.fetch(
+                FetchDescriptor<ChekiRecord>()
+            ).filter {
+                ChekinanaChekiRecordReadPolicy.isLinked($0, eventID: event.id)
+            }.count
+            let recordCount = event.chekis.count + simpleRecordCount
             guard recordCount == 0 else {
                 return .text(ChekinanaCommandCopy.error(
                     "event.has_records",
@@ -5220,9 +5290,15 @@ struct ChekinanaCommandExecutor {
                     events: relationEventModels.map { ($0.id, $0.date) },
                     calendar: calendar
                 )
+                let eligibleExistingEvent = existingEvent.flatMap { event in
+                    ChekinanaChekiEventSelectionPolicy.includes(
+                        recordDate: item.payload.date,
+                        eventDate: event.date
+                    ) ? event : nil
+                }
                 let relationEvent = explicitEvent
                     ? item.payload.eventID.flatMap { eventsByID[$0] }
-                    : (existingEvent ?? autoEventID.flatMap { eventsByID[$0] })
+                    : (eligibleExistingEvent ?? autoEventID.flatMap { eventsByID[$0] })
                 guard !explicitEvent || item.payload.eventID == nil || relationEvent != nil else {
                     throw ChekinanaAddChekiError.modelContextMismatch
                 }
@@ -5246,9 +5322,13 @@ struct ChekinanaCommandExecutor {
                     let edited = item.payload.explicitlyEditedFields
                     if edited.contains(.idols) { cheki.idols = relationIdols }
                     if edited.contains(.date) { cheki.date = normalizedCalendarDay(item.payload.date) }
-                    if edited.contains(.event) || cheki.event == nil { cheki.event = relationEvent }
+                    if edited.contains(.event)
+                        || edited.contains(.date)
+                        || cheki.event == nil {
+                        cheki.event = relationEvent
+                    }
                     if edited.contains(.userAppears) || cheki.userAppears == nil {
-                        cheki.userAppears = item.payload.userAppears
+                        cheki.userAppears = item.payload.userAppears ?? false
                     }
                     if edited.contains(.size) { cheki.size = item.payload.size }
                     if edited.contains(.favorite) { cheki.isFavorite = item.payload.isFavorite }
@@ -5506,13 +5586,11 @@ struct ChekinanaCommandExecutor {
         for inferredDate: Date?,
         candidates: [ChekinanaEventDateCandidate]
     ) -> UUID? {
-        guard let inferredDate else { return nil }
-        let matches = candidates.filter { candidate in
-            guard let candidateDate = candidate.date else { return false }
-            return sameCalendarDate(candidateDate, inferredDate)
-        }
-        guard matches.count == 1 else { return nil }
-        return matches[0].id
+        ChekinanaChekiEventAutoAssociation.uniqueEventID(
+            for: inferredDate,
+            events: candidates.map { ($0.id, $0.date) },
+            calendar: calendar
+        )
     }
 
     private func scanCheki(
@@ -6019,8 +6097,7 @@ struct ChekinanaCommandExecutor {
                 candidatePatterns: candidateIdols.map {
                     (id: $0.id, patterns: $0.recognitionPatterns)
                 },
-                includesUnassigned: candidates.includesUnassigned,
-                threshold: candidates.threshold
+                includesUnassigned: candidates.includesUnassigned
             )
             if holdsGate { await recognitionGate?.release() }
             return .matched(classification.idolID)
@@ -6251,21 +6328,26 @@ struct ChekinanaCommandExecutor {
                 idols = cheki.idols
             }
 
-            let event: Event?
             let eventDate: Date?
-            if let rawEvent = command.arguments["event"] {
-                event = rawEvent.trimmingCharacters(in: .whitespacesAndNewlines) == "-"
-                    ? nil
-                    : try resolveEvent(rawEvent)
-            } else {
-                event = cheki.event
-            }
             if let rawDate = command.arguments["date"] {
                 eventDate = rawDate.trimmingCharacters(in: .whitespacesAndNewlines) == "-"
                     ? nil
                     : try parseCalendarDate(rawDate)
             } else {
                 eventDate = cheki.date
+            }
+            let event: Event?
+            if let rawEvent = command.arguments["event"] {
+                event = rawEvent.trimmingCharacters(in: .whitespacesAndNewlines) == "-"
+                    ? nil
+                    : try resolveEvent(rawEvent)
+            } else {
+                event = cheki.event.flatMap { candidate in
+                    ChekinanaChekiEventSelectionPolicy.includes(
+                        recordDate: eventDate,
+                        eventDate: candidate.date
+                    ) ? candidate : nil
+                }
             }
             try validateChekiAssociations(idols: idols, event: event, eventDate: eventDate)
 
@@ -6437,12 +6519,6 @@ struct ChekinanaCommandExecutor {
                     return invalidUsage(usage)
                 }
                 let id = try resolveRecordID(kind: kind, token: target)
-                if kind == .cheki {
-                    return deleteCheki(
-                        .init(name: "deletecheki", target: String(id.uuidString.prefix(8)), arguments: [:]),
-                        usage: usage
-                    )
-                }
                 return try prepareRecordMutation(kind: kind, mutation: .delete(id), arguments: [:])
             default:
                 return invalidUsage(usage)
@@ -6538,12 +6614,11 @@ struct ChekinanaCommandExecutor {
         kind: ChekinanaConfirmationLedger.RecordKind?,
         arguments: [String: String]
     ) throws -> ChekinanaCommandResponse {
-        let allowed = Set(["idols", "event", "date", "idx", "favorite", "size"])
+        let allowed = Set(["idols", "event", "date", "size"])
         guard Set(arguments.keys).isSubset(of: allowed) else {
             throw ChekinanaNLClientError.invalidSchema
         }
-        if kind != .cheki,
-           arguments["idx"] != nil || arguments["favorite"] != nil || arguments["size"] != nil {
+        if kind != .cheki, arguments["size"] != nil {
             throw ChekinanaNLClientError.invalidSchema
         }
         if let kind, kind != .cheki, arguments["event"] != nil {
@@ -6553,15 +6628,13 @@ struct ChekinanaCommandExecutor {
         let requestedIDs = requestedIdols.map { Set($0.map(\.id)) }
         let requestedEvent = try arguments["event"].map(resolveUniqueEvent)
         let requestedDate = try arguments["date"].map(parseCalendarDate)
-        let requestedIndex = try arguments["idx"].map(parsePositiveIndex)
-        let requestedFavorite = try arguments["favorite"].map(requireStrictBool)
         let requestedSize = try arguments["size"].map(requireRecordSize)
         let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
 
-        func matches(idols: [Idol], event: Event?, date: Date?) -> Bool {
+        func matches(idolIDs: [UUID], eventID: UUID?, date: Date?) -> Bool {
             if let requestedIDs,
-               !requestedIDs.isSubset(of: Set(idols.map(\.id))) { return false }
-            if let requestedEvent, event?.id != requestedEvent.id { return false }
+               !requestedIDs.isSubset(of: Set(idolIDs)) { return false }
+            if let requestedEvent, eventID != requestedEvent.id { return false }
             if let requestedDate,
                date.map({ sameCalendarDate($0, requestedDate) }) != true { return false }
             return true
@@ -6569,28 +6642,56 @@ struct ChekinanaCommandExecutor {
 
         var lines: [String] = []
         if kind == nil || kind == .cheki {
-            let values = try modelContext.fetch(FetchDescriptor<Cheki>(
-                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
-            )).filter {
-                ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs)
-                    && matches(idols: $0.idols, event: $0.event, date: $0.date)
-                    && (requestedIndex == nil || $0.idx == requestedIndex)
-                    && (requestedFavorite == nil || $0.isFavorite == requestedFavorite)
+            let values = try modelContext.fetch(
+                FetchDescriptor<ChekiRecord>()
+            ).filter {
+                ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIDs
+                )
+                    && matches(
+                        idolIDs: $0.idolIDs,
+                        eventID: $0.eventID,
+                        date: $0.date
+                    )
                     && (requestedSize == nil || $0.size == requestedSize)
+            }.sorted { $0.id.uuidString < $1.id.uuidString }
+            let relationshipIndex = ChekinanaChekiRecordRelationshipIndex(
+                idols: try modelContext.fetch(FetchDescriptor<Idol>()),
+                events: try modelContext.fetch(FetchDescriptor<Event>())
+            )
+            lines += values.map {
+                recordSummary(
+                    kind: .cheki,
+                    id: $0.id,
+                    idols: relationshipIndex.idols(for: $0),
+                    event: relationshipIndex.event(for: $0),
+                    date: $0.date,
+                    size: $0.size,
+                    note: $0.note,
+                    count: $0.count
+                )
             }
-            lines += values.map { recordSummary(kind: .cheki, id: $0.id, idols: $0.idols, event: $0.event, date: $0.date, note: $0.note) }
         }
         if kind == nil || kind == .shame {
             let values = try modelContext.fetch(FetchDescriptor<Shame>()).filter {
                 ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs)
-                    && matches(idols: $0.idols, event: nil, date: $0.date)
+                    && matches(
+                        idolIDs: $0.idols.map(\.id),
+                        eventID: nil,
+                        date: $0.date
+                    )
             }
             lines += values.map { recordSummary(kind: .shame, id: $0.id, idols: $0.idols, event: nil, date: $0.date, note: $0.note) }
         }
         if kind == nil || kind == .douga {
             let values = try modelContext.fetch(FetchDescriptor<Douga>()).filter {
                 ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs)
-                    && matches(idols: $0.idols, event: nil, date: $0.date)
+                    && matches(
+                        idolIDs: $0.idols.map(\.id),
+                        eventID: nil,
+                        date: $0.date
+                    )
             }
             lines += values.map { recordSummary(kind: .douga, id: $0.id, idols: $0.idols, event: nil, date: $0.date, note: $0.note) }
         }
@@ -6606,7 +6707,17 @@ struct ChekinanaCommandExecutor {
     ) throws -> ChekinanaCommandResponse {
         switch kind {
         case .cheki:
-            return .chekiCards([chekiCard(for: try resolveUniqueCheki(target))])
+            let value = try resolveUniqueChekiRecord(target)
+            return .text(recordSummary(
+                kind: kind,
+                id: value.id,
+                idols: try refetchIdolsByIDs(value.idolIDs),
+                event: try refetchEventByID(value.eventID),
+                date: value.date,
+                size: value.size,
+                note: value.note,
+                count: value.count
+            ))
         case .shame:
             let value = try resolveUniqueShame(target)
             return .text(recordSummary(kind: kind, id: value.id, idols: value.idols, event: nil, date: value.date, note: value.note))
@@ -6626,9 +6737,9 @@ struct ChekinanaCommandExecutor {
            let mediaError = ChekinanaMediaBackedCreationError(kind: kind) {
             throw mediaError
         }
-        let allowed = Set(["idols", "event", "date", "idx", "user", "note", "favorite", "size", "clear_fields"])
+        let allowed = Set(["idols", "event", "date", "note", "size", "count", "clear_fields"])
         guard Set(arguments.keys).isSubset(of: allowed),
-              !(kind != .cheki && ["event", "idx", "favorite", "size"].contains(where: { arguments[$0] != nil })) else {
+              !(kind != .cheki && ["event", "size", "count"].contains(where: { arguments[$0] != nil })) else {
             throw ChekinanaNLClientError.invalidSchema
         }
         if case .delete = mutation {
@@ -6640,12 +6751,9 @@ struct ChekinanaCommandExecutor {
         if case .add = mutation, arguments["clear_fields"] != nil {
             throw ChekinanaNLClientError.invalidSchema
         }
-        if case .add = mutation, arguments["user"] != nil {
-            throw ChekinanaNLClientError.invalidSchema
-        }
         let clearFields = Set(arguments["clear_fields"]?.split(separator: ",").map(String.init) ?? [])
         let permittedClear = kind == .cheki
-            ? Set(["idols", "event", "date", "idx", "user", "note", "size"])
+            ? Set(["idols", "event", "date", "note", "size"])
             : Set(["idols", "date", "note"])
         guard clearFields.isSubset(of: permittedClear),
               clearFields.isDisjoint(with: arguments.keys) else {
@@ -6655,23 +6763,19 @@ struct ChekinanaCommandExecutor {
         var idolIDs: [UUID] = []
         var eventID: UUID?
         var date: Date?
-        var idx: Int?
         var note = ""
-        var userAppears: Bool?
-        var favorite = false
         var size: ChekiSize?
+        var count = 1
         var fingerprint: String?
-        var originalIdolIDs: [UUID] = []
-        var originalEventID: UUID?
-        var originalDate: Date?
+        var chekiRecordSnapshot: ChekinanaChekiRecordSnapshot?
 
         switch (kind, mutation) {
         case (.cheki, .edit(let id)), (.cheki, .delete(let id)):
-            let value = try refetchChekiByID(id)
-            idolIDs = value.idols.map(\.id); eventID = value.event?.id; date = value.date
-            idx = value.idx; note = value.note; favorite = value.isFavorite; size = value.size
-            userAppears = value.userAppears
+            let value = try refetchChekiRecordByID(id)
+            idolIDs = value.idolIDs; eventID = value.eventID; date = value.date
+            note = value.note; size = value.size; count = max(1, value.count)
             fingerprint = recordFingerprint(value)
+            chekiRecordSnapshot = ChekinanaChekiRecordSnapshot(value)
         case (.shame, .edit(let id)), (.shame, .delete(let id)):
             let value = try refetchShameByID(id)
             idolIDs = value.idols.map(\.id); date = value.date
@@ -6683,53 +6787,49 @@ struct ChekinanaCommandExecutor {
         case (_, .add):
             break
         }
-        originalIdolIDs = idolIDs
-        originalEventID = eventID
-        originalDate = date
-
         if clearFields.contains("idols") { idolIDs = [] }
         if clearFields.contains("event") { eventID = nil }
         if clearFields.contains("date") { date = nil }
-        if clearFields.contains("idx") { idx = nil }
         if clearFields.contains("note") { note = "" }
-        if clearFields.contains("user") { userAppears = nil }
         if clearFields.contains("size") { size = nil }
         if let value = arguments["idols"] { idolIDs = try resolveIdolList(value).map(\.id) }
         if let value = arguments["event"] { eventID = try resolveUniqueEvent(value).id }
         if let value = arguments["date"] { date = try parseCalendarDate(value) }
-        if let value = arguments["idx"] { idx = try parsePositiveIndex(value) }
         if let value = arguments["note"] { note = value }
-        if let value = arguments["user"] { userAppears = try parseOptionalBool(value, argumentName: "user") }
-        if let value = arguments["favorite"] { favorite = try requireStrictBool(value) }
         if let value = arguments["size"] { size = try requireRecordSize(value) }
+        if let value = arguments["count"] {
+            guard let parsed = Int(value), parsed >= 0 else {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+            if case .add = mutation, parsed > 100 {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+            count = parsed
+        }
+        if case .add = mutation, count == 0 {
+            throw ChekinanaNLClientError.invalidSchema
+        }
 
         if kind == .cheki {
             if case .add = mutation,
                arguments["event"] == nil,
                !clearFields.contains("event") {
                 eventID = try uniqueEvent(for: date)?.id
-            }
-            if idolIDs.isEmpty || date == nil {
-                guard idx == nil else { throw ChekinanaNLClientError.invalidSchema }
-            } else if idx == nil, case .add = mutation {
-                idx = try nextChekiIndex(idolIDs: idolIDs, eventID: eventID, eventDate: date, excludingChekiID: nil)
-            } else if case .edit(let id) = mutation,
-                      arguments["idx"] == nil,
-                      !clearFields.contains("idx"),
-                      !sameChekiGroup(
-                        idolIDs: originalIdolIDs,
-                        eventID: originalEventID,
-                        eventDate: originalDate,
-                        otherIdolIDs: idolIDs,
-                        otherEventID: eventID,
-                        otherEventDate: date
+            } else if arguments["event"] == nil,
+                      !clearFields.contains("event"),
+                      let currentEvent = try refetchEventByID(eventID),
+                      !ChekinanaChekiEventSelectionPolicy.includes(
+                          recordDate: date,
+                          eventDate: currentEvent.date
                       ) {
-                idx = try nextChekiIndex(
-                    idolIDs: idolIDs,
-                    eventID: eventID,
-                    eventDate: date,
-                    excludingChekiID: id
-                )
+                eventID = nil
+            }
+            if let selectedEvent = try refetchEventByID(eventID),
+               !ChekinanaChekiEventSelectionPolicy.includes(
+                   recordDate: date,
+                   eventDate: selectedEvent.date
+               ) {
+                throw ChekinanaAddChekiError.eventOutsideDateWindow
             }
         }
         let payload = ChekinanaConfirmationLedger.RecordPayload(
@@ -6739,11 +6839,13 @@ struct ChekinanaCommandExecutor {
             idolIDs: idolIDs,
             eventID: eventID,
             date: normalizedCalendarDay(date),
-            idx: idx,
+            idx: nil,
             note: note,
-            userAppears: userAppears,
-            favorite: favorite,
-            size: size
+            userAppears: nil,
+            favorite: false,
+            size: size,
+            count: count,
+            expectedChekiRecordSnapshot: chekiRecordSnapshot
         )
         let code = confirmationLedger.insert(.mutateRecord(payload))
         return .confirmationText(
@@ -6761,10 +6863,31 @@ struct ChekinanaCommandExecutor {
         token: String
     ) throws -> UUID {
         switch kind {
-        case .cheki: try resolveUniqueCheki(token).id
+        case .cheki: try resolveUniqueChekiRecord(token).id
         case .shame: try resolveUniqueShame(token).id
         case .douga: try resolveUniqueDouga(token).id
         }
+    }
+
+    private func resolveUniqueChekiRecord(
+        _ token: String
+    ) throws -> ChekiRecord {
+        let normalized = token.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+        let matches = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
+            .filter {
+                $0.id.uuidString.lowercased().hasPrefix(normalized)
+                    && ChekinanaChekiRecordReadPolicy.isVisible(
+                        $0,
+                        hiddenIDs: hiddenIDs
+                    )
+            }
+        guard matches.count == 1, let value = matches.first else {
+            throw ChekinanaNLClientError.invalidSchema
+        }
+        return value
     }
 
     private func resolveUniqueShame(_ token: String) throws -> Shame {
@@ -6803,14 +6926,18 @@ struct ChekinanaCommandExecutor {
         idols: [Idol],
         event: Event?,
         date: Date?,
-        note: String
+        size: ChekiSize? = nil,
+        note: String,
+        count: Int? = nil
     ) -> String {
         let people = idols.map(\.name).joined(separator: ", ")
         let day = date.map(calendarDateString) ?? "—"
         let eventName = event?.name ?? "—"
+        let sizeText = size.map { " · \($0.rawValue)" } ?? ""
+        let quantity = count.map { " · ×\(max(1, $0))" } ?? ""
         let suffix = note.isEmpty ? "" : " · \(note)"
         let typeName = ChekinanaRecordKind(rawValue: kind.rawValue)?.title ?? kind.rawValue
-        return "[\(String(id.uuidString.prefix(8)).lowercased())] \(typeName) · \(people.isEmpty ? "—" : people) · \(eventName) · \(day)\(suffix)"
+        return "[\(String(id.uuidString.prefix(8)).lowercased())] \(typeName) · \(people.isEmpty ? "—" : people) · \(eventName) · \(day)\(sizeText)\(quantity)\(suffix)"
     }
 
     private func parsePositiveIndex(_ raw: String) throws -> Int {
@@ -6915,12 +7042,9 @@ struct ChekinanaCommandExecutor {
                 command.arguments["idol_threshold"] ?? ""
             )
         }
-        let threshold = try parsePatternThreshold(command.arguments["idol_threshold"])
+        try validateLegacyPatternThreshold(command.arguments["idol_threshold"])
         let candidates = idolRecognitionEnabled
-            ? try parsePatternCandidates(
-                command.arguments["candidates"],
-                threshold: threshold
-            )
+            ? try parsePatternCandidates(command.arguments["candidates"])
             : nil
 
         return ChekinanaScannerOptions(
@@ -6989,8 +7113,7 @@ struct ChekinanaCommandExecutor {
     }
 
     private func parsePatternCandidates(
-        _ value: String?,
-        threshold: Float = ChekinanaPatternClassifier.unassignedThreshold
+        _ value: String?
     ) throws -> ChekinanaPatternCandidateSet {
         let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
         let idols = try modelContext.fetch(FetchDescriptor<Idol>()).filter {
@@ -7002,8 +7125,7 @@ struct ChekinanaCommandExecutor {
                 idolIDs: idols
                     .filter(\.hasRecognitionPatterns)
                     .map(\.id),
-                includesUnassigned: true,
-                threshold: threshold
+                includesUnassigned: true
             )
         }
         let tokens = rawValue
@@ -7034,18 +7156,16 @@ struct ChekinanaCommandExecutor {
         }
         return ChekinanaPatternCandidateSet(
             idolIDs: ids,
-            includesUnassigned: includesUnassigned,
-            threshold: threshold
+            includesUnassigned: includesUnassigned
         )
     }
 
-    private func parsePatternThreshold(_ value: String?) throws -> Float {
-        guard let value else { return ChekinanaPatternClassifier.unassignedThreshold }
-        guard let threshold = Float(value), threshold.isFinite,
+    private func validateLegacyPatternThreshold(_ value: String?) throws {
+        guard let value else { return }
+        guard let threshold = Double(value), threshold.isFinite,
               (0...1).contains(threshold) else {
             throw ChekinanaScanChekiError.invalidArgumentValue("idol_threshold", value)
         }
-        return threshold
     }
 
     private func parseScannerExpected(_ value: String?) throws -> Int? {
@@ -7164,7 +7284,14 @@ struct ChekinanaCommandExecutor {
         let dougaCount = try modelContext.fetch(FetchDescriptor<Douga>()).reduce(into: 0) {
             if $1.idols.contains(where: { $0.id == idolID }) { $0 += 1 }
         }
-        return chekiCount + shameCount + dougaCount
+        let simpleRecordCount = try modelContext.fetch(
+            FetchDescriptor<ChekiRecord>()
+        ).reduce(into: 0) {
+            if ChekinanaChekiRecordReadPolicy.containsIdol($1, idolID: idolID) {
+                $0 += 1
+            }
+        }
+        return chekiCount + simpleRecordCount + shameCount + dougaCount
     }
 
     private func hasIdol(sourceId: String) throws -> Bool {
@@ -7272,9 +7399,11 @@ struct ChekinanaCommandExecutor {
             if edited.contains(.date) {
                 cheki.date = normalizedCalendarDay(payload.date)
             }
-            if edited.contains(.event) { cheki.event = event }
+            if edited.contains(.event) || edited.contains(.date) {
+                cheki.event = event
+            }
             if edited.contains(.userAppears) || cheki.userAppears == nil {
-                cheki.userAppears = payload.userAppears
+                cheki.userAppears = payload.userAppears ?? false
             }
             if edited.contains(.size) { cheki.size = payload.size }
             if edited.contains(.favorite) { cheki.isFavorite = payload.isFavorite }
@@ -7456,6 +7585,21 @@ struct ChekinanaCommandExecutor {
         return cheki
     }
 
+    private func refetchChekiRecordByID(_ id: UUID) throws -> ChekiRecord {
+        var descriptor = FetchDescriptor<ChekiRecord>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        guard let record = try modelContext.fetch(descriptor).first,
+              ChekinanaChekiRecordReadPolicy.isVisible(
+                record,
+                hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+              ) else {
+            throw ChekinanaNLClientError.invalidSchema
+        }
+        return record
+    }
+
     private func refetchShameByID(_ id: UUID) throws -> Shame {
         var descriptor = FetchDescriptor<Shame>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 2
@@ -7496,6 +7640,18 @@ struct ChekinanaCommandExecutor {
             value.size?.rawValue ?? "",
             value.imageRef ?? "",
             String(value.updatedAt.timeIntervalSince1970.bitPattern),
+        ].joined(separator: "\u{1f}")
+    }
+
+    private func recordFingerprint(_ value: ChekiRecord) -> String {
+        [
+            value.id.uuidString,
+            value.idolIDs.map(\.uuidString).sorted().joined(separator: ","),
+            value.eventID?.uuidString ?? "",
+            value.date.map(ChekinanaDateOnly.string) ?? "",
+            value.note,
+            value.size?.rawValue ?? "",
+            String(max(1, value.count)),
         ].joined(separator: "\u{1f}")
     }
 
@@ -7687,7 +7843,14 @@ struct ChekinanaCommandExecutor {
     ) throws {
         // Media is the only required Cheki field. Associations remain optional
         // and can be filled later by scan review or the editor.
-        _ = (idols, event, eventDate, allowEmptyIdols, allowMissingOccasion)
+        _ = (idols, allowEmptyIdols, allowMissingOccasion)
+        if let event,
+           !ChekinanaChekiEventSelectionPolicy.includes(
+               recordDate: eventDate,
+               eventDate: event.date
+           ) {
+            throw ChekinanaAddChekiError.eventOutsideDateWindow
+        }
     }
 
     private func sameChekiGroup(
@@ -7834,7 +7997,11 @@ struct ChekinanaCommandExecutor {
     }
 
     private func eventCard(_ event: Event) -> ChekinanaEventCard {
-        ChekinanaEventCard(
+        let schedule = (try? ChekinanaEventSchedulePersistence.value(
+            for: event.id,
+            in: modelContext
+        )) ?? .empty
+        return ChekinanaEventCard(
             id: event.id,
             name: event.name,
             date: event.date.map(calendarDateString) ?? "",
@@ -7843,6 +8010,8 @@ struct ChekinanaCommandExecutor {
             price: event.price ?? "",
             weiboURL: event.weiboURL?.absoluteString ?? "",
             ticketURL: event.ticketURL?.absoluteString ?? "",
+            openTime: schedule.openTime,
+            startTime: schedule.startTime,
             note: event.note,
             confirmationCode: nil
         )
@@ -7861,6 +8030,8 @@ struct ChekinanaCommandExecutor {
             price: fields.price,
             weiboURL: fields.weiboURL,
             ticketURL: fields.ticketURL,
+            openTime: fields.openTime,
+            startTime: fields.startTime,
             note: fields.note,
             confirmationCode: confirmationCode
         )
@@ -7879,6 +8050,16 @@ struct ChekinanaCommandExecutor {
         ))
         parts.append(ChekinanaCommandCopy.format("field.city", fallback: "City: %@", event.city ?? unset))
         parts.append(ChekinanaCommandCopy.format("field.livehouse", fallback: "Livehouse: %@", event.resolvedLivehouse ?? unset))
+        let schedule = try? ChekinanaEventSchedulePersistence.value(
+            for: event.id,
+            in: modelContext
+        )
+        if let timeSummary = ChekinanaEventTime.summary(
+            openTime: schedule?.openTime,
+            startTime: schedule?.startTime
+        ) {
+            parts.append(timeSummary)
+        }
         parts.append(ChekinanaCommandCopy.format("field.weibo", fallback: "Weibo: %@", event.weiboURL?.absoluteString ?? unset))
         parts.append(ChekinanaCommandCopy.format("field.ticket", fallback: "Ticket: %@", event.ticketURL?.absoluteString ?? unset))
         parts.append(ChekinanaCommandCopy.format("field.note", fallback: "Note: %@", event.note.isEmpty ? unset : event.note))
@@ -8107,18 +8288,18 @@ struct ChekinanaCommandExecutor {
                 "deletecheki <cheki_id>",
             ],
             "listrecord": [
-                "listrecord [cheki|shame|douga] [idols=<refs>] [date=YYYY-MM-DD] [event=<ref> for Cheki only] [idx=<positive_int> for Cheki only] [favorite=true|false] [size=mini|wide]",
+                "listrecord [cheki|shame|douga] [idols=<refs>] [date=YYYY-MM-DD] [event=<ref> for Cheki only] [size=mini|wide for Cheki only]",
             ],
             "showrecord": [
                 "showrecord <cheki|shame|douga> target=<record_ref>",
             ],
             "addrecord": [
-                "addrecord cheki [idols=<refs>] [date=YYYY-MM-DD] [note=<text>]",
-                "Cheki only: [event=<ref>] [idx=<positive_int>] [favorite=true|false] [size=mini|wide]",
+                "addrecord cheki [idols=<refs>] [date=YYYY-MM-DD] [event=<ref>] [size=mini|wide] [note=<text>] [count=1..100]",
             ],
             "editrecord": [
-                "editrecord <cheki|shame|douga> target=<record_ref> [patch fields] [clear_fields=<fields>]",
-                "Event is a Cheki-only field.",
+                "editrecord cheki target=<record_ref> [idols=<refs>] [date=YYYY-MM-DD] [event=<ref>] [size=mini|wide] [note=<text>] [count=<nonnegative_integer>] [clear_fields=idols,event,date,size,note]",
+                "setting count=0 deletes the simple Cheki record",
+                "Shame and Douga retain only their existing idols/date/note edit support.",
             ],
             "deleterecord": [
                 "deleterecord <cheki|shame|douga> target=<record_ref>",
@@ -9806,22 +9987,30 @@ struct ChekinanaLocalImportChekiOutput: Sendable {
 enum ChekinanaImportedChekiSizePolicy {
     /// Geometry comes from the existing scanner contract: Mini 1200×1908
     /// (100:159) and Wide 2400×1908 (200:159). Orientation is deliberately
-    /// ignored. Images not exactly proportional to either template stay nil.
+    /// ignored. A five-percent relative aspect-ratio tolerance admits ordinary
+    /// edge crops while keeping 4:3 and square images outside both templates.
+    static let maximumRelativeError = 0.05
+    static let miniAspectRatio = 159.0 / 100.0
+    static let wideAspectRatio = 200.0 / 159.0
+
     static func inferredSize(width: Int, height: Int) -> ChekiSize? {
         guard width > 0, height > 0 else { return nil }
-        let long = max(width, height)
-        let short = min(width, height)
-        if long.multipliedReportingOverflow(by: 100).overflow == false,
-           short.multipliedReportingOverflow(by: 159).overflow == false,
-           long * 100 == short * 159 {
-            return .mini
-        }
-        if long.multipliedReportingOverflow(by: 159).overflow == false,
-           short.multipliedReportingOverflow(by: 200).overflow == false,
-           long * 159 == short * 200 {
-            return .wide
-        }
-        return nil
+        let aspectRatio = Double(max(width, height)) / Double(min(width, height))
+        let candidates: [(size: ChekiSize, ratio: Double)] = [
+            (.mini, miniAspectRatio),
+            (.wide, wideAspectRatio),
+        ]
+        guard let closest = candidates.min(by: {
+            relativeError(aspectRatio, target: $0.ratio)
+                < relativeError(aspectRatio, target: $1.ratio)
+        }) else { return .other }
+        return relativeError(aspectRatio, target: closest.ratio) <= maximumRelativeError
+            ? closest.size
+            : .other
+    }
+
+    private static func relativeError(_ value: Double, target: Double) -> Double {
+        abs(value - target) / target
     }
 }
 
@@ -9842,9 +10031,8 @@ enum ChekinanaImportedChekiCanvasPolicy {
             shortEdge = wideShortEdge
             longEdge = wideLongEdge
         case .mini, .other, nil:
-            // Unknown/ambiguous inputs preserve orientation on the existing
-            // Mini canvas, but remain nil in the ledger rather than being
-            // mislabeled as Mini.
+            // Nonstandard inputs preserve orientation on the existing Mini
+            // canvas while remaining `.other` in scanner and ledger metadata.
             shortEdge = miniShortEdge
             longEdge = miniLongEdge
         }
@@ -11949,6 +12137,7 @@ private enum ChekinanaAddChekiError: LocalizedError {
     case duplicateCheki(String)
     case duplicateIndex(Int)
     case indexOverflow
+    case eventOutsideDateWindow
     case modelContextMismatch
     case invalidArgumentValue(String, String)
     case duplicateArgument(String)
@@ -11975,6 +12164,11 @@ private enum ChekinanaAddChekiError: LocalizedError {
             ChekinanaCommandCopy.format("error.cheki_index_used", fallback: "Cheki index #%lld is already used in this Idol/date group.", Int64(idx))
         case .indexOverflow:
             ChekinanaCommandCopy.text("error.cheki_index_overflow", fallback: "Cheki index cannot be incremented for this Idol/date group.")
+        case .eventOutsideDateWindow:
+            ChekinanaCommandCopy.text(
+                "error.cheki_event_window",
+                fallback: "The Event must be dated within one day of the Cheki."
+            )
         case .modelContextMismatch:
             ChekinanaCommandCopy.text("error.context_mismatch", fallback: "Cheki relationships could not be attached to the current data context.")
         case .invalidArgumentValue(let argumentName, let value):

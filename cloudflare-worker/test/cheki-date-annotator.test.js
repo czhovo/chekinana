@@ -508,7 +508,7 @@ test("sends only the fixed prompt and image Data URL to Qwen", async () => {
       assert.equal(headers.get("cookie"), null);
 
       const body = JSON.parse(init.body);
-      assert.equal(body.model, "qwen3.7-plus");
+      assert.equal(body.model, "qwen3.7-flash");
       assert.equal(body.max_tokens, 1024);
       assert.equal(body.stream, false);
       assert.equal(body.enable_thinking, false);

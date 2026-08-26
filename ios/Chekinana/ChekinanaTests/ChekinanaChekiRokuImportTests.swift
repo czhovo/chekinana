@@ -37,7 +37,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
     func testRecordKindCountsStayInvariantInSimplifiedChineseForZeroOneTwo() throws {
         let bundle = try localizedAppBundle(language: "zh-Hans")
         let locale = Locale(identifier: "zh-Hans")
-        XCTAssertEqual(labels(for: .cheki, bundle: bundle, locale: locale), ["拍立得 0 条", "拍立得 1 条", "拍立得 2 条"])
+        XCTAssertEqual(labels(for: .cheki, bundle: bundle, locale: locale), ["0张拍立得", "1张拍立得", "2张拍立得"])
         XCTAssertEqual(labels(for: .shame, bundle: bundle, locale: locale), ["手机合影 0 条", "手机合影 1 条", "手机合影 2 条"])
         XCTAssertEqual(labels(for: .douga, bundle: bundle, locale: locale), ["视频 0 条", "视频 1 条", "视频 2 条"])
     }
@@ -45,7 +45,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
     func testRecordKindCountsStayInvariantInJapaneseForZeroOneTwo() throws {
         let bundle = try localizedAppBundle(language: "ja")
         let locale = Locale(identifier: "ja")
-        XCTAssertEqual(labels(for: .cheki, bundle: bundle, locale: locale), ["チェキ 0件", "チェキ 1件", "チェキ 2件"])
+        XCTAssertEqual(labels(for: .cheki, bundle: bundle, locale: locale), ["チェキ0枚", "チェキ1枚", "チェキ2枚"])
         XCTAssertEqual(labels(for: .shame, bundle: bundle, locale: locale), ["写メ 0件", "写メ 1件", "写メ 2件"])
         XCTAssertEqual(labels(for: .douga, bundle: bundle, locale: locale), ["動画 0件", "動画 1件", "動画 2件"])
     }
@@ -55,6 +55,90 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             "unsafe.jpg": Data([0xFF, 0xD8, 0xFF, 0xD9]),
         ])
         XCTAssertTrue(previews.isEmpty)
+    }
+
+    func testSelectedFileReaderCopiesValidChekiRokuIntoTemporaryStorage() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChekinanaSelectedFileReaderTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("backup.chekiroku")
+        let payload = Data([0x50, 0x4B, 0x03, 0x04, 0x01, 0x02])
+        try payload.write(to: source)
+
+        let temporaryCopy = try ChekinanaChekiRokuSelectedFileReader
+            .copyToTemporaryStorage(source)
+        defer { try? FileManager.default.removeItem(at: temporaryCopy) }
+
+        XCTAssertNotEqual(temporaryCopy, source)
+        XCTAssertEqual(temporaryCopy.pathExtension, "chekiroku")
+        XCTAssertEqual(try Data(contentsOf: temporaryCopy), payload)
+    }
+
+    func testSelectedFileReaderRejectsWrongExtensionNonZipAndOversizedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChekinanaSelectedFileReaderTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let wrongExtension = directory.appendingPathComponent("backup.zip")
+        try Data([0x50, 0x4B]).write(to: wrongExtension)
+        XCTAssertThrowsError(
+            try ChekinanaChekiRokuSelectedFileReader.copyToTemporaryStorage(wrongExtension)
+        ) { error in
+            XCTAssertEqual(error as? ChekinanaChekiRokuSelectedFileError, .invalidFile)
+        }
+
+        let nonZIP = directory.appendingPathComponent("not-zip.chekiroku")
+        try Data([0x00, 0x01]).write(to: nonZIP)
+        XCTAssertThrowsError(
+            try ChekinanaChekiRokuSelectedFileReader.copyToTemporaryStorage(nonZIP)
+        ) { error in
+            XCTAssertEqual(error as? ChekinanaChekiRokuSelectedFileError, .notZIP)
+        }
+
+        let directorySelection = directory.appendingPathComponent("folder.chekiroku", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directorySelection,
+            withIntermediateDirectories: true
+        )
+        XCTAssertThrowsError(
+            try ChekinanaChekiRokuSelectedFileReader.copyToTemporaryStorage(directorySelection)
+        ) { error in
+            XCTAssertEqual(error as? ChekinanaChekiRokuSelectedFileError, .invalidFile)
+        }
+
+        let oversized = directory.appendingPathComponent("oversized.chekiroku")
+        try Data([0x50, 0x4B]).write(to: oversized)
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: UInt64(
+            ChekinanaChekiRokuSelectedFileReader.maximumArchiveSize + 1
+        ))
+        try handle.close()
+        XCTAssertThrowsError(
+            try ChekinanaChekiRokuSelectedFileReader.copyToTemporaryStorage(oversized)
+        ) { error in
+            XCTAssertEqual(error as? ChekinanaChekiRokuSelectedFileError, .invalidFile)
+        }
+    }
+
+    func testImportPublicationPolicyRejectsCloseOrCancellationAfterYield() {
+        let startedGeneration = 7
+        XCTAssertTrue(ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
+            isCancelled: false,
+            generation: startedGeneration,
+            currentGeneration: startedGeneration
+        ))
+        XCTAssertFalse(ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
+            isCancelled: false,
+            generation: startedGeneration,
+            currentGeneration: startedGeneration + 1
+        ))
+        XCTAssertFalse(ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
+            isCancelled: true,
+            generation: startedGeneration,
+            currentGeneration: startedGeneration
+        ))
     }
 
     private func labels(
@@ -192,7 +276,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         let database = try fixture.database(sql: """
             DELETE FROM cheki_info;
             INSERT INTO cheki_info VALUES(1,\(milliseconds),1,1,'dated');
-            INSERT INTO cheki_info VALUES(1,NULL,1,2,'undated');
+            INSERT INTO cheki_info VALUES(1,NULL,1,1,'undated');
             """)
         let archive = try ChekinanaChekiRokuImport.read(
             fixture.archive(database: database),
@@ -372,9 +456,9 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
     func testPlannerSkipsNonChekiAndOnlyPlansChekiShortage() throws {
         let idol = UUID(), day = Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_700_000_000))
         let records = [ChekinanaChekiRokuImport.SourceRecord(memberID: 1, date: day, count: 3, category: 1, memo: "cheki"), ChekinanaChekiRokuImport.SourceRecord(memberID: 1, date: day, count: 1, category: 2, memo: "shame"), ChekinanaChekiRokuImport.SourceRecord(memberID: 1, date: day, count: 1, category: 3, memo: "douga")]
-        let existing = [ChekiRokuRecordImportPlanner.Existing(idolID: idol, day: day, category: 1, index: 7)]
+        let existing = [ChekiRokuRecordImportPlanner.Existing(idolID: idol, day: day, category: 1)]
         let first = try ChekiRokuRecordImportPlanner.make(records: records, memberMap: [1: idol], existing: existing)
-        XCTAssertEqual(first.map(\.category), [1]); XCTAssertEqual(first.first?.count, 2); XCTAssertEqual(first.first?.memoRuns, [.init(memo: "cheki", count: 2)]); XCTAssertEqual(first.first?.nextIndex, 8)
+        XCTAssertEqual(first.map(\.category), [1]); XCTAssertEqual(first.first?.count, 2); XCTAssertEqual(first.first?.memoRuns, [.init(memo: "cheki", count: 2)])
     }
 
     func testPlannerKeepsOrderedMemoRunsWithoutExpandingEveryObject() throws {
@@ -383,14 +467,21 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             ChekinanaChekiRokuImport.SourceRecord(memberID: 1, date: day, count: 3, category: 1, memo: "first"),
             ChekinanaChekiRokuImport.SourceRecord(memberID: 1, date: day, count: 2, category: 1, memo: "second"),
         ]
-        let existing = (0..<2).map { _ in ChekiRokuRecordImportPlanner.Existing(idolID: idol, day: day, category: 1, index: nil) }
+        let existing = [
+            ChekiRokuRecordImportPlanner.Existing(
+                idolID: idol,
+                day: day,
+                category: 1,
+                count: 2
+            ),
+        ]
         let item = try ChekiRokuRecordImportPlanner.make(records: records, memberMap: [1: idol], existing: existing).first
         XCTAssertEqual(item?.count, 3)
         XCTAssertEqual(item?.memoRuns, [.init(memo: "first", count: 1), .init(memo: "second", count: 2)])
     }
 
     func testBackgroundImportActorUsesItsOwnRelationshipsAndReplansIdempotently() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -410,7 +501,15 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             ),
             calendar: sourceCalendar
         ))
-        let existing = Cheki(date: day, idx: 7, size: .mini, note: "existing")
+        let event = Event(name: "Same day", date: day)
+        setup.insert(event)
+        let existing = Cheki(
+            date: day,
+            idx: 7,
+            size: .mini,
+            imageRef: "existing.jpg",
+            note: "existing"
+        )
         setup.insert(existing)
         existing.idols = [idol]
         try setup.save()
@@ -439,21 +538,31 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         )
 
         let verification = ModelContext(container)
-        let importedChekis = try verification.fetch(FetchDescriptor<Cheki>()).filter { $0.note == "cheki" }
-        XCTAssertEqual(importedChekis.map(\.idx).sorted { ($0 ?? 0) < ($1 ?? 0) }, [8, 9])
-        XCTAssertTrue(importedChekis.allSatisfy { $0.idols.map(\.id) == [idol.id] })
-        XCTAssertEqual(Set(importedChekis.compactMap { $0.date.map(ChekinanaDateOnly.string) }), ["2026-08-08"])
-        let undatedCheki = try verification.fetch(FetchDescriptor<Cheki>()).first {
+        let importedRecords = try verification.fetch(FetchDescriptor<ChekiRecord>())
+            .filter { $0.note == "cheki" }
+        XCTAssertEqual(importedRecords.count, 1)
+        XCTAssertEqual(importedRecords.first?.count, 2)
+        XCTAssertTrue(importedRecords.allSatisfy { $0.idols.map(\.id) == [idol.id] })
+        XCTAssertTrue(importedRecords.allSatisfy { $0.event?.id == event.id })
+        XCTAssertTrue(importedRecords.allSatisfy { $0.size == .mini })
+        XCTAssertEqual(Set(importedRecords.compactMap { $0.date.map(ChekinanaDateOnly.string) }), ["2026-08-08"])
+        let undatedRecord = try verification.fetch(FetchDescriptor<ChekiRecord>()).first {
             $0.note == "undated"
         }
-        XCTAssertEqual(undatedCheki?.date, nil)
-        XCTAssertEqual(undatedCheki?.idols.map(\.id), [idol.id])
+        XCTAssertEqual(undatedRecord?.date, nil)
+        XCTAssertEqual(undatedRecord?.idols.map(\.id), [idol.id])
+        XCTAssertNil(undatedRecord?.event)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<Cheki>()), 1)
+        XCTAssertEqual(
+            try verification.fetch(FetchDescriptor<Cheki>()).first?.imageRef,
+            "existing.jpg"
+        )
         XCTAssertTrue(try verification.fetch(FetchDescriptor<Shame>()).isEmpty)
         XCTAssertTrue(try verification.fetch(FetchDescriptor<Douga>()).isEmpty)
     }
 
-    func testBackgroundImportActorRollsBackWholeBatchOnIndexOverflow() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+    func testBackgroundImportActorIgnoresLegacyMaximumIndexAndCreatesSimpleRecord() async throws {
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -462,7 +571,13 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         let idol = Idol(name: "fixture")
         setup.insert(idol)
         let day = Calendar.current.startOfDay(for: Date())
-        let occupied = Cheki(date: day, idx: Int.max, size: .mini, note: "occupied")
+        let occupied = Cheki(
+            date: day,
+            idx: Int.max,
+            size: .mini,
+            imageRef: "occupied.jpg",
+            note: "occupied"
+        )
         setup.insert(occupied)
         occupied.idols = [idol]
         try setup.save()
@@ -476,21 +591,25 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             category: 1,
             memo: "overflow"
         )]
-        do {
-            _ = try await importer.save(
-                records: source,
-                memberMap: [1: idol.id],
-                idolNames: [idol.id: idol.name]
-            ) { _ in }
-            XCTFail("Expected index overflow")
-        } catch {}
+        let inserted = try await importer.save(
+            records: source,
+            memberMap: [1: idol.id],
+            idolNames: [idol.id: idol.name]
+        ) { _ in }
+        XCTAssertEqual(inserted, 1)
         let records = try ModelContext(container).fetch(FetchDescriptor<Cheki>())
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records.first?.note, "occupied")
+        let simpleRecords = try ModelContext(container).fetch(
+            FetchDescriptor<ChekiRecord>()
+        )
+        XCTAssertEqual(simpleRecords.count, 1)
+        XCTAssertEqual(simpleRecords.first?.note, "overflow")
+        XCTAssertEqual(simpleRecords.first?.count, 1)
     }
 
     func testBackgroundImportActorCancellationBeforeSaveRollsBackWholeBatch() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -505,7 +624,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         let source = [ChekinanaChekiRokuImport.SourceRecord(
             memberID: 1,
             date: Calendar.current.startOfDay(for: Date()),
-            count: 65,
+            count: 150,
             category: 1,
             memo: "cancel"
         )]
@@ -523,10 +642,153 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         } catch is CancellationError {}
 
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
+
+        let idolID = idol.id
+        let idolName = idol.name
+        let recovered = try await Task.detached {
+            try await importer.save(
+                records: source,
+                memberMap: [1: idolID],
+                idolNames: [idolID: idolName]
+            ) { _ in }
+        }.value
+        XCTAssertEqual(recovered, 150)
+        let recoveredRecords = try ModelContext(container).fetch(
+            FetchDescriptor<ChekiRecord>()
+        )
+        XCTAssertEqual(recoveredRecords.count, 1)
+        XCTAssertEqual(recoveredRecords.first?.count, 150)
     }
 
-    func testCommitReplansAfterLateInsertionAndUsesLiveMaximumIndex() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+    func testBackgroundImporterHandlesLiveIntMaxCountWithoutOverflow() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Maximum Idol")
+        let day = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
+        setup.insert(idol)
+        setup.insert(ChekiRecord(
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "maximum",
+            count: Int.max
+        ))
+        try setup.save()
+
+        let importer = await Task.detached {
+            ChekiRokuRecordImportActor(modelContainer: container)
+        }.value
+        let source = [ChekinanaChekiRokuImport.SourceRecord(
+            memberID: 1,
+            date: day,
+            count: 1,
+            category: 1,
+            memo: "maximum"
+        )]
+        let inserted = try await importer.save(
+            records: source,
+            memberMap: [1: idol.id],
+            idolNames: [idol.id: idol.name]
+        ) { _ in }
+
+        XCTAssertEqual(inserted, 0)
+        let records = try ModelContext(container).fetch(
+            FetchDescriptor<ChekiRecord>()
+        )
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.count, Int.max)
+    }
+
+    func testBackgroundImporterDuplicateMergeOverflowRollsBackAndReleasesGate() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Overflow Idol")
+        let day = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
+        setup.insert(idol)
+        setup.insert(ChekiRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            idols: [idol],
+            date: day.addingTimeInterval(60 * 60),
+            size: .mini,
+            note: "duplicate",
+            count: Int.max
+        ))
+        setup.insert(ChekiRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "duplicate",
+            count: 1
+        ))
+        try setup.save()
+
+        let source = [ChekinanaChekiRokuImport.SourceRecord(
+            memberID: 1,
+            date: day,
+            count: 1,
+            category: 1,
+            memo: "duplicate"
+        )]
+        let importer = await Task.detached {
+            ChekiRokuRecordImportActor(modelContainer: container)
+        }.value
+        do {
+            _ = try await importer.save(
+                records: source,
+                memberMap: [1: idol.id],
+                idolNames: [idol.id: idol.name]
+            ) { _ in }
+            XCTFail("Expected duplicate count overflow")
+        } catch let error as ChekinanaChekiRecordMutationError {
+            XCTAssertEqual(error, .quantityOverflow)
+        }
+
+        var verification = ModelContext(container)
+        var records = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map(\.count).sorted(), [1, Int.max])
+        XCTAssertTrue(records.contains { $0.date == day.addingTimeInterval(60 * 60) })
+
+        let repair = ModelContext(container)
+        let repairRecords = try repair.fetch(FetchDescriptor<ChekiRecord>())
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        repairRecords[0].count = 1
+        repairRecords.dropFirst().forEach(repair.delete)
+        try repair.save()
+
+        let recoveryDay = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-09"))
+        let recovered = try await importer.save(
+            records: [.init(
+                memberID: 1,
+                date: recoveryDay,
+                count: 2,
+                category: 1,
+                memo: "recovered"
+            )],
+            memberMap: [1: idol.id],
+            idolNames: [idol.id: idol.name]
+        ) { _ in }
+        XCTAssertEqual(recovered, 2)
+
+        verification = ModelContext(container)
+        records = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.first(where: { $0.note == "duplicate" })?.count, 1)
+        XCTAssertEqual(records.first(where: { $0.note == "recovered" })?.count, 2)
+    }
+
+    func testCommitReplansAfterLateSimpleRecordInsertion() async throws {
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -548,11 +810,14 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         }.value
         let preview = try await previewActor.plan(records: source, memberMap: [1: idol.id])
         XCTAssertEqual(preview.first?.count, 3)
-        XCTAssertEqual(preview.first?.nextIndex, 1)
 
-        let late = Cheki(date: day, idx: 10, size: .mini, note: "late")
+        let late = ChekiRecord(
+            idols: [idol],
+            date: day.addingTimeInterval(60 * 60),
+            size: .mini,
+            note: "late"
+        )
         setup.insert(late)
-        late.idols = [idol]
         try setup.save()
 
         let commitActor = await Task.detached {
@@ -564,14 +829,16 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             idolNames: [idol.id: idol.name]
         ) { _ in }
         XCTAssertEqual(inserted, 2)
-        let values = try ModelContext(container).fetch(FetchDescriptor<Cheki>())
-        XCTAssertEqual(values.count, 3)
-        XCTAssertEqual(values.compactMap(\.idx).sorted(), [10, 11, 12])
-        XCTAssertEqual(values.filter { $0.note == "source" }.count, 2)
+        let values = try ModelContext(container).fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(values.count, 2)
+        XCTAssertEqual(values.first(where: { $0.note == "late" })?.count, 1)
+        XCTAssertEqual(values.first(where: { $0.note == "late" })?.date, day)
+        XCTAssertEqual(values.first(where: { $0.note == "source" })?.count, 2)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Cheki>()).isEmpty)
     }
 
     func testCommitReplansSatisfiedStalePreviewToZeroWrites() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -594,9 +861,8 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         let preview = try await previewActor.plan(records: source, memberMap: [1: idol.id])
         XCTAssertEqual(preview.first?.count, 1)
 
-        let late = Cheki(date: day, idx: 4, size: .mini, note: "late")
+        let late = ChekiRecord(idols: [idol], date: day, size: .mini, note: "late")
         setup.insert(late)
-        late.idols = [idol]
         try setup.save()
         let commitActor = await Task.detached {
             ChekiRokuRecordImportActor(modelContainer: container)
@@ -607,13 +873,14 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
             idolNames: [idol.id: idol.name]
         ) { _ in }
         XCTAssertEqual(inserted, 0)
-        let values = try ModelContext(container).fetch(FetchDescriptor<Cheki>())
+        let values = try ModelContext(container).fetch(FetchDescriptor<ChekiRecord>())
         XCTAssertEqual(values.count, 1)
         XCTAssertEqual(values.first?.note, "late")
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Cheki>()).isEmpty)
     }
 
-    func testSameActorConcurrentSavesDoNotDuplicateCountsOrIndexes() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+    func testSameActorConcurrentSavesDoNotDuplicateSimpleRecordCounts() async throws {
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -653,9 +920,224 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         }
         let results = try await [first.value, second.value].sorted()
         XCTAssertEqual(results, [0, 3])
-        let records = try ModelContext(container).fetch(FetchDescriptor<Cheki>())
-        XCTAssertEqual(records.count, 3)
-        XCTAssertEqual(records.compactMap(\.idx).sorted(), [1, 2, 3])
+        let records = try ModelContext(container).fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.count, 3)
+        XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Cheki>()).isEmpty)
+    }
+
+    func testImporterAndMainActorUpsertSerializeAcrossContextsAndPreserveBothDeltas() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Concurrent Idol")
+        setup.insert(idol)
+        try setup.save()
+        let idolID = idol.id
+        let idolName = idol.name
+        let day = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
+        let source = [ChekinanaChekiRokuImport.SourceRecord(
+            memberID: 1,
+            date: day,
+            count: 3,
+            category: 1,
+            memo: "same"
+        )]
+        let importer = await Task.detached {
+            ChekiRokuRecordImportActor(modelContainer: container)
+        }.value
+        let interleave = ChekiRokuBeforePersistGate()
+        let importTask = Task {
+            try await importer.save(
+                records: source,
+                memberMap: [1: idolID],
+                idolNames: [idolID: idolName],
+                beforePersistForTesting: interleave.block
+            ) { _ in }
+        }
+        let didBlock = await interleave.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+        let releaser = Task.detached {
+            try? await Task.sleep(for: .milliseconds(100))
+            interleave.release()
+        }
+        _ = try await MainActor.run { () throws -> UUID in
+            let context = ModelContext(container)
+            let liveIdol = try XCTUnwrap(
+                context.fetch(FetchDescriptor<Idol>()).first { $0.id == idolID }
+            )
+            return try ChekinanaChekiRecordStore.upsert(
+                idols: [liveIdol],
+                event: nil,
+                date: day.addingTimeInterval(2 * 60 * 60),
+                size: .mini,
+                note: "same",
+                adding: 2,
+                in: context
+            ).id
+        }
+        _ = await releaser.value
+        let imported = try await importTask.value
+        XCTAssertEqual(imported, 3)
+
+        var verification = ModelContext(container)
+        var records = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.count, 5)
+        XCTAssertEqual(records.first?.date, day)
+
+        try await MainActor.run {
+            let context = ModelContext(container)
+            let liveIdol = try XCTUnwrap(
+                context.fetch(FetchDescriptor<Idol>()).first { $0.id == idolID }
+            )
+            _ = try ChekinanaChekiRecordStore.upsert(
+                idols: [liveIdol],
+                event: nil,
+                date: day,
+                size: .mini,
+                note: "different",
+                adding: 4,
+                in: context
+            )
+        }
+        verification = ModelContext(container)
+        records = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.first(where: { $0.note == "same" })?.count, 5)
+        XCTAssertEqual(records.first(where: { $0.note == "different" })?.count, 4)
+    }
+
+    func testImporterBeforeSaveSerializesWithIdolDeletionAndRejectsDanglingKeys() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Protected Idol")
+        setup.insert(idol)
+        try setup.save()
+        let idolID = idol.id
+        let day = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
+        let importer = await Task.detached {
+            ChekiRokuRecordImportActor(modelContainer: container)
+        }.value
+        let interleave = ChekiRokuBeforePersistGate()
+        let importTask = Task {
+            try await importer.save(
+                records: [.init(
+                    memberID: 1,
+                    date: day,
+                    count: 2,
+                    category: 1,
+                    memo: "linked"
+                )],
+                memberMap: [1: idolID],
+                idolNames: [idolID: "Protected Idol"],
+                beforePersistForTesting: interleave.block
+            ) { _ in }
+        }
+        let didBlock = await interleave.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+        let releaser = Task.detached {
+            try? await Task.sleep(for: .milliseconds(100))
+            interleave.release()
+        }
+        do {
+            try await MainActor.run {
+                let context = ModelContext(container)
+                let live = try XCTUnwrap(
+                    context.fetch(FetchDescriptor<Idol>()).first { $0.id == idolID }
+                )
+                _ = try ChekinanaIdolPersistence.delete(live, from: context)
+            }
+            XCTFail("A newly linked Idol must not be deleted.")
+        } catch let error as ChekinanaIdolPersistenceError {
+            guard case .linkedChekiRecords(let count) = error else {
+                return XCTFail("Unexpected Idol deletion error: \(error)")
+            }
+            XCTAssertEqual(count, 2)
+        }
+        _ = await releaser.value
+        let imported = try await importTask.value
+        XCTAssertEqual(imported, 2)
+        let verification = ModelContext(container)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<Idol>()), 1)
+        let record = try XCTUnwrap(
+            verification.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(record.idolIDs, [idolID])
+        XCTAssertEqual(record.count, 2)
+    }
+
+    func testImporterBeforeSaveSerializesWithEventDeletionAndRejectsDanglingKey() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let day = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
+        let idol = Idol(name: "Event Idol")
+        let event = Event(name: "Protected Event", date: day)
+        setup.insert(idol)
+        setup.insert(event)
+        try setup.save()
+        let idolID = idol.id
+        let eventID = event.id
+        let importer = await Task.detached {
+            ChekiRokuRecordImportActor(modelContainer: container)
+        }.value
+        let interleave = ChekiRokuBeforePersistGate()
+        let importTask = Task {
+            try await importer.save(
+                records: [.init(
+                    memberID: 1,
+                    date: day,
+                    count: 3,
+                    category: 1,
+                    memo: "event linked"
+                )],
+                memberMap: [1: idolID],
+                idolNames: [idolID: "Event Idol"],
+                beforePersistForTesting: interleave.block
+            ) { _ in }
+        }
+        let didBlock = await interleave.waitUntilBlocked()
+        XCTAssertTrue(didBlock)
+        let releaser = Task.detached {
+            try? await Task.sleep(for: .milliseconds(100))
+            interleave.release()
+        }
+        do {
+            try await MainActor.run {
+                let context = ModelContext(container)
+                let live = try XCTUnwrap(
+                    context.fetch(FetchDescriptor<Event>()).first { $0.id == eventID }
+                )
+                try ChekinanaEventPersistence.delete(live, from: context)
+            }
+            XCTFail("A newly linked Event must not be deleted.")
+        } catch let error as ChekinanaEventPersistence.PersistenceError {
+            guard case .linkedChekiRecords(let count) = error else {
+                return XCTFail("Unexpected Event deletion error: \(error)")
+            }
+            XCTAssertEqual(count, 3)
+        }
+        _ = await releaser.value
+        let imported = try await importTask.value
+        XCTAssertEqual(imported, 3)
+        let verification = ModelContext(container)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<Event>()), 1)
+        let record = try XCTUnwrap(
+            verification.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(record.eventID, eventID)
+        XCTAssertEqual(record.count, 3)
     }
 
     func testRecordProgressPolicyRejectsLateWrongAndRegressiveUpdates() {
@@ -694,7 +1176,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
 
     func testCommitSkipsMultipleShameAndDougaForSameIdol() async throws {
         for category in [2, 3] {
-            let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+            let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
             let container = try ModelContainer(
                 for: schema,
                 configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -733,7 +1215,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
 
     func testCommitSkipsShameAndDougaAndPreservesExistingRecords() async throws {
         for category in [2, 3] {
-            let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+            let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
             let container = try ModelContainer(
                 for: schema,
                 configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -783,7 +1265,7 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
     }
 
     func testCommitNonChekiOnlyReturnsZeroWithoutError() async throws {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self, ChekiRecord.self, Shame.self, Douga.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -808,6 +1290,30 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         XCTAssertEqual(inserted, 0)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Shame>()).isEmpty)
         XCTAssertTrue(try ModelContext(container).fetch(FetchDescriptor<Douga>()).isEmpty)
+    }
+}
+
+private final class ChekiRokuBeforePersistGate: @unchecked Sendable {
+    private let blocked = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+
+    func block() {
+        blocked.signal()
+        _ = released.wait(timeout: .now() + 10)
+    }
+
+    func waitUntilBlocked() async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { [blocked] in
+                continuation.resume(
+                    returning: blocked.wait(timeout: .now() + 10) == .success
+                )
+            }
+        }
+    }
+
+    func release() {
+        released.signal()
     }
 }
 

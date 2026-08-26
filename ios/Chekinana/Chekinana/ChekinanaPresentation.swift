@@ -85,6 +85,12 @@ enum ChekinanaAppLanguage: String, CaseIterable, Identifiable, Sendable {
         rawValue.flatMap(Self.init(rawValue:)) ?? .system
     }
 
+    /// Settings intentionally hides English as a selectable destination while
+    /// retaining the enum case for persisted preferences, parsing and tests.
+    static var settingsVisibleCases: [ChekinanaAppLanguage] {
+        allCases.filter { $0 != .english }
+    }
+
     var title: String {
         switch self {
         case .system:

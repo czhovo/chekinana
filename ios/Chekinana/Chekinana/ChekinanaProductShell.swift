@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import Combine
 import CoreTransferable
 import PhotosUI
 import Photos
@@ -30,6 +31,277 @@ struct ChekinanaAssistantScanLaunch {
         self.candidateIDs = candidateIDs
         self.includesUnassigned = includesUnassigned
         self.dateBounds = dateBounds
+    }
+}
+
+struct ChekinanaSystemStringPasteControl: UIViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+
+    let title: String
+    let accessibilityIdentifier: String
+    let onPaste: (String) -> Void
+
+    final class Coordinator: UIResponder {
+        private static let acceptedTypeIdentifiers = [
+            UTType.utf8PlainText.identifier,
+            UTType.plainText.identifier,
+            UTType.url.identifier
+        ]
+
+        var onPaste: (String) -> Void
+
+        init(onPaste: @escaping (String) -> Void) {
+            self.onPaste = onPaste
+            super.init()
+            pasteConfiguration = UIPasteConfiguration(
+                acceptableTypeIdentifiers: Self.acceptedTypeIdentifiers
+            )
+        }
+
+        override func paste(itemProviders: [NSItemProvider]) {
+            if let provider = itemProviders.first(where: {
+                $0.canLoadObject(ofClass: NSString.self)
+            }) {
+                provider.loadObject(ofClass: NSString.self) { [weak self] value, _ in
+                    guard let value = value as? NSString else { return }
+                    let pasted = value as String
+                    Task { @MainActor [weak self, pasted] in
+                        self?.deliver(pasted)
+                    }
+                }
+                return
+            }
+
+            if let provider = itemProviders.first(where: {
+                $0.canLoadObject(ofClass: NSURL.self)
+            }) {
+                provider.loadObject(ofClass: NSURL.self) { [weak self] value, _ in
+                    guard let pasted = (value as? NSURL)?.absoluteString else { return }
+                    Task { @MainActor [weak self, pasted] in
+                        self?.deliver(pasted)
+                    }
+                }
+            }
+        }
+
+        private func deliver(_ rawValue: String) {
+            let pasted = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !pasted.isEmpty else { return }
+            onPaste(pasted)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPaste: onPaste)
+    }
+
+    func makeUIView(context: Context) -> UIPasteControl {
+        let configuration = UIPasteControl.Configuration()
+        configuration.displayMode = .labelOnly
+        configuration.cornerStyle = .fixed
+        configuration.cornerRadius = 10
+        configuration.baseForegroundColor = .systemBlue
+        configuration.baseBackgroundColor = .white
+
+        let control = UIPasteControl(configuration: configuration)
+        control.target = context.coordinator
+        control.isEnabled = isEnabled
+        configureAccessibility(of: control)
+        return control
+    }
+
+    func updateUIView(_ control: UIPasteControl, context: Context) {
+        context.coordinator.onPaste = onPaste
+        control.target = context.coordinator
+        control.isEnabled = isEnabled
+        configureAccessibility(of: control)
+    }
+
+    private func configureAccessibility(of control: UIPasteControl) {
+        control.isAccessibilityElement = true
+        control.accessibilityLabel = title
+        control.accessibilityIdentifier = accessibilityIdentifier
+        control.accessibilityTraits = .button
+    }
+}
+
+enum ChekinanaEventEditorLayout {
+    static var singleLineInputHeight: CGFloat {
+        UIFont.preferredFont(forTextStyle: .body).lineHeight
+    }
+}
+
+struct ChekinanaDirectStringPasteControl: View {
+    let title: String
+    let accessibilityIdentifier: String
+    let onPaste: (String) -> Void
+
+    var body: some View {
+        ZStack {
+            Text(title)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .hidden()
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+
+            ChekinanaTransparentStringPasteControl(
+                title: title,
+                accessibilityIdentifier: accessibilityIdentifier
+            ) { pasted in
+                Self.deliverPastedString(pasted, to: onPaste)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .allowsHitTesting(true)
+            .zIndex(1)
+        }
+        .frame(
+            minWidth: ChekinanaAccessibilityMetrics.minimumTouchTarget,
+            minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget,
+            alignment: .center
+        )
+        .fixedSize(horizontal: true, vertical: false)
+        .contentShape(Rectangle())
+        .allowsHitTesting(true)
+        .zIndex(1)
+    }
+
+    static func deliverPastedString(
+        _ rawValue: String,
+        to handler: (String) -> Void
+    ) {
+        let pasted = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pasted.isEmpty else { return }
+        handler(pasted)
+    }
+}
+
+final class ChekinanaInvisiblePasteContainer: UIView {
+    private static let acceptedTypeIdentifiers = [
+        UTType.utf8PlainText.identifier,
+        UTType.plainText.identifier,
+        UTType.url.identifier
+    ]
+
+    let pasteControl: UIPasteControl
+    var onPaste: (String) -> Void
+
+    init(
+        configuration: UIPasteControl.Configuration,
+        onPaste: @escaping (String) -> Void
+    ) {
+        pasteControl = UIPasteControl(configuration: configuration)
+        self.onPaste = onPaste
+        super.init(frame: .zero)
+        configureContainer()
+    }
+
+    required init?(coder: NSCoder) {
+        pasteControl = UIPasteControl(frame: .zero)
+        onPaste = { _ in }
+        super.init(coder: coder)
+        configureContainer()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        pasteControl.frame = bounds
+    }
+
+    override func paste(itemProviders: [NSItemProvider]) {
+        if let provider = itemProviders.first(where: {
+            $0.canLoadObject(ofClass: NSString.self)
+        }) {
+            provider.loadObject(ofClass: NSString.self) { [weak self] value, _ in
+                guard let value = value as? NSString else { return }
+                let pasted = value as String
+                Task { @MainActor [weak self, pasted] in
+                    self?.deliver(pasted)
+                }
+            }
+            return
+        }
+
+        if let provider = itemProviders.first(where: {
+            $0.canLoadObject(ofClass: NSURL.self)
+        }) {
+            provider.loadObject(ofClass: NSURL.self) { [weak self] value, _ in
+                guard let pasted = (value as? NSURL)?.absoluteString else { return }
+                Task { @MainActor [weak self, pasted] in
+                    self?.deliver(pasted)
+                }
+            }
+        }
+    }
+
+    private func configureContainer() {
+        alpha = 1
+        backgroundColor = .systemBackground
+        isOpaque = true
+        isUserInteractionEnabled = true
+        layer.backgroundColor = UIColor.systemBackground.cgColor
+        layer.opacity = 1
+
+        pasteControl.alpha = 1
+        pasteControl.isOpaque = true
+        pasteControl.isUserInteractionEnabled = true
+        pasteControl.layer.opacity = 1
+        pasteControl.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        pasteConfiguration = UIPasteConfiguration(
+            acceptableTypeIdentifiers: Self.acceptedTypeIdentifiers
+        )
+        pasteControl.target = self
+        addSubview(pasteControl)
+    }
+
+    private func deliver(_ rawValue: String) {
+        ChekinanaDirectStringPasteControl.deliverPastedString(
+            rawValue,
+            to: onPaste
+        )
+    }
+}
+
+struct ChekinanaTransparentStringPasteControl: UIViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+
+    let title: String
+    let accessibilityIdentifier: String
+    let onPaste: (String) -> Void
+
+    func makeUIView(context: Context) -> ChekinanaInvisiblePasteContainer {
+        let configuration = UIPasteControl.Configuration()
+        configuration.displayMode = .labelOnly
+        configuration.cornerStyle = .fixed
+        configuration.cornerRadius = 0
+        configuration.baseForegroundColor = .systemBackground
+        configuration.baseBackgroundColor = .systemBackground
+
+        let container = ChekinanaInvisiblePasteContainer(
+            configuration: configuration,
+            onPaste: onPaste
+        )
+        let control = container.pasteControl
+        configureAccessibility(of: control)
+        return container
+    }
+
+    func updateUIView(_ container: ChekinanaInvisiblePasteContainer, context: Context) {
+        container.onPaste = onPaste
+        let control = container.pasteControl
+        control.target = container
+        control.isEnabled = isEnabled
+        control.alpha = 1
+        control.isUserInteractionEnabled = true
+        configureAccessibility(of: control)
+    }
+
+    private func configureAccessibility(of control: UIPasteControl) {
+        control.isAccessibilityElement = true
+        control.accessibilityLabel = title
+        control.accessibilityIdentifier = accessibilityIdentifier
+        control.accessibilityTraits = .button
     }
 }
 
@@ -69,7 +341,7 @@ private enum ChekinanaProductTab: String, Hashable {
         case .scan:
             ChekinanaProductCopy.text("tabs.scan", "Scan")
         case .idols:
-            ChekinanaProductCopy.text("common.idols", "Idols")
+            ChekinanaProductCopy.text("idols.title", "Idols")
         case .calendar:
             ChekinanaProductCopy.text("calendar.title", "Calendar")
         case .events:
@@ -78,6 +350,7 @@ private enum ChekinanaProductTab: String, Hashable {
             ChekinanaProductCopy.text("tabs.gallery", "Gallery")
         }
     }
+
 }
 
 private enum ChekinanaProductTheme {
@@ -101,6 +374,216 @@ enum ChekinanaPatternCountLabel {
 enum ChekinanaChekiCountLabel {
     static func text(_ count: Int) -> String {
         ChekinanaRecordKind.cheki.countLabel(count)
+    }
+}
+
+enum ChekinanaQuantityInputPolicy {
+    static let maximum = Int.max
+
+    static func digits(_ rawValue: String) -> String {
+        rawValue.compactMap(\.wholeNumberValue).map(String.init).joined()
+    }
+
+    static func value(
+        from rawValue: String,
+        allowedRange: ClosedRange<Int>
+    ) -> Int? {
+        guard !rawValue.contains("-") else { return nil }
+        let normalized = digits(rawValue)
+        guard !normalized.isEmpty,
+              let value = Int(normalized),
+              allowedRange.contains(value) else {
+            return nil
+        }
+        return value
+    }
+
+    static func adjusted(
+        _ value: Int,
+        by delta: Int,
+        allowedRange: ClosedRange<Int>
+    ) -> Int {
+        if delta < 0 {
+            guard value > allowedRange.lowerBound else {
+                return allowedRange.lowerBound
+            }
+            return value - 1
+        }
+        if delta > 0 {
+            guard value < allowedRange.upperBound else {
+                return allowedRange.upperBound
+            }
+            return value + 1
+        }
+        return value
+    }
+}
+
+enum ChekinanaQuantityControlMetrics {
+    static let hitTarget: CGFloat = ChekinanaAccessibilityMetrics.minimumTouchTarget
+    static let visibleButtonDiameter: CGFloat = 30
+    static let iconPointSize: CGFloat = 12
+    static let fillOpacity = 0.14
+    static let strokeOpacity = 0.45
+    static let strokeWidth: CGFloat = 1
+}
+
+private struct ChekinanaQuantityControl: View {
+    @Binding var value: Int
+    let allowedRange: ClosedRange<Int>
+    let accessibilityIdentifier: String
+    @State private var text: String
+    @FocusState private var isFocused: Bool
+
+    init(
+        value: Binding<Int>,
+        allowedRange: ClosedRange<Int>,
+        accessibilityIdentifier: String
+    ) {
+        _value = value
+        self.allowedRange = allowedRange
+        self.accessibilityIdentifier = accessibilityIdentifier
+        _text = State(initialValue: value.wrappedValue.formatted())
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            adjustmentButton(delta: -1, systemImage: "minus")
+                .accessibilityLabel(
+                    ChekinanaProductCopy.text(
+                        "common.quantity.decrease",
+                        "Decrease quantity"
+                    )
+                )
+                .accessibilityIdentifier("\(accessibilityIdentifier).decrease")
+
+            TextField(
+                ChekinanaProductCopy.text("common.quantity", "Quantity"),
+                text: $text
+            )
+            .keyboardType(.numberPad)
+            .multilineTextAlignment(.center)
+            .font(.body.monospacedDigit().weight(.semibold))
+            .focused($isFocused)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .accessibilityLabel(
+                ChekinanaProductCopy.text("common.quantity", "Quantity")
+            )
+            .accessibilityValue(value.formatted())
+            .accessibilityIdentifier("\(accessibilityIdentifier).input")
+
+            adjustmentButton(delta: 1, systemImage: "plus")
+                .accessibilityLabel(
+                    ChekinanaProductCopy.text(
+                        "common.quantity.increase",
+                        "Increase quantity"
+                    )
+                )
+                .accessibilityIdentifier("\(accessibilityIdentifier).increase")
+        }
+        .accessibilityIdentifier(accessibilityIdentifier)
+        .onChange(of: text) { _, newValue in
+            applyTypedValue(newValue)
+        }
+        .onChange(of: value) { _, newValue in
+            guard !isFocused else { return }
+            text = newValue.formatted()
+        }
+        .onChange(of: isFocused) { _, focused in
+            if !focused { restoreLastValidValue() }
+        }
+        .onSubmit(restoreLastValidValue)
+    }
+
+    private func adjustmentButton(
+        delta: Int,
+        systemImage: String
+    ) -> some View {
+        Button {
+            value = ChekinanaQuantityInputPolicy.adjusted(
+                value,
+                by: delta,
+                allowedRange: allowedRange
+            )
+            text = value.formatted()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(
+                        ChekinanaProductTheme.accent.opacity(
+                            ChekinanaQuantityControlMetrics.fillOpacity
+                        )
+                    )
+                    .overlay {
+                        Circle()
+                            .stroke(
+                                ChekinanaProductTheme.accent.opacity(
+                                    ChekinanaQuantityControlMetrics.strokeOpacity
+                                ),
+                                lineWidth: ChekinanaQuantityControlMetrics.strokeWidth
+                            )
+                    }
+                    .frame(
+                        width: ChekinanaQuantityControlMetrics.visibleButtonDiameter,
+                        height: ChekinanaQuantityControlMetrics.visibleButtonDiameter
+                    )
+                Image(systemName: systemImage)
+                    .font(
+                        .system(
+                            size: ChekinanaQuantityControlMetrics.iconPointSize,
+                            weight: .semibold
+                        )
+                    )
+            }
+            .frame(
+                width: ChekinanaQuantityControlMetrics.hitTarget,
+                height: ChekinanaQuantityControlMetrics.hitTarget
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(
+            delta < 0
+                ? value <= allowedRange.lowerBound
+                : value >= allowedRange.upperBound
+        )
+    }
+
+    private func applyTypedValue(_ rawValue: String) {
+        if rawValue.contains("-") {
+            text = ""
+            return
+        }
+        let digits = ChekinanaQuantityInputPolicy.digits(rawValue)
+        if rawValue != digits {
+            text = digits
+            return
+        }
+        guard !digits.isEmpty else { return }
+        guard let parsed = Int(digits) else {
+            text = value.formatted()
+            return
+        }
+        if parsed > allowedRange.upperBound {
+            text = value.formatted()
+        } else if allowedRange.contains(parsed) {
+            value = parsed
+        } else {
+            text = value.formatted()
+        }
+    }
+
+    private func restoreLastValidValue() {
+        guard ChekinanaQuantityInputPolicy.value(
+            from: text,
+            allowedRange: allowedRange
+        ) != nil else {
+            text = value.formatted()
+            return
+        }
+        text = value.formatted()
     }
 }
 
@@ -143,11 +626,15 @@ enum ChekinanaRecordOrdering {
         return dated + values.filter { $0.date == nil }.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 
-    private static func tie(_ lhs: ChekinanaGalleryItem, _ rhs: ChekinanaGalleryItem) -> Bool {
+    static func stableTie(_ lhs: ChekinanaGalleryItem, _ rhs: ChekinanaGalleryItem) -> Bool {
         if case let (.cheki(left), .cheki(right)) = (lhs, rhs), left.idx != right.idx {
             return (left.idx ?? .max) < (right.idx ?? .max)
         }
         return lhs.modelID.uuidString < rhs.modelID.uuidString
+    }
+
+    private static func tie(_ lhs: ChekinanaGalleryItem, _ rhs: ChekinanaGalleryItem) -> Bool {
+        stableTie(lhs, rhs)
     }
 }
 
@@ -448,7 +935,8 @@ enum ChekinanaBirthdayValue {
             birthday: try normalizedStorage(candidate.birthday),
             verification: candidate.verification,
             bio: candidate.bio,
-            avatarUrl: candidate.avatarUrl
+            avatarUrl: candidate.avatarUrl,
+            patternIds: candidate.patternIds
         )
     }
 
@@ -583,6 +1071,8 @@ enum ChekinanaBirthdayEditorMode: String, CaseIterable, Identifiable {
 }
 
 enum ChekinanaBirthdayEditorPolicy {
+    static let unknownYearCarrier = 2_000
+
     static func initialMode(for semantic: ChekinanaBirthdayValue.Semantic?)
         -> ChekinanaBirthdayEditorMode
     {
@@ -602,6 +1092,40 @@ enum ChekinanaBirthdayEditorPolicy {
 
     static func clampedDay(_ day: Int, month: Int) -> Int {
         min(max(day, 1), dayRange(month: month).upperBound)
+    }
+
+    static func unknownYearDate(
+        month: Int,
+        day: Int,
+        calendar: Calendar = .current
+    ) -> Date? {
+        ChekinanaBirthdayValue.draftDisplayDate(
+            for: .monthDay(month: month, day: day),
+            defaultYear: unknownYearCarrier,
+            calendar: calendar
+        )
+    }
+
+    static func unknownYearMonthDay(
+        from date: Date,
+        calendar: Calendar = .current
+    ) -> (month: Int, day: Int)? {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard components.year == unknownYearCarrier,
+              let month = components.month,
+              let day = components.day,
+              dayRange(month: month).contains(day) else {
+            return nil
+        }
+        return (month, day)
+    }
+
+    static func unknownYearRange(
+        calendar: Calendar = .current
+    ) -> ClosedRange<Date> {
+        let start = unknownYearDate(month: 1, day: 1, calendar: calendar)!
+        let end = unknownYearDate(month: 12, day: 31, calendar: calendar)!
+        return start...end
     }
 
     static func storageValue(
@@ -657,6 +1181,504 @@ enum ChekinanaCalendarSelectionPolicy {
         displayedMonth: Date
     ) -> (selectedDate: Date, displayedMonth: Date) {
         (date, displayedMonth)
+    }
+}
+
+enum ChekinanaCalendarDayVisualState: Equatable {
+    case selected
+    case today
+    case normal
+
+    static func resolve(isSelected: Bool, isToday: Bool) -> Self {
+        if isSelected { return .selected }
+        if isToday { return .today }
+        return .normal
+    }
+
+    var fillAccentOpacity: Double {
+        switch self {
+        case .selected: 1
+        case .today, .normal: 0
+        }
+    }
+
+    var strokeAccentOpacity: Double {
+        switch self {
+        case .today: 0.5
+        case .selected, .normal: 0
+        }
+    }
+}
+
+enum ChekinanaCalendarDayContentPolicy {
+    static func showsEventIcon(hasEvent: Bool, isSelected: Bool) -> Bool {
+        hasEvent && !isSelected
+    }
+
+    static func usesSecondaryDateNumber(isInDisplayedMonth: Bool) -> Bool {
+        !isInDisplayedMonth
+    }
+
+    static func usesSecondaryChekiCount(isInDisplayedMonth: Bool) -> Bool {
+        !isInDisplayedMonth
+    }
+}
+
+enum ChekinanaCalendarGroupDragPolicy {
+    static let minimumPressDuration: TimeInterval = 0.4
+    static let maximumPreDragDistance: CGFloat = 18
+    static let rowStride: CGFloat = 70
+
+    static func targetIndex(
+        sourceIndex: Int,
+        translationY: CGFloat,
+        count: Int
+    ) -> Int? {
+        guard count > 0, sourceIndex >= 0, sourceIndex < count else {
+            return nil
+        }
+        let rowDelta = Int((translationY / rowStride).rounded())
+        return min(max(sourceIndex + rowDelta, 0), count - 1)
+    }
+
+    static func shouldUpdatePreview(
+        previousTargetIndex: Int?,
+        targetIndex: Int
+    ) -> Bool {
+        previousTargetIndex != targetIndex
+    }
+}
+
+#if DEBUG
+struct ChekinanaCalendarGroupDragRuntimeMetrics: Equatable {
+    private(set) var changedFrameCount = 0
+    private(set) var targetTransitionCount = 0
+    private(set) var swiftStateNotificationCount = 0
+    private(set) var persistenceRequestCount = 0
+
+    mutating func recordChangedFrame() {
+        changedFrameCount += 1
+    }
+
+    mutating func recordTargetTransition() {
+        targetTransitionCount += 1
+    }
+
+    mutating func recordPersistenceRequest(isReordered: Bool) {
+        guard isReordered else { return }
+        persistenceRequestCount += 1
+    }
+}
+#endif
+
+enum ChekinanaCalendarGroupTapPolicy {
+    static func thumbnailIndex(
+        at location: CGPoint,
+        rowSize: CGSize,
+        thumbnailCount: Int
+    ) -> Int? {
+        let count = min(max(thumbnailCount, 0), 5)
+        guard count > 0 else { return nil }
+        let stripWidth = ChekinanaCalendarSelectedDayLayout.thumbnailStripWidth(
+            count: count
+        )
+        let originX = max(0, rowSize.width - stripWidth)
+        let originY = max(
+            0,
+            (rowSize.height - ChekinanaCalendarSelectedDayLayout.thumbnailHeight) / 2
+        )
+        let step = ChekinanaCalendarSelectedDayLayout.thumbnailWidth
+            + ChekinanaCalendarSelectedDayLayout.thumbnailOverlap
+        for index in (0..<count).reversed() {
+            let frame = CGRect(
+                x: originX + CGFloat(index) * step,
+                y: originY,
+                width: ChekinanaCalendarSelectedDayLayout.thumbnailWidth,
+                height: ChekinanaCalendarSelectedDayLayout.thumbnailHeight
+            )
+            if frame.contains(location) { return index }
+        }
+        return nil
+    }
+}
+
+private struct ChekinanaCalendarGroupGestureSurface: UIViewRepresentable {
+    let dateKey: String
+    let groupKey: String
+    let orderedGroupKeys: [String]
+    let onTap: (CGPoint, CGSize) -> Void
+    let onReorderEnded: (Int) -> Void
+    let onDebugState: (String) -> Void
+
+    final class SurfaceView: UIView {
+        private static let registeredViews = NSHashTable<SurfaceView>.weakObjects()
+
+        var dateKey = ""
+        var groupKey = ""
+        var onBoundsChange: ((CGSize) -> Void)?
+        private var lastReportedSize: CGSize = .zero
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            Self.registeredViews.add(self)
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard bounds.size != lastReportedSize else { return }
+            lastReportedSize = bounds.size
+            onBoundsChange?(bounds.size)
+        }
+
+        static func orderedVisibleViews(
+            dateKey: String,
+            groupKeys: [String],
+            window: UIWindow
+        ) -> [SurfaceView]? {
+            let candidates = registeredViews.allObjects.filter {
+                $0.window === window && $0.dateKey == dateKey
+                    && !$0.bounds.isEmpty && !$0.isHidden && $0.alpha > 0
+            }
+            let byKey = Dictionary(
+                candidates.map { ($0.groupKey, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            let result = groupKeys.compactMap { byKey[$0] }
+            return result.count == groupKeys.count ? result : nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(surface: self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = SurfaceView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+        view.isAccessibilityElement = false
+        view.dateKey = dateKey
+        view.groupKey = groupKey
+        context.coordinator.install(on: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.surface = self
+        guard let view = uiView as? SurfaceView else { return }
+        view.dateKey = dateKey
+        view.groupKey = groupKey
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.cancelActiveDrag(animated: false)
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        private struct DragRow {
+            let key: String
+            let frame: CGRect
+            let snapshot: UIView
+            let placeholder: UIView
+        }
+
+        var surface: ChekinanaCalendarGroupGestureSurface
+        private weak var view: UIView?
+        private weak var dragWindow: UIWindow?
+        private weak var dragScrollView: UIScrollView?
+        private var dragScrollViewWasEnabled = true
+        private var dragRows: [DragRow] = []
+        private var sourceIndex: Int?
+        private var targetIndex: Int?
+        private var initialWindowY: CGFloat = 0
+#if DEBUG
+        private var runtimeMetrics = ChekinanaCalendarGroupDragRuntimeMetrics()
+#endif
+
+        init(surface: ChekinanaCalendarGroupGestureSurface) {
+            self.surface = surface
+        }
+
+        func install(on view: SurfaceView) {
+            self.view = view
+#if DEBUG
+            view.onBoundsChange = { [weak self] size in
+                self?.surface.onDebugState(
+                    "layout:\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+                )
+            }
+#endif
+            let longPress = UILongPressGestureRecognizer(
+                target: self,
+                action: #selector(handleLongPress(_:))
+            )
+            longPress.minimumPressDuration = ChekinanaCalendarGroupDragPolicy.minimumPressDuration
+            longPress.allowableMovement = ChekinanaCalendarGroupDragPolicy.maximumPreDragDistance
+            longPress.cancelsTouchesInView = false
+            longPress.delegate = self
+
+            let tap = UITapGestureRecognizer(
+                target: self,
+                action: #selector(handleTap(_:))
+            )
+            tap.cancelsTouchesInView = false
+            tap.require(toFail: longPress)
+            tap.delegate = self
+            view.addGestureRecognizer(longPress)
+            view.addGestureRecognizer(tap)
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+
+        @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended, let view else { return }
+            let location = recognizer.location(in: view)
+            let size = view.bounds.size
+#if DEBUG
+            surface.onDebugState(
+                "tap:\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+                    + "@\(Int(location.x.rounded())),\(Int(location.y.rounded()))"
+            )
+#endif
+            surface.onTap(location, size)
+        }
+
+        @objc private func handleLongPress(
+            _ recognizer: UILongPressGestureRecognizer
+        ) {
+            guard let view, let window = view.window else { return }
+            let windowY = recognizer.location(in: window).y
+            switch recognizer.state {
+            case .began:
+                beginDrag(from: view, in: window, initialY: windowY)
+            case .changed:
+                updateDrag(translationY: windowY - initialWindowY)
+            case .ended:
+                finishDrag(
+                    translationY: windowY - initialWindowY,
+                    persistsOrder: true
+                )
+            case .cancelled, .failed:
+                cancelActiveDrag(animated: true)
+            default:
+                break
+            }
+        }
+
+        private func beginDrag(
+            from view: UIView,
+            in window: UIWindow,
+            initialY: CGFloat
+        ) {
+            cancelActiveDrag(animated: false)
+            guard let source = surface.orderedGroupKeys.firstIndex(
+                of: surface.groupKey
+            ), let views = SurfaceView.orderedVisibleViews(
+                dateKey: surface.dateKey,
+                groupKeys: surface.orderedGroupKeys,
+                window: window
+            ) else { return }
+
+            let frames = views.map { $0.convert($0.bounds, to: window) }
+            let snapshots = frames.compactMap {
+                window.resizableSnapshotView(
+                    from: $0,
+                    afterScreenUpdates: false,
+                    withCapInsets: .zero
+                )
+            }
+            guard snapshots.count == frames.count else { return }
+
+            var rows: [DragRow] = []
+            rows.reserveCapacity(frames.count)
+            for index in frames.indices {
+                let placeholder = UIView(frame: frames[index])
+                placeholder.backgroundColor = .systemBackground
+                placeholder.isUserInteractionEnabled = false
+                placeholder.layer.cornerRadius = 2
+                window.addSubview(placeholder)
+
+                let snapshot = snapshots[index]
+                snapshot.frame = frames[index]
+                snapshot.isUserInteractionEnabled = false
+                snapshot.layer.zPosition = 10_000
+                window.addSubview(snapshot)
+                rows.append(DragRow(
+                    key: surface.orderedGroupKeys[index],
+                    frame: frames[index],
+                    snapshot: snapshot,
+                    placeholder: placeholder
+                ))
+            }
+
+            dragWindow = window
+            var ancestor = view.superview
+            while let current = ancestor, !(current is UIScrollView) {
+                ancestor = current.superview
+            }
+            if let scrollView = ancestor as? UIScrollView {
+                dragScrollView = scrollView
+                dragScrollViewWasEnabled = scrollView.isScrollEnabled
+                scrollView.isScrollEnabled = false
+            }
+            dragRows = rows
+            sourceIndex = source
+            targetIndex = source
+            initialWindowY = initialY
+#if DEBUG
+            runtimeMetrics = ChekinanaCalendarGroupDragRuntimeMetrics()
+#endif
+            let sourceSnapshot = rows[source].snapshot
+            sourceSnapshot.layer.zPosition = 20_000
+            sourceSnapshot.layer.shadowColor = UIColor.black.cgColor
+            sourceSnapshot.layer.shadowOpacity = 0.16
+            sourceSnapshot.layer.shadowRadius = 8
+            sourceSnapshot.layer.shadowOffset = CGSize(width: 0, height: 3)
+        }
+
+        private func updateDrag(translationY: CGFloat) {
+            guard let sourceIndex,
+                  dragRows.indices.contains(sourceIndex) else { return }
+#if DEBUG
+            runtimeMetrics.recordChangedFrame()
+#endif
+            let sourceSnapshot = dragRows[sourceIndex].snapshot
+            sourceSnapshot.transform = CGAffineTransform(
+                translationX: 0,
+                y: translationY
+            ).scaledBy(x: 1.015, y: 1.015)
+
+            let draggedCenterY = dragRows[sourceIndex].frame.midY + translationY
+            var nearestIndex = sourceIndex
+            var nearestDistance = CGFloat.greatestFiniteMagnitude
+            for index in dragRows.indices {
+                let distance = abs(dragRows[index].frame.midY - draggedCenterY)
+                if distance < nearestDistance {
+                    nearestDistance = distance
+                    nearestIndex = index
+                }
+            }
+            guard nearestIndex != targetIndex else { return }
+            targetIndex = nearestIndex
+#if DEBUG
+            runtimeMetrics.recordTargetTransition()
+#endif
+            updatePeerSnapshotPositions(
+                sourceIndex: sourceIndex,
+                targetIndex: nearestIndex
+            )
+        }
+
+        private func updatePeerSnapshotPositions(
+            sourceIndex: Int,
+            targetIndex: Int
+        ) {
+            UIView.animate(
+                withDuration: 0.14,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction]
+            ) {
+                for index in self.dragRows.indices where index != sourceIndex {
+                    let destinationIndex: Int?
+                    if targetIndex > sourceIndex,
+                       index > sourceIndex, index <= targetIndex {
+                        destinationIndex = index - 1
+                    } else if targetIndex < sourceIndex,
+                              index >= targetIndex, index < sourceIndex {
+                        destinationIndex = index + 1
+                    } else {
+                        destinationIndex = nil
+                    }
+                    guard let destinationIndex else {
+                        self.dragRows[index].snapshot.transform = .identity
+                        continue
+                    }
+                    let deltaY = self.dragRows[destinationIndex].frame.minY
+                        - self.dragRows[index].frame.minY
+                    self.dragRows[index].snapshot.transform = CGAffineTransform(
+                        translationX: 0,
+                        y: deltaY
+                    )
+                }
+            }
+        }
+
+        private func finishDrag(
+            translationY: CGFloat,
+            persistsOrder: Bool
+        ) {
+            updateDrag(translationY: translationY)
+            guard let sourceIndex,
+                  let targetIndex,
+                  dragRows.indices.contains(sourceIndex),
+                  dragRows.indices.contains(targetIndex) else {
+                cancelActiveDrag(animated: false)
+                return
+            }
+            let sourceFrame = dragRows[sourceIndex].frame
+            let targetFrame = dragRows[targetIndex].frame
+            let landingTransform = CGAffineTransform(
+                translationX: 0,
+                y: targetFrame.minY - sourceFrame.minY
+            )
+            UIView.animate(
+                withDuration: 0.12,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction]
+            ) {
+                self.dragRows[sourceIndex].snapshot.transform = landingTransform
+            } completion: { _ in
+#if DEBUG
+                self.runtimeMetrics.recordPersistenceRequest(
+                    isReordered: persistsOrder && sourceIndex != targetIndex
+                )
+#endif
+                if persistsOrder {
+                    self.surface.onReorderEnded(targetIndex)
+                }
+#if DEBUG
+                self.surface.onDebugState(
+                    "drag-end:changed=\(self.runtimeMetrics.changedFrameCount),targets=\(self.runtimeMetrics.targetTransitionCount),swift-state=\(self.runtimeMetrics.swiftStateNotificationCount),persist=\(self.runtimeMetrics.persistenceRequestCount)"
+                )
+#endif
+                self.removeDragOverlays()
+            }
+        }
+
+        func cancelActiveDrag(animated: Bool) {
+            guard !dragRows.isEmpty else { return }
+            let cleanup = { [weak self] in self?.removeDragOverlays() }
+            guard animated else {
+                cleanup()
+                return
+            }
+            UIView.animate(
+                withDuration: 0.12,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction]
+            ) {
+                self.dragRows.forEach { $0.snapshot.transform = .identity }
+            } completion: { _ in cleanup() }
+        }
+
+        private func removeDragOverlays() {
+            dragRows.forEach {
+                $0.snapshot.removeFromSuperview()
+                $0.placeholder.removeFromSuperview()
+            }
+            dragRows = []
+            sourceIndex = nil
+            targetIndex = nil
+            dragWindow = nil
+            if let dragScrollView {
+                dragScrollView.isScrollEnabled = dragScrollViewWasEnabled
+            }
+            dragScrollView = nil
+        }
     }
 }
 
@@ -837,6 +1859,7 @@ struct ChekinanaProductShell: View {
     @Query private var dougas: [Douga]
     @Query private var events: [Event]
     @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
 
     @State private var selectedTab: ChekinanaProductTab = .scan
@@ -871,7 +1894,10 @@ struct ChekinanaProductShell: View {
 
                     ChekinanaSidebar(
                         idolCount: visibleIdols.count,
-                        chekiCount: visibleChekis.count,
+                        chekiCount: visibleChekis.count
+                            + ChekinanaChekiRecordStore.totalCount(
+                                visibleChekiRecords
+                            ),
                         eventCount: events.count,
                         openAssistant: openAssistant,
                         openMatchGame: {
@@ -940,6 +1966,16 @@ struct ChekinanaProductShell: View {
         chekis.filter {
             ChekinanaVisibilityPolicy.includesRecord(
                 idols: $0.idols,
+                hiddenIDs: hiddenIdols.hiddenIDs
+            )
+        }
+    }
+
+
+    private var visibleChekiRecords: [ChekiRecord] {
+        chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.isVisible(
+                $0,
                 hiddenIDs: hiddenIdols.hiddenIDs
             )
         }
@@ -2047,9 +3083,6 @@ private struct ChekinanaScanView: View {
     @State private var sleevesEnabled = false
     @State private var candidateSelection = ChekinanaCandidateSelectionState()
     @State private var includesUnassigned = false
-    @State private var idolSimilarityThreshold = Double(
-        ChekinanaPatternClassifier.unassignedThreshold
-    )
     @State private var isCandidatePickerPresented = false
     @State private var isProcessing = false
     @State private var taskProgress = ChekinanaScanTaskProgress()
@@ -2127,8 +3160,7 @@ private struct ChekinanaScanView: View {
                 ChekinanaCandidatePicker(
                     idols: patternIdols,
                     selectedIDs: $candidateSelection.selectedIDs,
-                    includesUnassigned: $includesUnassigned,
-                    similarityThreshold: $idolSimilarityThreshold
+                    includesUnassigned: $includesUnassigned
                 )
                 .presentationDetents([.medium, .large])
             }
@@ -2560,7 +3592,10 @@ private struct ChekinanaScanView: View {
                 }
                 Divider().padding(.leading, 46)
                 recognitionToggle(
-                    title: "Recognize Idol",
+                    title: ChekinanaProductCopy.text(
+                        "scan.recognize_idol",
+                        "Recognize Idols"
+                    ),
                     systemImage: "person.crop.rectangle.stack",
                     isOn: $idolRecognitionEnabled,
                     identifier: "chekinana.scan.idol-recognition"
@@ -2612,25 +3647,30 @@ private struct ChekinanaScanView: View {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("chekinana.scan.date-scope.fixed")
             if declaresFixedDate {
-                DatePicker("Date", selection: $fixedDate, displayedComponents: .date)
-                    .accessibilityIdentifier("chekinana.scan.date-fixed")
+                ChekinanaExpandableDateWheel(
+                    "Date",
+                    selection: $fixedDate,
+                    accessibilityIdentifier: "chekinana.scan.date-fixed"
+                )
             }
             Toggle("Date range", isOn: $declaresDateRange)
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("chekinana.scan.date-scope.range")
             if declaresDateRange {
-                DatePicker("From", selection: $dateRangeFrom, displayedComponents: .date)
-                    .accessibilityIdentifier("chekinana.scan.date-range-from")
+                ChekinanaExpandableDateWheel(
+                    "From",
+                    selection: $dateRangeFrom,
+                    accessibilityIdentifier: "chekinana.scan.date-range-from"
+                )
                     .onChange(of: dateRangeFrom) { _, value in
                         if value > dateRangeTo { dateRangeTo = value }
                     }
-                DatePicker(
+                ChekinanaExpandableDateWheel(
                     "To",
                     selection: $dateRangeTo,
                     in: dateRangeFrom...Date.distantFuture,
-                    displayedComponents: .date
+                    accessibilityIdentifier: "chekinana.scan.date-range-to"
                 )
-                .accessibilityIdentifier("chekinana.scan.date-range-to")
             }
         }
         .padding(.leading, 46)
@@ -2901,9 +3941,33 @@ private struct ChekinanaScanView: View {
     private var candidateSummary: String {
         let idolCount = candidateSelection.selectedIDs.count
         if patternIdols.isEmpty {
-            return includesUnassigned ? "Unassigned only · no stored patterns" : "No usable candidates"
+            return includesUnassigned
+                ? ChekinanaProductCopy.text(
+                    "scan.candidates.unassigned_only",
+                    "Unassigned only · no stored patterns"
+                )
+                : ChekinanaProductCopy.text(
+                    "scan.candidates.none",
+                    "No usable candidates"
+                )
         }
-        return "\(idolCount) Idol\(idolCount == 1 ? "" : "s")\(includesUnassigned ? " + Unassigned" : "")"
+        let base = idolCount == 1
+            ? ChekinanaProductCopy.format(
+                "scan.candidates.one",
+                "%lld Idol",
+                Int64(idolCount)
+            )
+            : ChekinanaProductCopy.format(
+                "scan.candidates.other",
+                "%lld Idols",
+                Int64(idolCount)
+            )
+        guard includesUnassigned else { return base }
+        return ChekinanaProductCopy.format(
+            "scan.candidates.with_unassigned",
+            "%@ + Unassigned",
+            base
+        )
     }
 
     private var canStart: Bool {
@@ -2974,7 +4038,7 @@ private struct ChekinanaScanView: View {
                 }
                 if idolRecognitionEnabled {
                     scanProgressRow(
-                        title: "Idol",
+                        title: ChekinanaProductCopy.text("common.idol", "Idol"),
                         completed: taskProgress.idolCompleted,
                         total: taskProgress.idolTotal
                     )
@@ -3093,7 +4157,6 @@ private struct ChekinanaScanView: View {
                 idolRecognitionEnabled: idolRecognitionEnabled,
                 idolCandidateIDs: validIDs,
                 includeUnassignedCandidate: includesUnassigned,
-                idolSimilarityThreshold: Float(idolSimilarityThreshold),
                 sleevesEnabled: sleevesEnabled,
                 directInputEnabled: direct
             )
@@ -3614,7 +4677,7 @@ private struct ChekinanaScanView: View {
         if scannerProcess == nil,
            ProcessInfo.processInfo.environment["CHEKINANA_NATIVE_SCAN_UI_STUB"] == "fixture" {
             let fallbackPattern = patternIdols.first?.recognitionPatterns.first
-                ?? ChekinanaPresetIdolSeeder.prototypeVectors[0]
+                ?? ChekinanaPatternDebugFixture.unitVector(0)
             return ChekinanaCommandExecutor(
                 modelContext: modelContext,
                 confirmationLedger: confirmationLedger,
@@ -3712,7 +4775,12 @@ private struct ChekinanaScanView: View {
             return "\(source) · \(phaseText)\n\(publishedText) · 已获取 \(downloaded) 张 · \(totals)"
         case .preparingResult(let index, let count, let recognizesIdol):
             let action = recognizesIdol
-                ? "正在本机编码并识别 Idol \(index)/\(count)"
+                ? ChekinanaProductCopy.format(
+                    "scan.progress.recognizing_idol",
+                    "Recognizing Idols on device %1$lld/%2$lld",
+                    Int64(index),
+                    Int64(count)
+                )
                 : directInputEnabled
                     ? "正在准备 Cheki \(index)/\(count)"
                     : "正在准备拍立得 \(index)/\(count)"
@@ -5006,6 +6074,38 @@ private struct ChekinanaNativeDateSelectionDraft: Identifiable {
     let date: Date?
 }
 
+struct ChekinanaNativeTemporaryEditorEventState: Equatable {
+    let eventID: UUID?
+    let eventWasExplicitlyEdited: Bool
+}
+
+enum ChekinanaNativeTemporaryEditorEventPolicy {
+    static func dateChanged(
+        currentEventID: UUID?,
+        eventWasExplicitlyEdited: Bool,
+        date: Date?,
+        events: [(id: UUID, date: Date?)],
+        calendar: Calendar = .current
+    ) -> ChekinanaNativeTemporaryEditorEventState {
+        if eventWasExplicitlyEdited {
+            return .init(
+                eventID: currentEventID.flatMap { id in
+                    events.contains(where: { $0.id == id }) ? id : nil
+                },
+                eventWasExplicitlyEdited: true
+            )
+        }
+        return .init(
+            eventID: ChekinanaChekiEventAutoAssociation.uniqueEventID(
+                for: date,
+                events: events,
+                calendar: calendar
+            ),
+            eventWasExplicitlyEdited: false
+        )
+    }
+}
+
 private struct ChekinanaNativeScanReview: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Idol.name) private var idols: [Idol]
@@ -5031,6 +6131,8 @@ private struct ChekinanaNativeScanReview: View {
     @State private var rotatingIDs = Set<UUID>()
     @State private var downloadingIDs = Set<UUID>()
     @State private var isDiscardAlertPresented = false
+    @ScaledMetric(relativeTo: .caption2) private var actionTextRegionHeight =
+        ChekinanaScanReviewLayout.actionTextRegionBaseHeight
 
     var body: some View {
         NavigationStack {
@@ -5371,48 +6473,8 @@ private struct ChekinanaNativeScanReview: View {
                     .padding(4)
                 }
 
-                temporaryMetadataRow(temporary, position: position)
-                HStack(spacing: 8) {
-                    Label(
-                        temporary.existingChekiID.flatMap { id in
-                            chekis.first(where: { $0.id == id }).map {
-                                "Attach to existing\($0.idx.map { " #\($0)" } ?? "")"
-                            }
-                        } ?? "Create new Cheki\(temporary.idx.map { " #\($0)" } ?? "")",
-                        systemImage: temporary.existingChekiID == nil
-                            ? "plus.square" : "link"
-                    )
-                    Spacer(minLength: 4)
-                    Label(
-                        temporary.size?.rawValue ?? ChekinanaProductCopy.text(
-                            "common.unknown",
-                            "Unknown"
-                        ),
-                        systemImage: "aspectratio"
-                    )
-                    .accessibilityIdentifier(
-                        "chekinana.scan.review.size.\(temporary.id.uuidString.lowercased())"
-                    )
-                }
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(
-                    temporary.existingChekiID == nil ? Color.secondary : Color.green
-                )
+                temporaryMetadataGrid(temporary, position: position)
                 temporaryActionRow(card, temporary: temporary)
-
-                if let eventID = temporary.eventID,
-                   let event = events.first(where: { $0.id == eventID }) {
-                    Label(event.name, systemImage: "ticket")
-                        .font(.caption)
-                        .lineLimit(1)
-                    if temporary.eventWasAutoMatched {
-                        Text("Auto matched from the recognized date")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .accessibilityIdentifier("chekinana.scan.review.event-auto")
-                    }
-                }
             }
             .padding(8)
             .overlay {
@@ -5425,14 +6487,21 @@ private struct ChekinanaNativeScanReview: View {
         }
     }
 
-    private func temporaryMetadataRow(
+    private func temporaryMetadataGrid(
         _ temporary: ChekinanaConfirmationLedger.TemporaryCheki,
         position: Int
     ) -> some View {
         let selectedIdols = orderedIdols.filter { temporary.idolIDs.contains($0.id) }
         let idolValue = selectedIdols.map(\.name).joined(separator: ", ").nonEmpty ?? "Unassigned"
         let dateValue = temporary.date.map(ChekinanaProductDate.displayString) ?? "日期未识别"
-        return HStack(spacing: 8) {
+        let eventValue = temporary.eventID.flatMap { id in
+            events.first(where: { $0.id == id })?.name
+        } ?? "No Event"
+        let columns = [
+            GridItem(.flexible(minimum: 0), spacing: 8),
+            GridItem(.flexible(minimum: 0), spacing: 8),
+        ]
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
             Button { beginSelectingIdols(temporary) } label: {
                 compactAvatarStack(selectedIdols, position: position)
                     .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
@@ -5440,7 +6509,9 @@ private struct ChekinanaNativeScanReview: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .buttonStyle(.plain)
             .disabled(!allowsCardInteraction(temporary.id))
-            .accessibilityLabel("Idol")
+            .accessibilityLabel(
+                ChekinanaProductCopy.text("common.idol", "Idol")
+            )
             .accessibilityValue(idolValue)
             .accessibilityIdentifier("chekinana.scan.review.idol.\(position)")
 
@@ -5458,12 +6529,40 @@ private struct ChekinanaNativeScanReview: View {
             .accessibilityLabel("Date")
             .accessibilityValue(dateValue)
             .accessibilityIdentifier("chekinana.scan.review.date.\(position)")
+
+            Label(
+                temporary.size?.rawValue ?? ChekinanaProductCopy.text(
+                    "common.unknown",
+                    "Unknown"
+                ),
+                systemImage: "aspectratio"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(temporary.size == nil ? .secondary : .primary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .accessibilityLabel("Size")
+            .accessibilityValue(temporary.size?.rawValue ?? "Unknown")
+            .accessibilityIdentifier("chekinana.scan.review.size.\(position)")
+
+            Text(eventValue)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(temporary.eventID == nil ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .trailing)
+                .accessibilityLabel("Event")
+                .accessibilityValue(eventValue)
+                .accessibilityIdentifier("chekinana.scan.review.event.\(position)")
         }
         .overlay(alignment: .topLeading) {
             if selectedIdols.count > 1 {
                 ChekinanaAccessibilityValueMarker(
                     identifier: "chekinana.scan.review.avatar-count.\(position)",
-                    label: "Selected Idol avatar count",
+                    label: ChekinanaProductCopy.text(
+                        "scan.selected_idol_avatar_count",
+                        "Selected Idol avatar count"
+                    ),
                     value: selectedIdols.count.formatted()
                 )
             }
@@ -5491,7 +6590,7 @@ private struct ChekinanaNativeScanReview: View {
         _ card: ChekinanaChekiCard,
         temporary: ChekinanaConfirmationLedger.TemporaryCheki
     ) -> some View {
-        HStack(spacing: 4) {
+        HStack(alignment: .center, spacing: 4) {
             temporaryActionButton(
                 "Download",
                 systemImage: "square.and.arrow.down",
@@ -5521,10 +6620,17 @@ private struct ChekinanaNativeScanReview: View {
                     .font(.callout.weight(.semibold))
                 Text(title)
                     .font(.caption2.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: actionTextRegionHeight,
+                        maxHeight: actionTextRegionHeight,
+                        alignment: .top
+                    )
             }
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
@@ -5578,7 +6684,11 @@ private struct ChekinanaNativeScanReview: View {
             return false
         }
         let automaticEventID = temporary.explicitlyEditedFields.contains(.event)
-            ? temporary.eventID
+            ? ChekinanaChekiEventSelectionPolicy.validatedEventID(
+                temporary.eventID,
+                recordDate: date,
+                events: events
+            )
             : ChekinanaChekiEventAutoAssociation.uniqueEventID(
                 for: date,
                 events: events.map { ($0.id, $0.date) }
@@ -5725,7 +6835,10 @@ private struct ChekinanaNativeScanReview: View {
             date: date
         )
         if idx != nil, group == nil {
-            statusMessage = "A positive index requires both a date and at least one Idol."
+            statusMessage = ChekinanaProductCopy.text(
+                "error.index_requires_group",
+                "A positive index requires both a date and at least one Idol."
+            )
             return
         }
         if normalizedIdxText != draft.initialIdxText,
@@ -5738,13 +6851,21 @@ private struct ChekinanaNativeScanReview: View {
                    ) == group
                    && $0.idx == idx
            }) {
-            statusMessage = "Index #\(idx) is already used in this Idol/date group."
+            statusMessage = ChekinanaProductCopy.format(
+                "error.index_collision_for_value",
+                "Index #%lld is already used in this Idol/date group.",
+                Int64(idx)
+            )
             return
         }
         let resolvedEventID: UUID?
         let eventWasAutoMatched: Bool
         if draft.eventWasExplicitlyEdited {
-            resolvedEventID = draft.eventID
+            resolvedEventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+                draft.eventID,
+                recordDate: date,
+                events: events
+            )
             eventWasAutoMatched = false
         } else {
             resolvedEventID = ChekinanaChekiEventAutoAssociation.uniqueEventID(
@@ -5758,7 +6879,7 @@ private struct ChekinanaNativeScanReview: View {
             idolIDs: Array(draft.idolIDs),
             date: date,
             eventID: resolvedEventID,
-            userAppears: draft.userAppears,
+            userAppears: draft.userAppears ?? false,
             size: draft.size,
             isFavorite: draft.isFavorite,
             hasPostedToSNS: draft.hasPostedToSNS,
@@ -6171,8 +7292,186 @@ private struct ChekinanaNeutralIdolAvatar: View {
                 .foregroundStyle(.secondary)
         }
         .frame(width: size, height: size)
-        .overlay { Circle().stroke(Color.secondary.opacity(0.28), lineWidth: 1) }
+        .clipShape(Circle())
+        .overlay {
+            Circle().strokeBorder(Color.secondary.opacity(0.28), lineWidth: 1)
+        }
         .accessibilityHidden(true)
+    }
+}
+
+private struct ChekinanaExpandableDateWheel: View {
+    let title: String
+    @Binding var selection: Date
+    let allowedRange: ClosedRange<Date>?
+    let identifier: String
+    @State private var isExpanded = false
+
+    init(
+        _ title: String,
+        selection: Binding<Date>,
+        in allowedRange: ClosedRange<Date>? = nil,
+        accessibilityIdentifier identifier: String
+    ) {
+        self.title = title
+        _selection = selection
+        self.allowedRange = allowedRange
+        self.identifier = identifier
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Text(title)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Text(ChekinanaProductDate.displayString(selection))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityValue(ChekinanaProductDate.accessibilityDate(selection))
+            .accessibilityIdentifier(identifier)
+
+            if isExpanded {
+                dateWheel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var dateWheel: some View {
+        if let allowedRange {
+            DatePicker(
+                title,
+                selection: $selection,
+                in: allowedRange,
+                displayedComponents: .date
+            )
+            .datePickerStyle(.wheel)
+            .labelsHidden()
+            .accessibilityIdentifier("\(identifier).wheel")
+        } else {
+            DatePicker(title, selection: $selection, displayedComponents: .date)
+                .datePickerStyle(.wheel)
+                .labelsHidden()
+                .accessibilityIdentifier("\(identifier).wheel")
+        }
+    }
+}
+
+private struct ChekinanaExpandableMonthDayWheels: View {
+    let title: String
+    @Binding var month: Int
+    @Binding var day: Int
+    let monthIdentifier: String
+    let dayIdentifier: String
+    let identifier: String
+    @State private var isExpanded = false
+
+    private var displayedValue: String {
+        let stored = String(format: "%02d.%02d", month, day)
+        return ChekinanaBirthdayValue.localizedDisplay(stored) ?? stored
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Text(title)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Text(displayedValue)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityValue(displayedValue)
+            .accessibilityIdentifier(identifier)
+
+            if isExpanded {
+                HStack(spacing: 0) {
+                    VStack(spacing: 4) {
+                        Text(ChekinanaProductCopy.text("common.month", "Month"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker(
+                            ChekinanaProductCopy.text("common.month", "Month"),
+                            selection: $month
+                        ) {
+                            ForEach(1...12, id: \.self) { value in
+                                Text(value.formatted()).tag(value)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .labelsHidden()
+                        .accessibilityIdentifier(monthIdentifier)
+                    }
+                    VStack(spacing: 4) {
+                        Text(ChekinanaProductCopy.text("common.day", "Day"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Picker(
+                            ChekinanaProductCopy.text("common.day", "Day"),
+                            selection: $day
+                        ) {
+                            ForEach(
+                                ChekinanaBirthdayEditorPolicy.dayRange(month: month),
+                                id: \.self
+                            ) { value in
+                                Text(value.formatted()).tag(value)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .labelsHidden()
+                        .accessibilityIdentifier(dayIdentifier)
+                    }
+                }
+                .frame(height: 180)
+                .accessibilityIdentifier("\(identifier).expanded")
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+}
+
+enum ChekinanaScanReviewLayout {
+    static let actionTextRegionBaseHeight: CGFloat = 28
+}
+
+enum ChekinanaIdolAvatarSelectionLayout {
+    static let columnCount = 3
+    static let horizontalSpacing: CGFloat = 12
+    static let verticalSpacing: CGFloat = 16
+
+    static var columns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(minimum: 0), spacing: horizontalSpacing),
+            count: columnCount
+        )
     }
 }
 
@@ -6193,27 +7492,20 @@ private struct ChekinanaNativeIdolSelectionView: View {
         _selectedIDs = State(initialValue: initialSelectedIDs)
     }
 
-    private var orderedIdols: [Idol] {
-        ChekinanaIdolOrdering.ordered(idols)
-    }
-
-    private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 68, maximum: 82), spacing: 14)]
-    }
-
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 16) {
-                    idolOption(idol: nil)
-                    ForEach(orderedIdols) { idol in
-                        idolOption(idol: idol)
-                    }
-                }
+                ChekinanaNativeIdolSelectionGrid(
+                    idols: idols,
+                    selectedIDs: $selectedIDs,
+                    identifierPrefix: "chekinana.scan.review.idol-option"
+                )
                 .padding(16)
             }
             .background(ChekinanaProductTheme.pageBackground)
-            .navigationTitle("Select Idols")
+            .navigationTitle(
+                ChekinanaProductCopy.text("common.select_idols", "Select Idols")
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -6225,7 +7517,10 @@ private struct ChekinanaNativeIdolSelectionView: View {
                         .accessibilityIdentifier("chekinana.scan.review.idol-picker.done")
                 }
             }
-            .alert("Unable to update Idol", isPresented: Binding(
+            .alert(ChekinanaProductCopy.text(
+                "scan.update_idol_failed",
+                "Unable to update Idol"
+            ), isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
@@ -6237,12 +7532,43 @@ private struct ChekinanaNativeIdolSelectionView: View {
         .accessibilityIdentifier("chekinana.scan.review.idol-picker")
     }
 
+    private func save() {
+        guard onSave(selectedIDs) else {
+            errorMessage = "这张临时 Cheki 已失效或进入待确认状态；当前选择仍保留。"
+            return
+        }
+        dismiss()
+    }
+}
+
+private struct ChekinanaNativeIdolSelectionGrid: View {
+    let idols: [Idol]
+    @Binding var selectedIDs: Set<UUID>
+    let identifierPrefix: String
+
+    private var orderedIdols: [Idol] {
+        ChekinanaIdolOrdering.ordered(idols)
+    }
+
+    var body: some View {
+        LazyVGrid(
+            columns: ChekinanaIdolAvatarSelectionLayout.columns,
+            spacing: ChekinanaIdolAvatarSelectionLayout.verticalSpacing
+        ) {
+            idolOption(idol: nil)
+            ForEach(orderedIdols) { idol in
+                idolOption(idol: idol)
+            }
+        }
+    }
+
     private func idolOption(idol: Idol?) -> some View {
         let isSelected = idol.map { selectedIDs.contains($0.id) } ?? selectedIDs.isEmpty
-        let label = idol?.name ?? "Unassigned"
+        let label = idol?.name
+            ?? ChekinanaProductCopy.text("common.unassigned", "Unassigned")
         let identifier = idol.map {
-            "chekinana.scan.review.idol-option.\($0.id.uuidString.lowercased())"
-        } ?? "chekinana.scan.review.idol-option.unassigned"
+            "\(identifierPrefix).\($0.id.uuidString.lowercased())"
+        } ?? "\(identifierPrefix).unassigned"
         return Button {
             if let idol {
                 if selectedIDs.contains(idol.id) {
@@ -6254,31 +7580,28 @@ private struct ChekinanaNativeIdolSelectionView: View {
                 selectedIDs.removeAll()
             }
         } label: {
-            VStack(spacing: 7) {
-                ZStack(alignment: .topTrailing) {
-                    if let idol {
-                        ChekinanaIdolAvatar(idol: idol, size: 62)
-                    } else {
-                        ChekinanaNeutralIdolAvatar(size: 62)
-                    }
-                    if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.title3)
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, ChekinanaProductTheme.accent)
-                            .background(Circle().fill(.white))
-                            .offset(x: 4, y: -4)
-                    }
+            ZStack(alignment: .topTrailing) {
+                if let idol {
+                    ChekinanaIdolAvatar(idol: idol, size: 62)
+                } else {
+                    ChekinanaNeutralIdolAvatar(size: 62)
                 }
-                Text(label)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, ChekinanaProductTheme.accent)
+                        .background(Circle().fill(.white))
+                        .offset(x: 4, y: -4)
+                }
             }
-            .frame(maxWidth: .infinity, minHeight: 92)
+            .frame(maxWidth: .infinity, minHeight: 74)
             .padding(.vertical, 6)
-            .background(isSelected ? ChekinanaProductTheme.softAccent : ChekinanaProductTheme.cardBackground)
+            .background(
+                isSelected
+                    ? ChekinanaProductTheme.softAccent
+                    : ChekinanaProductTheme.cardBackground
+            )
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -6288,13 +7611,39 @@ private struct ChekinanaNativeIdolSelectionView: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier(identifier)
     }
+}
 
-    private func save() {
-        guard onSave(selectedIDs) else {
-            errorMessage = "这张临时 Cheki 已失效或进入待确认状态；当前选择仍保留。"
-            return
+private struct ChekinanaIdolAvatarCheckSelectionView: View {
+    @Environment(\.dismiss) private var dismiss
+    let idols: [Idol]
+    @Binding var selectedIDs: Set<UUID>
+    let identifierPrefix: String
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                ChekinanaNativeIdolSelectionGrid(
+                    idols: idols,
+                    selectedIDs: $selectedIDs,
+                    identifierPrefix: "\(identifierPrefix).option"
+                )
+                .padding(16)
+            }
+            .background(ChekinanaProductTheme.pageBackground)
+            .navigationTitle(
+                ChekinanaProductCopy.text("common.select_idols", "Select Idols")
+            )
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(ChekinanaProductCopy.text("common.done", "Done")) {
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("\(identifierPrefix).done")
+                }
+            }
         }
-        dismiss()
+        .accessibilityIdentifier(identifierPrefix)
     }
 }
 
@@ -6320,8 +7669,11 @@ private struct ChekinanaNativeDateSelectionView: View {
                     Toggle("Use selected date", isOn: $hasDate)
                         .accessibilityIdentifier("chekinana.scan.review.date-picker.use-date")
                     if hasDate {
-                        DatePicker("Date", selection: $date, displayedComponents: .date)
-                            .accessibilityIdentifier("chekinana.scan.review.date-picker.value")
+                        ChekinanaExpandableDateWheel(
+                            "Date",
+                            selection: $date,
+                            accessibilityIdentifier: "chekinana.scan.review.date-picker.value"
+                        )
                     } else {
                         Text("日期未识别")
                             .foregroundStyle(.secondary)
@@ -6333,7 +7685,7 @@ private struct ChekinanaNativeDateSelectionView: View {
                 } header: {
                     Text("Date")
                 } footer: {
-                    Text("清除后会保留原图和 Event，仅将日期恢复为未识别。")
+                    Text("日期变化会保留仍存在的已选 Event；清除日期不会移除原图。")
                 }
             }
             .navigationTitle("Select Date")
@@ -6383,6 +7735,7 @@ private struct ChekinanaNativeDateSelectionView: View {
 }
 
 private struct ChekinanaNativeTemporaryEditor: View {
+    @Query private var eventSchedules: [EventSchedule]
     @Binding var draft: ChekinanaNativeTemporaryDraft
     let idols: [Idol]
     let events: [Event]
@@ -6394,37 +7747,43 @@ private struct ChekinanaNativeTemporaryEditor: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Idols") {
-                    if idols.isEmpty { Text("No local Idols").foregroundStyle(.secondary) }
-                    ForEach(idols) { idol in
-                        Toggle(idol.name, isOn: Binding(
-                            get: { draft.idolIDs.contains(idol.id) },
-                            set: { selected in
-                                if selected { draft.idolIDs.insert(idol.id) }
-                                else { draft.idolIDs.remove(idol.id) }
-                            }
+                Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
+                    if idols.isEmpty {
+                        Text(ChekinanaProductCopy.text(
+                            "common.no_local_idols",
+                            "No local Idols"
                         ))
+                        .foregroundStyle(.secondary)
                     }
+                    ChekinanaNativeIdolSelectionGrid(
+                        idols: idols,
+                        selectedIDs: $draft.idolIDs,
+                        identifierPrefix: "chekinana.scan.review.editor.idol-option"
+                    )
                 }
                 Section("Date") {
                     Toggle("Set date", isOn: $draft.hasDate)
                     if draft.hasDate {
-                        DatePicker("Date", selection: $draft.date, displayedComponents: .date)
+                        ChekinanaExpandableDateWheel(
+                            "Date",
+                            selection: $draft.date,
+                            accessibilityIdentifier: "chekinana.scan.review.editor.date"
+                        )
                     }
                 }
                 Section("Event") {
-                    Picker("Event", selection: Binding(
-                        get: { draft.eventID },
-                        set: {
-                            draft.eventID = $0
-                            draft.eventWasExplicitlyEdited = true
-                        }
-                    )) {
-                        Text("None").tag(UUID?.none)
-                        ForEach(events) { event in
-                            Text(event.name).tag(Optional(event.id))
-                        }
-                    }
+                    ChekinanaChekiEventSelectionField(
+                        eventID: Binding(
+                            get: { draft.eventID },
+                            set: {
+                                draft.eventID = $0
+                                draft.eventWasExplicitlyEdited = true
+                            }
+                        ),
+                        recordDate: draftCanonicalDate,
+                        events: events,
+                        schedules: eventSchedules
+                    )
                 }
                 Section("Save destination") {
                     if existingCandidates.isEmpty {
@@ -6471,22 +7830,17 @@ private struct ChekinanaNativeTemporaryEditor: View {
                     .foregroundStyle(.secondary)
                     Picker(
                         ChekinanaProductCopy.text("scan.shot_type", "Shot type"),
-                        selection: $draft.userAppears
+                        selection: Binding(
+                            get: { draft.userAppears ?? false },
+                            set: { draft.userAppears = $0 }
+                        )
                     ) {
-                        Text(ChekinanaProductCopy.text(
-                            "scan.shot_type.unknown",
-                            "Unknown"
-                        )).tag(Bool?.none)
-                        Text("solo").tag(Optional(false))
-                        Text("2-shot").tag(Optional(true))
+                        Text("solo").tag(false)
+                        Text("2-shot").tag(true)
                     }
                     .accessibilityIdentifier("chekinana.scan.review.editor.user-appears")
                     .accessibilityValue(
-                        draft.userAppears.map { $0 ? "2-shot" : "solo" }
-                            ?? ChekinanaProductCopy.text(
-                                "scan.shot_type.unknown",
-                                "Unknown"
-                            )
+                        (draft.userAppears ?? false) ? "2-shot" : "solo"
                     )
                     Picker("Size", selection: $draft.size) {
                         Text("Unset").tag(ChekiSize?.none)
@@ -6500,6 +7854,12 @@ private struct ChekinanaNativeTemporaryEditor: View {
                     Toggle("Posted to SNS", isOn: $draft.hasPostedToSNS)
                     TextField("Note", text: $draft.note, axis: .vertical)
                 }
+            }
+            .onChange(of: draft.hasDate) { _, _ in
+                refreshEventSelectionForDateChange()
+            }
+            .onChange(of: draft.date) { _, _ in
+                refreshEventSelectionForDateChange()
             }
             .navigationTitle("Edit temporary Cheki")
             .navigationBarTitleDisplayMode(.inline)
@@ -6519,6 +7879,25 @@ private struct ChekinanaNativeTemporaryEditor: View {
         }
         .accessibilityIdentifier("chekinana.scan.review.editor")
     }
+
+    private var draftCanonicalDate: Date? {
+        guard draft.hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(
+            from: draft.date,
+            displayedIn: .current
+        )
+    }
+
+    private func refreshEventSelectionForDateChange() {
+        let state = ChekinanaNativeTemporaryEditorEventPolicy.dateChanged(
+            currentEventID: draft.eventID,
+            eventWasExplicitlyEdited: draft.eventWasExplicitlyEdited,
+            date: draftCanonicalDate,
+            events: events.map { ($0.id, $0.date) }
+        )
+        draft.eventID = state.eventID
+        draft.eventWasExplicitlyEdited = state.eventWasExplicitlyEdited
+    }
 }
 
 private struct ChekinanaCandidatePicker: View {
@@ -6526,39 +7905,29 @@ private struct ChekinanaCandidatePicker: View {
     let idols: [Idol]
     @Binding var selectedIDs: Set<UUID>
     @Binding var includesUnassigned: Bool
-    @Binding var similarityThreshold: Double
 
     private var orderedIdols: [Idol] {
         ChekinanaIdolOrdering.ordered(idols.filter(\.hasRecognitionPatterns))
-    }
-
-    private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 82, maximum: 112), spacing: 12)]
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("If the Idol may be outside the selected range, enable Unassigned.")
+                    Text(ChekinanaProductCopy.text(
+                        "scan.candidates.unassigned_hint",
+                        "If the Idol may be outside the selected range, enable Unassigned."
+                    ))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Toggle("Unassigned", isOn: $includesUnassigned)
                         .accessibilityValue(includesUnassigned ? "Selected" : "Not selected")
                         .accessibilityIdentifier("chekinana.scan.candidate.unassigned")
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Similarity threshold")
-                            Spacer()
-                            Text(similarityThreshold, format: .number.precision(.fractionLength(2)))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $similarityThreshold, in: 0.50...0.99, step: 0.01)
-                            .accessibilityIdentifier("chekinana.scan.candidate.threshold")
-                    }
                     Divider()
-                    LazyVGrid(columns: columns, spacing: 18) {
+                    LazyVGrid(
+                        columns: ChekinanaIdolAvatarSelectionLayout.columns,
+                        spacing: ChekinanaIdolAvatarSelectionLayout.verticalSpacing
+                    ) {
                         ForEach(orderedIdols) { idol in
                             idolOption(idol)
                         }
@@ -6784,6 +8153,9 @@ private struct ChekinanaIdolsView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @Query private var idols: [Idol]
+    @Query private var events: [Event]
+    @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let openMenu: () -> Void
 
@@ -6794,20 +8166,26 @@ private struct ChekinanaIdolsView: View {
     @State private var dragStartOrderIDs: [UUID] = []
     @State private var dragPreviewOrderIDs: [UUID] = []
     @State private var dragResidualOffsetY: CGFloat = 0
+    @State private var pendingMergedAvatarCleanup: ChekinanaIdolAvatarCleanupTarget?
+    @State private var mergeCleanupMessage: String?
     @FocusState private var isSearchFocused: Bool
 
+    private var chekiCountsByIdolID: [UUID: Int] {
+        ChekinanaIdolCardChekiCount.countsByIdolID(
+            mediaChekis: chekis,
+            simpleRecords: chekiRecords,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        )
+    }
+
     private var orderedIdols: [Idol] {
-        let persisted = ChekinanaIdolOrdering.ordered(
+        ChekinanaIdolOrdering.orderedForList(
             ChekinanaVisibilityPolicy.visibleIdols(
                 idols,
                 hiddenIDs: hiddenIdols.hiddenIDs
-            )
+            ),
+            chekiCountsByIdolID: chekiCountsByIdolID
         )
-        guard !dragPreviewOrderIDs.isEmpty else { return persisted }
-        let byID = Dictionary(uniqueKeysWithValues: persisted.map { ($0.id, $0) })
-        let previewed = dragPreviewOrderIDs.compactMap { byID[$0] }
-        let previewedIDs = Set(previewed.map(\.id))
-        return previewed + persisted.filter { !previewedIDs.contains($0.id) }
     }
 
     private var filteredIdols: [Idol] {
@@ -6822,20 +8200,32 @@ private struct ChekinanaIdolsView: View {
 
     var body: some View {
         let _ = languageRevision
+        let currentChekiCountsByIdolID = chekiCountsByIdolID
         NavigationStack {
             Group {
                 if orderedIdols.isEmpty {
                     ChekinanaEmptyState(
-                        title: "No Idols yet",
-                        message: "添加 Idol 后可关联 Cheki，并在存有 pattern 时用于本机识别。",
+                        title: ChekinanaProductCopy.text(
+                            "idols.empty.title",
+                            "No Idols yet"
+                        ),
+                        message: ChekinanaProductCopy.text(
+                            "idols.empty.detail",
+                            "Add an Idol to link Cheki and enable on-device recognition after storing patterns."
+                        ),
                         systemImage: "person.2",
-                        actionTitle: "Add Idol",
+                        actionTitle: ChekinanaProductCopy.text(
+                            "idols.add",
+                            "Add Idol"
+                        ),
                         action: { isAddPresented = true }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .chekinanaScreenMarker("chekinana.idols.empty")
                 } else {
-                    idolsContent
+                    idolsContent(
+                        chekiCountsByIdolID: currentChekiCountsByIdolID
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -6848,7 +8238,9 @@ private struct ChekinanaIdolsView: View {
                         Image(systemName: "plus")
                             .frame(width: 44, height: 44)
                     }
-                    .accessibilityLabel("添加 Idol")
+                    .accessibilityLabel(
+                        ChekinanaProductCopy.text("idols.add", "Add Idol")
+                    )
                     .accessibilityIdentifier("chekinana.idols.add")
                 }
             }
@@ -6858,8 +8250,48 @@ private struct ChekinanaIdolsView: View {
             .sheet(item: $selectedIdol) { idol in
                 ChekinanaIdolDetailView(
                     idol: idol,
-                    preparedAvatarImage: nil
+                    preparedAvatarImage: nil,
+                    onMerged: { cleanup in
+                        selectedIdol = nil
+                        guard let cleanup else { return }
+                        pendingMergedAvatarCleanup = cleanup
+                        mergeCleanupMessage = ChekinanaProductCopy.text(
+                            "idols.merge.avatar_cleanup_failed",
+                            "The Idols were merged, but the deleted Idol's managed avatar could not be removed. Retry cleanup or close and leave the harmless orphaned file."
+                        )
+                    },
+                    onDeleted: { cleanup in
+                        selectedIdol = nil
+                        guard let cleanup else { return }
+                        pendingMergedAvatarCleanup = cleanup
+                        mergeCleanupMessage = ChekinanaProductCopy.text(
+                            "idols.delete.avatar_cleanup_failed",
+                            "The Idol was deleted, but its managed avatar could not be removed. Retry cleanup or close and leave the harmless orphaned file."
+                        )
+                    }
                 )
+            }
+            .alert(
+                ChekinanaProductCopy.text(
+                    "idols.avatar_cleanup_required",
+                    "Avatar Cleanup Needed"
+                ),
+                isPresented: Binding(
+                    get: { mergeCleanupMessage != nil },
+                    set: { if !$0 { mergeCleanupMessage = nil } }
+                )
+            ) {
+                if pendingMergedAvatarCleanup != nil {
+                    Button(ChekinanaProductCopy.text("common.retry", "Retry")) {
+                        retryMergedAvatarCleanup()
+                    }
+                    Button(ChekinanaProductCopy.text("common.close", "Close"), role: .cancel) {
+                        pendingMergedAvatarCleanup = nil
+                        mergeCleanupMessage = nil
+                    }
+                }
+            } message: {
+                Text(mergeCleanupMessage ?? "")
             }
         }
         .accessibilityElement(children: .contain)
@@ -6867,19 +8299,49 @@ private struct ChekinanaIdolsView: View {
         .chekinanaScreenMarker("chekinana.idols.page")
     }
 
-    private var idolsContent: some View {
+    private func retryMergedAvatarCleanup() {
+        guard let cleanup = pendingMergedAvatarCleanup else { return }
+        do {
+            _ = try ChekinanaIdolReferenceStore.removeManagedAvatar(
+                cleanup.imageRef,
+                idolID: cleanup.idolID,
+                directory: cleanup.directory
+            )
+            pendingMergedAvatarCleanup = nil
+            mergeCleanupMessage = nil
+        } catch {
+            mergeCleanupMessage = ChekinanaProductCopy.format(
+                "idols.merge.avatar_cleanup_retry_failed",
+                "The Idols are merged, but avatar cleanup still failed: %@",
+                error.localizedDescription
+            )
+        }
+    }
+
+    private func idolsContent(
+        chekiCountsByIdolID: [UUID: Int]
+    ) -> some View {
         ScrollView {
             VStack(spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search Idols", text: $query)
+                    TextField(
+                        ChekinanaProductCopy.text(
+                            "common.search_idols",
+                            "Search Idols"
+                        ),
+                        text: $query
+                    )
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .submitLabel(.search)
                         .focused($isSearchFocused)
                         .onSubmit { isSearchFocused = false }
-                        .accessibilityLabel("Search Idols")
+                        .accessibilityLabel(ChekinanaProductCopy.text(
+                            "common.search_idols",
+                            "Search Idols"
+                        ))
                         .accessibilityIdentifier("chekinana.idols.search")
                     if !query.isEmpty {
                         Button {
@@ -6913,21 +8375,13 @@ private struct ChekinanaIdolsView: View {
                     .frame(maxWidth: .infinity, minHeight: 420)
                     .chekinanaScreenMarker("chekinana.idols.no-results")
                 } else {
-                    if isSearchActive {
-                        Label("Clear search to reorder Idols.", systemImage: "line.3.horizontal")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityIdentifier("chekinana.idols.reorder.search-disabled")
-                    }
-                    if isSearchActive {
-                        LazyVStack(spacing: 12) {
-                            ForEach(filteredIdols) { idol in
-                                idolRow(idol)
-                            }
+                    LazyVStack(spacing: 12) {
+                        ForEach(filteredIdols) { idol in
+                            idolRow(
+                                idol,
+                                chekiCountsByIdolID: chekiCountsByIdolID
+                            )
                         }
-                    } else {
-                        reorderableIdolStack
                     }
                 }
             }
@@ -6941,10 +8395,15 @@ private struct ChekinanaIdolsView: View {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var reorderableIdolStack: some View {
+    private func reorderableIdolStack(
+        chekiCountsByIdolID: [UUID: Int]
+    ) -> some View {
         ZStack(alignment: .top) {
             ForEach(Array(orderedIdols.enumerated()), id: \.element.id) { index, idol in
-                idolRow(idol)
+                idolRow(
+                    idol,
+                    chekiCountsByIdolID: chekiCountsByIdolID
+                )
                     .offset(y: CGFloat(index) * Self.dragRowStride)
                     .zIndex(draggingIdolID == idol.id ? 100_000 : 0)
                     .animation(
@@ -6964,11 +8423,15 @@ private struct ChekinanaIdolsView: View {
     }
 
     @ViewBuilder
-    private func idolRow(_ idol: Idol) -> some View {
+    private func idolRow(
+        _ idol: Idol,
+        chekiCountsByIdolID: [UUID: Int]
+    ) -> some View {
         ChekinanaIdolRow(
             idol: idol,
             preparedAvatarImage: nil,
-            reorderEnabled: !isSearchActive,
+            chekiCount: chekiCountsByIdolID[idol.id] ?? 0,
+            reorderEnabled: false,
             open: { selectedIdol = idol },
             toggleFavorite: { toggleFavorite(idol) },
             isBeingDragged: draggingIdolID == idol.id,
@@ -6990,11 +8453,13 @@ private struct ChekinanaIdolsView: View {
     }
 
     private func toggleFavorite(_ idol: Idol) {
-        try? ChekinanaIdolFavoriteAction.toggle(
-            idol,
-            in: idols,
-            modelContext: modelContext
-        )
+        idol.isFavorite.toggle()
+        idol.updatedAt = Date()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+        }
     }
 
     private func beginDrag(_ idolID: UUID) {
@@ -7077,22 +8542,61 @@ private struct ChekinanaIdolsView: View {
     }
 }
 
+enum ChekinanaIdolCardChekiCount {
+    static func countsByIdolID(
+        mediaChekis: some Sequence<Cheki>,
+        simpleRecords: some Sequence<ChekiRecord>,
+        hiddenIDs: Set<UUID>
+    ) -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        for cheki in mediaChekis
+        where cheki.imageRef?.nonEmpty != nil
+            && ChekinanaVisibilityPolicy.includesRecord(
+                idols: cheki.idols,
+                hiddenIDs: hiddenIDs
+            ) {
+            for idolID in Set(cheki.idols.map(\.id)) {
+                result[idolID] = saturatedAdding(result[idolID] ?? 0, 1)
+            }
+        }
+        for record in simpleRecords where ChekinanaChekiRecordReadPolicy.isVisible(
+            record,
+            hiddenIDs: hiddenIDs
+        ) {
+            let quantity = max(1, record.count)
+            for idolID in Set(record.idolIDs) {
+                result[idolID] = saturatedAdding(result[idolID] ?? 0, quantity)
+            }
+        }
+        return result
+    }
+
+    private static func saturatedAdding(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : sum
+    }
+}
+
 private enum ChekinanaIdolAvatarRepairError: LocalizedError {
     case missingCatalogueIdentity(String)
 
     var errorDescription: String? {
         switch self {
         case .missingCatalogueIdentity(let name):
-            "\(name) has no valid managed avatar and no catalogue identity. Edit this Idol and choose a local reference photo, then retry."
+            ChekinanaProductCopy.format(
+                "idols.avatar_repair.missing_catalogue_identity",
+                "%@ has no valid managed avatar and no catalogue identity. Edit this Idol and choose a local reference photo, then retry.",
+                name
+            )
         }
     }
 }
 
 private struct ChekinanaIdolRow: View {
     @Environment(\.modelContext) private var modelContext
-    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let idol: Idol
     let preparedAvatarImage: ChekinanaRenderedImage?
+    let chekiCount: Int
     let reorderEnabled: Bool
     let open: () -> Void
     let toggleFavorite: () -> Void
@@ -7106,12 +8610,6 @@ private struct ChekinanaIdolRow: View {
     @State private var avatarRepairState = ChekinanaIdolAvatarRepairState.idle
 
     var body: some View {
-        let visibleChekiCount = idol.chekis.filter {
-            ChekinanaVisibilityPolicy.includesRecord(
-                idols: $0.idols,
-                hiddenIDs: hiddenIdols.hiddenIDs
-            )
-        }.count
         let patternStatus = ChekinanaIdolPatternStatus.make(
             hasRecognitionPatterns: idol.hasRecognitionPatterns
         )
@@ -7139,14 +8637,14 @@ private struct ChekinanaIdolRow: View {
                                         width: ChekinanaMiniChekiIconMetrics.width,
                                         height: ChekinanaMiniChekiIconMetrics.height
                                     )
-                                Text(ChekinanaChekiCountLabel.text(visibleChekiCount))
+                                Text(ChekinanaChekiCountLabel.text(chekiCount))
                             }
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                             .layoutPriority(1)
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("Cheki count")
-                            .accessibilityValue("\(visibleChekiCount)")
+                            .accessibilityValue("\(chekiCount)")
                             .accessibilityIdentifier(
                                 "chekinana.idols.cheki-count.\(idol.id.uuidString.lowercased())"
                             )
@@ -7170,12 +8668,18 @@ private struct ChekinanaIdolRow: View {
             .contentShape(Rectangle())
             .accessibilityIdentifier("chekinana.idols.card.\(idol.id.uuidString.lowercased())")
             .accessibilityValue(
-                "\(idol.chekis.count) Cheki; \(patternStatus.accessibilityValue)"
+                "\(chekiCount) Cheki; \(patternStatus.accessibilityValue)"
             )
             .accessibilityHint(
                 reorderEnabled
-                    ? "Open Idol details. Use the drag handle to reorder within the favorite group."
-                    : "Clear search before reordering."
+                    ? ChekinanaProductCopy.text(
+                        "idols.open_detail_reorder_hint",
+                        "Open Idol details. Use the drag handle to reorder within the favorite group."
+                    )
+                    : ChekinanaProductCopy.text(
+                        "idols.open_detail_hint",
+                        "Open Idol details."
+                    )
             )
             Button(action: toggleFavorite) {
                 Image(systemName: idol.isFavorite ? "star.fill" : "star")
@@ -7228,16 +8732,7 @@ private struct ChekinanaIdolRow: View {
                     "chekinana.idols.drag-handle.\(idol.id.uuidString.lowercased())"
                 )
         } else {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 38, height: 44)
-                .accessibilityElement()
-                .accessibilityLabel("Reorder \(idol.name)")
-                .accessibilityHint("Clear search before reordering.")
-                .accessibilityIdentifier(
-                    "chekinana.idols.drag-handle.\(idol.id.uuidString.lowercased())"
-                )
+            EmptyView()
         }
     }
 
@@ -7306,6 +8801,7 @@ private struct ChekinanaIdolAvatar: View {
     let size: CGFloat
     var preparedImage: ChekinanaRenderedImage? = nil
     var repairsMissingManagedAvatar = false
+    var borderLineWidth: CGFloat = 2
     @State private var repairRequest = 0
     @State private var repairState = ChekinanaIdolAvatarRepairState.idle
 
@@ -7318,7 +8814,8 @@ private struct ChekinanaIdolAvatar: View {
                 cacheKey: "product-idol-\(idol.id.uuidString)",
                 size: size,
                 preparedImage: preparedImage,
-                managedIdolID: idol.id
+                managedIdolID: idol.id,
+                borderLineWidth: borderLineWidth
             )
             .id("\(idol.id.uuidString.lowercased())|\(idol.avatarImageRef ?? "none")")
             if repairsMissingManagedAvatar, repairState == .failed {
@@ -7333,7 +8830,11 @@ private struct ChekinanaIdolAvatar: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Retry avatar for \(idol.name)")
+                .accessibilityLabel(ChekinanaProductCopy.format(
+                    "idols.avatar.retry_for",
+                    "Retry avatar for %@",
+                    idol.name
+                ))
                 .accessibilityIdentifier(
                     "chekinana.idols.avatar-retry.\(idol.id.uuidString.lowercased())"
                 )
@@ -7383,6 +8884,7 @@ private struct ChekinanaIdolAvatarImage: View {
     let size: CGFloat
     var preparedImage: ChekinanaRenderedImage? = nil
     var managedIdolID: UUID? = nil
+    var borderLineWidth: CGFloat = 2
     @State private var localImage: ChekinanaRenderedImage?
 
     init(
@@ -7392,7 +8894,8 @@ private struct ChekinanaIdolAvatarImage: View {
         cacheKey: String,
         size: CGFloat,
         preparedImage: ChekinanaRenderedImage? = nil,
-        managedIdolID: UUID? = nil
+        managedIdolID: UUID? = nil,
+        borderLineWidth: CGFloat = 2
     ) {
         self.name = name
         self.color = color
@@ -7401,6 +8904,7 @@ private struct ChekinanaIdolAvatarImage: View {
         self.size = size
         self.preparedImage = preparedImage
         self.managedIdolID = managedIdolID
+        self.borderLineWidth = borderLineWidth
         let immediate: ChekinanaRenderedImage?
         if preparedImage == nil,
            let managedIdolID,
@@ -7424,14 +8928,12 @@ private struct ChekinanaIdolAvatarImage: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: size, height: size)
-                    .clipped()
                     .clipShape(Circle())
             } else if let localImage {
                 Image(decorative: localImage.cgImage, scale: 1)
                     .resizable()
                     .scaledToFill()
                     .frame(width: size, height: size)
-                    .clipped()
                     .clipShape(Circle())
             } else {
                 placeholder
@@ -7441,7 +8943,12 @@ private struct ChekinanaIdolAvatarImage: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .overlay { Circle().stroke(ChekinanaProductColor.color(for: color), lineWidth: 2) }
+        .overlay {
+            Circle().strokeBorder(
+                ChekinanaProductColor.color(for: color),
+                lineWidth: borderLineWidth
+            )
+        }
         .task(id: localLoadTaskID) {
             guard preparedImage == nil else { return }
             let loaded: ChekinanaRenderedImage?
@@ -7482,11 +8989,16 @@ private struct ChekinanaIdolDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query private var idols: [Idol]
+    @Query private var events: [Event]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
+    @Query private var chekiRecords: [ChekiRecord]
+    @Query private var eventSchedules: [EventSchedule]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let idol: Idol
     var preparedAvatarImage: ChekinanaRenderedImage? = nil
+    let onMerged: (ChekinanaIdolAvatarCleanupTarget?) -> Void
+    let onDeleted: (ChekinanaIdolAvatarCleanupTarget?) -> Void
     @State private var isEditing = false
     @State private var selectedCheki: Cheki?
     @State private var showsLinkedEvents = false
@@ -7502,38 +9014,36 @@ private struct ChekinanaIdolDetailView: View {
             && ChekinanaVisibilityPolicy.includesRecord(idols: value.idols, hiddenIDs: hiddenIdols.hiddenIDs)
     }.map(ChekinanaGalleryItem.douga) }
     private var chekiItems: [ChekinanaGalleryItem] { idol.chekis.filter {
-        ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
+        $0.imageRef?.nonEmpty != nil
+            && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
     }.map(ChekinanaGalleryItem.cheki) }
+    private var linkedChekiRecords: [ChekiRecord] {
+        chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.containsIdol($0, idolID: idol.id)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }
+    }
     private var linkedEvents: [Event] {
-        var values: [UUID: Event] = [:]
-        for event in chekiItems.compactMap(\.event) {
-            values[event.id] = event
-        }
-        return values.values.sorted { lhs, rhs in
-            switch (lhs.date, rhs.date) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            default:
-                if lhs.name != rhs.name { return lhs.name < rhs.name }
-                return lhs.id.uuidString < rhs.id.uuidString
-            }
-        }
+        ChekinanaIdolLinkedEventCount.linkedEvents(
+            mediaChekis: idol.chekis,
+            simpleRecords: chekiRecords,
+            relationshipIndex: ChekinanaChekiRecordRelationshipIndex(
+                idols: idols,
+                events: events
+            ),
+            idolID: idol.id,
+            hiddenIDs: hiddenIdols.hiddenIDs,
+            schedules: eventSchedules
+        )
     }
 
     var body: some View {
         let _ = languageRevision
         NavigationStack {
-            if let selectedCheki {
-                ChekinanaGalleryDetailView(
-                    cheki: selectedCheki,
-                    onClose: { self.selectedCheki = nil }
-                )
-            } else {
-                ScrollView {
+            ScrollView {
                 VStack(spacing: 10) {
                     HStack(spacing: 14) {
                         ChekinanaIdolAvatar(
@@ -7566,7 +9076,15 @@ private struct ChekinanaIdolDetailView: View {
                                 image: "gift"
                             )
                         }
-                        mediaSummaryRow(.cheki, image: "photo", items: chekiItems)
+                        mediaSummaryRow(
+                            .cheki,
+                            image: "photo",
+                            items: chekiItems,
+                            count: chekiItems.count
+                                + ChekinanaChekiRecordStore.totalCount(
+                                    linkedChekiRecords
+                                )
+                        )
                         mediaSummaryRow(.shame, image: "photo.on.rectangle", items: shameItems)
                         mediaSummaryRow(.douga, image: "video", items: dougaItems)
                         Button {
@@ -7616,29 +9134,41 @@ private struct ChekinanaIdolDetailView: View {
                         .accessibilityIdentifier("chekinana.idols.detail.done")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Menu {
-                        Button("Edit") { isEditing = true }
-                            .accessibilityIdentifier("chekinana.idols.detail.edit")
-                        Button(
-                            ChekinanaProductCopy.text("idols.hide", "Hide Idol"),
-                            role: .destructive,
-                            action: hideIdol
-                        )
-                        .accessibilityIdentifier("chekinana.idols.detail.hide")
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
+                    Button("Edit") {
+                        isEditing = true
                     }
-                    .accessibilityLabel(ChekinanaProductCopy.text("common.actions", "Actions"))
+                    .accessibilityIdentifier("chekinana.idols.detail.edit")
                 }
             }
-            .sheet(isPresented: $isEditing) { ChekinanaIdolEditorView(idol: idol) }
+            .sheet(isPresented: $isEditing) {
+                ChekinanaIdolEditorView(
+                    idol: idol,
+                    onMerged: { cleanup in
+                        isEditing = false
+                        onMerged(cleanup)
+                        dismiss()
+                    },
+                    onHidden: {
+                        isEditing = false
+                        dismiss()
+                    },
+                    onDeleted: { cleanup in
+                        isEditing = false
+                        onDeleted(cleanup)
+                        dismiss()
+                    }
+                )
+            }
             .sheet(isPresented: $showsLinkedEvents) {
-                ChekinanaIdolLinkedEventsView(events: linkedEvents)
+                ChekinanaIdolLinkedEventsView(
+                    idolID: idol.id,
+                    events: linkedEvents
+                )
             }
             .navigationDestination(for: ChekinanaIdolMediaKind.self) { kind in
                 ChekinanaIdolMediaDateView(idol: idol, kind: kind)
             }
-            .alert("Idol", isPresented: Binding(
+            .alert(ChekinanaProductCopy.text("common.idol", "Idol"), isPresented: Binding(
                 get: { deleteMessage != nil },
                 set: { if !$0 { deleteMessage = nil } }
             )) {
@@ -7650,13 +9180,21 @@ private struct ChekinanaIdolDetailView: View {
                 }
             } message: { Text(deleteMessage ?? "") }
                 .chekinanaScreenMarker("chekinana.idols.detail")
+                .fullScreenCover(item: $selectedCheki) { cheki in
+                    ChekinanaGalleryDetailView(cheki: cheki)
+                }
             }
-        }
     }
 
     private func deleteIdol() {
-        guard idol.chekis.isEmpty else {
-            deleteMessage = "This Idol has \(idol.chekis.count) linked Cheki. Reassign them before deleting."
+        let linkedCount = idol.chekis.count
+            + ChekinanaChekiRecordStore.totalCount(linkedChekiRecords)
+        guard linkedCount == 0 else {
+            deleteMessage = ChekinanaProductCopy.format(
+                "idols.delete.error.linked_records",
+                "This Idol has %lld linked Cheki record(s). Reassign them before deleting.",
+                Int64(linkedCount)
+            )
             return
         }
         do {
@@ -7664,18 +9202,16 @@ private struct ChekinanaIdolDetailView: View {
             hiddenIdols.removeDeleted(idol.id)
             if let cleanup = result.pendingAvatarCleanup {
                 pendingDeletedAvatarCleanup = cleanup
-                deleteMessage = "The Idol was deleted, but its previous managed avatar could not be removed. Retry cleanup or close and leave the harmless orphaned file for later cleanup."
+                deleteMessage = ChekinanaProductCopy.text(
+                    "idols.delete.avatar_cleanup_failed",
+                    "The Idol was deleted, but its managed avatar could not be removed. Retry cleanup or close and leave the harmless orphaned file."
+                )
                 return
             }
             dismiss()
         } catch {
             deleteMessage = error.localizedDescription
         }
-    }
-
-    private func hideIdol() {
-        hiddenIdols.hide(idol.id)
-        dismiss()
     }
 
     private func toggleFavorite() {
@@ -7701,7 +9237,11 @@ private struct ChekinanaIdolDetailView: View {
             self.pendingDeletedAvatarCleanup = nil
             dismiss()
         } catch {
-            deleteMessage = "The Idol is deleted, but avatar cleanup still failed: \(error.localizedDescription)"
+            deleteMessage = ChekinanaProductCopy.format(
+                "idols.delete.avatar_cleanup_retry_failed",
+                "The Idol is deleted, but avatar cleanup still failed: %@",
+                error.localizedDescription
+            )
         }
     }
 
@@ -7717,11 +9257,22 @@ private struct ChekinanaIdolDetailView: View {
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder private func mediaSummaryRow(_ kind: ChekinanaRecordKind, image: String, items: [ChekinanaGalleryItem]) -> some View {
+    @ViewBuilder private func mediaSummaryRow(
+        _ kind: ChekinanaRecordKind,
+        image: String,
+        items: [ChekinanaGalleryItem],
+        count: Int? = nil
+    ) -> some View {
+        let total = count ?? items.count
         NavigationLink(value: kind) {
-            detailRow(kind.title, value: kind.countLabel(items.count), image: image)
+            detailRow(
+                kind.title,
+                value: total.formatted(),
+                image: image
+            )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(kind.title), \(kind.countLabel(total))")
         .accessibilityIdentifier("chekinana.idols.detail.type.\(kind.rawValue)")
     }
 
@@ -7730,14 +9281,120 @@ private struct ChekinanaIdolDetailView: View {
     }
 }
 
+enum ChekinanaIdolLinkedEventCount {
+    static func linkedEvents(
+        mediaChekis: [Cheki],
+        simpleRecords: [ChekiRecord],
+        relationshipIndex: ChekinanaChekiRecordRelationshipIndex,
+        idolID: UUID,
+        hiddenIDs: Set<UUID>,
+        schedules: [EventSchedule] = []
+    ) -> [Event] {
+        var values: [UUID: Event] = [:]
+        for cheki in mediaChekis where cheki.imageRef?.nonEmpty != nil
+            && cheki.idols.contains(where: { $0.id == idolID })
+            && ChekinanaVisibilityPolicy.includesRecord(
+                idols: cheki.idols,
+                hiddenIDs: hiddenIDs
+            ) {
+            if let event = cheki.event { values[event.id] = event }
+        }
+        for record in simpleRecords
+        where ChekinanaChekiRecordReadPolicy.containsIdol(record, idolID: idolID)
+            && ChekinanaChekiRecordReadPolicy.isVisible(
+                record,
+                hiddenIDs: hiddenIDs
+            ) {
+            if let event = relationshipIndex.event(for: record) {
+                values[event.id] = event
+            }
+        }
+        return ChekinanaEventOrdering.ordered(
+            Array(values.values),
+            schedules: schedules,
+            dateAscending: true
+        )
+    }
+
+    static func chekiCount(
+        event: Event,
+        simpleRecords: [ChekiRecord],
+        idolID: UUID,
+        hiddenIDs: Set<UUID>
+    ) -> Int {
+        let mediaCount = ChekinanaIdolEventChekiScope.mediaChekis(
+            event: event,
+            idolID: idolID,
+            hiddenIDs: hiddenIDs
+        ).count
+        let simpleCount = ChekinanaIdolEventChekiScope.simpleRecords(
+            simpleRecords,
+            eventID: event.id,
+            idolID: idolID,
+            hiddenIDs: hiddenIDs
+        ).reduce(0) { $0 + max(1, $1.count) }
+        return mediaCount + simpleCount
+    }
+}
+
+enum ChekinanaIdolEventChekiScope {
+    static func mediaChekis(
+        event: Event,
+        idolID: UUID,
+        hiddenIDs: Set<UUID>
+    ) -> [Cheki] {
+        ChekinanaEventChekiOrdering.ordered(
+            event.chekis.filter {
+                $0.imageRef?.nonEmpty != nil
+                    && $0.idols.contains(where: { $0.id == idolID })
+                    && ChekinanaVisibilityPolicy.includesRecord(
+                        idols: $0.idols,
+                        hiddenIDs: hiddenIDs
+                    )
+            },
+            hiddenIDs: hiddenIDs
+        )
+    }
+
+    static func simpleRecords(
+        _ records: [ChekiRecord],
+        eventID: UUID,
+        idolID: UUID,
+        hiddenIDs: Set<UUID>
+    ) -> [ChekiRecord] {
+        records.filter {
+            ChekinanaChekiRecordReadPolicy.isLinked($0, eventID: eventID)
+                && ChekinanaChekiRecordReadPolicy.containsIdol($0, idolID: idolID)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIDs
+                )
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
 private struct ChekinanaIdolLinkedEventsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Query private var chekiRecords: [ChekiRecord]
+    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
+    let idolID: UUID
     let events: [Event]
     @State private var selectedEvent: Event?
 
+    private var visibleEvents: [Event] {
+        events.filter {
+            ChekinanaIdolLinkedEventCount.chekiCount(
+                event: $0,
+                simpleRecords: chekiRecords,
+                idolID: idolID,
+                hiddenIDs: hiddenIdols.hiddenIDs
+            ) > 0
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            List(events) { event in
+            List(visibleEvents) { event in
                 Button {
                     selectedEvent = event
                 } label: {
@@ -7754,7 +9411,12 @@ private struct ChekinanaIdolLinkedEventsView: View {
                         Spacer(minLength: 8)
                         Text(
                             ChekinanaRecordKind.cheki.countLabel(
-                                event.chekis.count
+                                ChekinanaIdolLinkedEventCount.chekiCount(
+                                    event: event,
+                                    simpleRecords: chekiRecords,
+                                    idolID: idolID,
+                                    hiddenIDs: hiddenIdols.hiddenIDs
+                                )
                             )
                         )
                         .font(.caption)
@@ -7784,10 +9446,88 @@ private struct ChekinanaIdolLinkedEventsView: View {
                 }
             }
             .sheet(item: $selectedEvent) {
-                ChekinanaEventDetailView(event: $0)
+                ChekinanaIdolEventChekiView(
+                    event: $0,
+                    idolID: idolID
+                )
             }
         }
         .accessibilityIdentifier("chekinana.idols.detail.events.page")
+    }
+}
+
+private struct ChekinanaIdolEventChekiView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Query private var idols: [Idol]
+    @Query private var chekiRecords: [ChekiRecord]
+    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
+    let event: Event
+    let idolID: UUID
+    @State private var selectedCheki: Cheki?
+    @State private var selectedRecord: ChekiRecord?
+
+    private var group: ChekinanaCalendarIdolGroup {
+        ChekinanaCalendarIdolGroup(
+            id: "idol-event-\(idolID.uuidString.lowercased())-\(event.id.uuidString.lowercased())",
+            idol: idols.first { $0.id == idolID },
+            chekis: ChekinanaIdolEventChekiScope.mediaChekis(
+                event: event,
+                idolID: idolID,
+                hiddenIDs: hiddenIdols.hiddenIDs
+            ),
+            records: ChekinanaIdolEventChekiScope.simpleRecords(
+                chekiRecords,
+                eventID: event.id,
+                idolID: idolID,
+                hiddenIDs: hiddenIdols.hiddenIDs
+            )
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            if group.chekis.isEmpty && group.records.isEmpty {
+                ContentUnavailableView(
+                    ChekinanaProductCopy.text(
+                        "calendar.no_records",
+                        "No records"
+                    ),
+                    systemImage: "photo.on.rectangle.angled"
+                )
+                .navigationTitle(event.name)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(
+                            ChekinanaL10n.text("action.back", fallback: "Back")
+                        ) {
+                            dismiss()
+                        }
+                        .accessibilityIdentifier(
+                            "chekinana.idols.detail.event-cheki.empty.back"
+                        )
+                    }
+                }
+                .accessibilityIdentifier(
+                    "chekinana.idols.detail.event-cheki.empty"
+                )
+            } else {
+                ChekinanaEventChekiGroupView(
+                    group: group,
+                    selectCheki: { selectedCheki = $0 },
+                    selectRecord: { selectedRecord = $0 },
+                    onBack: { dismiss() }
+                )
+                .navigationTitle(event.name)
+            }
+        }
+        .sheet(item: $selectedRecord) { record in
+            ChekinanaChekiRecordEditor(record: record)
+        }
+        .fullScreenCover(item: $selectedCheki) { cheki in
+            ChekinanaGalleryDetailView(cheki: cheki)
+        }
+        .accessibilityIdentifier("chekinana.idols.detail.event-cheki.page")
     }
 }
 
@@ -7847,6 +9587,7 @@ private struct ChekinanaIdolMediaStrip: View {
 
 private struct ChekinanaIdolMediaDateView: View {
     @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
@@ -7862,16 +9603,23 @@ private struct ChekinanaIdolMediaDateView: View {
             dougas.filter { $0.idols.contains { $0.id == idol.id } && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.douga)
         }
     }
-    private var groups: [(key: ChekinanaIdolMediaDateGroupKey, values: [ChekinanaGalleryItem])] {
-        let ordered = ChekinanaRecordOrdering.ordered(items, ascending: true)
-        return Dictionary(grouping: ordered) { item in
-            item.date
-                .flatMap(ChekinanaDateOnly.canonicalized)
-                .map(ChekinanaIdolMediaDateGroupKey.dated)
-                ?? .undated
+    private var groups: [(key: ChekinanaIdolMediaDateGroupKey, count: Int)] {
+        var counts: [ChekinanaIdolMediaDateGroupKey: Int] = [:]
+        for item in items {
+            counts[key(for: item.date), default: 0] += 1
         }
-        .map { (key: $0.key, values: $0.value) }
-        .sorted { $0.key < $1.key }
+        if kind == .cheki {
+            for record in chekiRecords where
+                ChekinanaChekiRecordReadPolicy.containsIdol(record, idolID: idol.id)
+                    && ChekinanaChekiRecordReadPolicy.isVisible(
+                        record,
+                        hiddenIDs: hiddenIdols.hiddenIDs
+                    ) {
+                counts[key(for: record.date), default: 0] += max(1, record.count)
+            }
+        }
+        return counts.map { (key: $0.key, count: $0.value) }
+            .sorted { $0.key < $1.key }
     }
     var body: some View {
         List {
@@ -7887,7 +9635,7 @@ private struct ChekinanaIdolMediaDateView: View {
                         Text(group.key.title)
                             .font(.subheadline.weight(.medium))
                         Spacer(minLength: 8)
-                        Text(kind.countLabel(group.values.count))
+                        Text(kind.countLabel(group.count))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -7907,6 +9655,12 @@ private struct ChekinanaIdolMediaDateView: View {
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("chekinana.idols.detail.date-page.\(kind.rawValue)")
     }
+
+    private func key(for date: Date?) -> ChekinanaIdolMediaDateGroupKey {
+        date.flatMap(ChekinanaDateOnly.canonicalized)
+            .map(ChekinanaIdolMediaDateGroupKey.dated)
+            ?? .undated
+    }
 }
 
 private extension ChekinanaIdolMediaDateGroupKey {
@@ -7922,9 +9676,9 @@ struct ChekinanaIdolNoMediaChekiExactGroup: Hashable, Sendable {
     let idolIDs: Set<UUID>
     let canonicalDate: String?
 
-    init(_ cheki: Cheki) {
-        idolIDs = Set(cheki.idols.map(\.id))
-        canonicalDate = cheki.date.map(ChekinanaDateOnly.string)
+    init(_ record: ChekiRecord) {
+        idolIDs = Set(record.idolIDs)
+        canonicalDate = record.date.map(ChekinanaDateOnly.string)
     }
 }
 
@@ -7933,49 +9687,30 @@ struct ChekinanaIdolNoMediaChekiIdentity: Hashable, Sendable {
     let note: String
     let eventID: UUID?
     let sizeRawValue: String?
-    let userAppears: Bool?
-    let isFavorite: Bool
-    let hasPostedToSNS: Bool
 
-    init?(_ cheki: Cheki) {
-        guard ChekinanaNoMediaPolicy.hasNoImage(cheki.imageRef) else { return nil }
-        group = ChekinanaIdolNoMediaChekiExactGroup(cheki)
-        note = ChekinanaIdolNoMediaChekiGrouping.exactNoteKey(cheki.note)
-        eventID = cheki.event?.id
-        sizeRawValue = cheki.sizeRawValue
-        userAppears = cheki.userAppears
-        isFavorite = cheki.isFavorite
-        hasPostedToSNS = cheki.hasPostedToSNS
+    init(_ record: ChekiRecord) {
+        group = ChekinanaIdolNoMediaChekiExactGroup(record)
+        note = ChekinanaIdolNoMediaChekiGrouping.exactNoteKey(record.note)
+        eventID = record.eventID
+        sizeRawValue = record.sizeRawValue
     }
 }
 
 struct ChekinanaIdolNoMediaChekiFingerprint: Hashable, Sendable {
     let id: UUID
     let group: ChekinanaIdolNoMediaChekiExactGroup
-    let updatedAt: Date
-    let createdAt: Date
-    let idx: Int?
-    let imageRef: String?
     let note: String
     let eventID: UUID?
     let sizeRawValue: String?
-    let userAppears: Bool?
-    let isFavorite: Bool
-    let hasPostedToSNS: Bool
+    let count: Int
 
-    init(_ cheki: Cheki) {
-        id = cheki.id
-        group = ChekinanaIdolNoMediaChekiExactGroup(cheki)
-        updatedAt = cheki.updatedAt
-        createdAt = cheki.createdAt
-        idx = cheki.idx
-        imageRef = cheki.imageRef
-        note = cheki.note
-        eventID = cheki.event?.id
-        sizeRawValue = cheki.sizeRawValue
-        userAppears = cheki.userAppears
-        isFavorite = cheki.isFavorite
-        hasPostedToSNS = cheki.hasPostedToSNS
+    init(_ record: ChekiRecord) {
+        id = record.id
+        group = ChekinanaIdolNoMediaChekiExactGroup(record)
+        note = record.note
+        eventID = record.eventID
+        sizeRawValue = record.sizeRawValue
+        count = max(1, record.count)
     }
 }
 
@@ -7988,7 +9723,7 @@ struct ChekinanaIdolNoMediaChekiBatchDraft: Identifiable, Sendable {
         selectedRecordIDs.map(\.uuidString).sorted().joined(separator: ",")
     }
 
-    var quantity: Int { selectedRecordIDs.count }
+    let quantity: Int
     var note: String { identity.note }
 }
 
@@ -8004,7 +9739,7 @@ enum ChekinanaIdolNoMediaChekiBatchError: LocalizedError, Equatable {
         case .changedRecords:
             ChekinanaProductCopy.text(
                 "idols.no_media_group.changed",
-                "This Cheki group changed. Reopen it and try again."
+                "This Cheki record group changed. Reopen it and try again."
             )
         case .missingRelationships:
             ChekinanaProductRecordCreationError.modelContextMismatch.localizedDescription
@@ -8016,35 +9751,41 @@ enum ChekinanaIdolNoMediaChekiBatchError: LocalizedError, Equatable {
 enum ChekinanaIdolNoMediaChekiBatchWriter {
     static func draft(
         selectedRecordIDs: [UUID],
-        allChekis: [Cheki]
+        allRecords: [ChekiRecord]
     ) throws -> ChekinanaIdolNoMediaChekiBatchDraft {
         let requestedIDs = Set(selectedRecordIDs)
         guard !requestedIDs.isEmpty,
               requestedIDs.count == selectedRecordIDs.count else {
             throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
         }
-        let selected = allChekis.filter { requestedIDs.contains($0.id) }
+        let selected = allRecords.filter { requestedIDs.contains($0.id) }
         guard selected.count == requestedIDs.count,
-              let first = selected.first,
-              let identity = ChekinanaIdolNoMediaChekiIdentity(first),
-              selected.allSatisfy({ ChekinanaIdolNoMediaChekiIdentity($0) == identity }) else {
+              let first = selected.first else {
             throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
         }
-        let matchingIDs = Set(allChekis.compactMap { cheki -> UUID? in
-            ChekinanaIdolNoMediaChekiIdentity(cheki) == identity ? cheki.id : nil
+        let identity = ChekinanaIdolNoMediaChekiIdentity(first)
+        guard selected.allSatisfy({
+            ChekinanaIdolNoMediaChekiIdentity($0) == identity
+        }) else {
+            throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
+        }
+        let matchingIDs = Set(allRecords.compactMap { record -> UUID? in
+            ChekinanaIdolNoMediaChekiIdentity(record) == identity
+                ? record.id : nil
         })
         guard matchingIDs == requestedIDs else {
             throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
         }
-        let groupFingerprints = Set(allChekis.compactMap { cheki in
-            ChekinanaIdolNoMediaChekiExactGroup(cheki) == identity.group
-                ? ChekinanaIdolNoMediaChekiFingerprint(cheki)
+        let fingerprints = Set(allRecords.compactMap { record in
+            ChekinanaIdolNoMediaChekiExactGroup(record) == identity.group
+                ? ChekinanaIdolNoMediaChekiFingerprint(record)
                 : nil
         })
-        return ChekinanaIdolNoMediaChekiBatchDraft(
+        return .init(
             selectedRecordIDs: ordered(selected).map(\.id),
             identity: identity,
-            groupFingerprints: groupFingerprints
+            groupFingerprints: fingerprints,
+            quantity: ChekinanaChekiRecordStore.totalCount(selected)
         )
     }
 
@@ -8054,116 +9795,83 @@ enum ChekinanaIdolNoMediaChekiBatchWriter {
         note: String,
         in modelContext: ModelContext
     ) throws -> [UUID] {
-        guard (1...100).contains(quantity) else {
+        guard quantity >= 0 else {
             throw ChekinanaIdolNoMediaChekiBatchError.invalidQuantity
         }
         var resultIDs: [UUID] = []
         do {
-            try modelContext.transaction {
-                let allChekis = try modelContext.fetch(FetchDescriptor<Cheki>())
-                let liveGroup = allChekis.filter {
-                    ChekinanaIdolNoMediaChekiExactGroup($0) == draft.identity.group
-                }
-                guard Set(liveGroup.map(ChekinanaIdolNoMediaChekiFingerprint.init))
-                        == draft.groupFingerprints else {
-                    throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
-                }
-                let liveByID = Dictionary(uniqueKeysWithValues: liveGroup.map { ($0.id, $0) })
-                let selected = try draft.selectedRecordIDs.map { id -> Cheki in
-                    guard let cheki = liveByID[id],
-                          ChekinanaIdolNoMediaChekiIdentity(cheki) == draft.identity else {
+            try ChekinanaChekiRecordStore.withMutationLock {
+                try modelContext.transaction {
+                    let allRecords = try modelContext.fetch(
+                    FetchDescriptor<ChekiRecord>()
+                    )
+                    let liveGroup = allRecords.filter {
+                        ChekinanaIdolNoMediaChekiExactGroup($0)
+                            == draft.identity.group
+                    }
+                    guard Set(liveGroup.map(
+                        ChekinanaIdolNoMediaChekiFingerprint.init
+                    )) == draft.groupFingerprints else {
                         throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
                     }
-                    return cheki
-                }
-
-                let requestedIdolIDs = draft.identity.group.idolIDs
-                let idols = try modelContext.fetch(FetchDescriptor<Idol>()).filter {
-                    requestedIdolIDs.contains($0.id)
-                }
-                guard Set(idols.map(\.id)) == requestedIdolIDs,
-                      idols.allSatisfy({ $0.modelContext === modelContext }) else {
-                    throw ChekinanaIdolNoMediaChekiBatchError.missingRelationships
-                }
-                let event: Event?
-                if let eventID = draft.identity.eventID {
-                    let matches = try modelContext.fetch(FetchDescriptor<Event>()).filter {
-                        $0.id == eventID
+                    let liveByID = Dictionary(
+                        uniqueKeysWithValues: liveGroup.map { ($0.id, $0) }
+                    )
+                    let selected = try draft.selectedRecordIDs.map {
+                        id -> ChekiRecord in
+                        guard let record = liveByID[id],
+                              ChekinanaIdolNoMediaChekiIdentity(record)
+                                == draft.identity else {
+                            throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
+                        }
+                        return record
                     }
-                    guard matches.count == 1,
-                          matches[0].modelContext === modelContext else {
+
+                    let requestedIdolIDs = draft.identity.group.idolIDs
+                    let idols = try modelContext.fetch(FetchDescriptor<Idol>())
+                        .filter { requestedIdolIDs.contains($0.id) }
+                    guard Set(idols.map(\.id)) == requestedIdolIDs,
+                          idols.allSatisfy({ $0.modelContext === modelContext }) else {
                         throw ChekinanaIdolNoMediaChekiBatchError.missingRelationships
                     }
-                    event = matches[0]
-                } else {
-                    event = nil
-                }
-
-                var retained = ordered(selected)
-                if quantity < retained.count {
-                    let removed = retained.suffix(retained.count - quantity)
-                    retained.removeLast(retained.count - quantity)
-                    for cheki in removed {
-                        modelContext.delete(cheki)
-                    }
-                }
-                let now = Date()
-                for cheki in retained {
-                    cheki.note = note
-                    cheki.updatedAt = now
-                }
-
-                var inserted: [Cheki] = []
-                if quantity > retained.count {
-                    let date = draft.identity.group.canonicalDate
+                    let recordDate = draft.identity.group.canonicalDate
                         .flatMap(ChekinanaDateOnly.parse)
-                    for _ in retained.count..<quantity {
-                        let cheki = Cheki(
-                            date: date,
-                            userAppears: draft.identity.userAppears,
-                            isFavorite: draft.identity.isFavorite,
-                            hasPostedToSNS: draft.identity.hasPostedToSNS,
-                            note: note,
-                            createdAt: now,
-                            updatedAt: now
-                        )
-                        modelContext.insert(cheki)
-                        guard cheki.modelContext === modelContext else {
+                    let event: Event?
+                    if let eventID = draft.identity.eventID {
+                        let matches = try modelContext.fetch(FetchDescriptor<Event>())
+                            .filter { $0.id == eventID }
+                        guard matches.count == 1,
+                              matches[0].modelContext === modelContext else {
                             throw ChekinanaIdolNoMediaChekiBatchError.missingRelationships
                         }
-                        cheki.sizeRawValue = draft.identity.sizeRawValue
-                        cheki.idols = ChekinanaIdolOrdering.ordered(idols)
-                        cheki.event = event
-                        inserted.append(cheki)
+                        event = matches[0]
+                    } else {
+                        event = nil
                     }
-                }
 
-                let removedIDs = Set(selected.map(\.id)).subtracting(retained.map(\.id))
-                var affected = liveGroup.filter { !removedIDs.contains($0.id) }
-                affected.append(contentsOf: inserted)
-                affected = ordered(affected)
-                let isDatedGroup = draft.identity.group.canonicalDate != nil
-                for (offset, cheki) in affected.enumerated() {
-                    // `idx` only has ordering meaning inside a dated Cheki
-                    // group. Legacy undated values are cleared across the
-                    // whole exact Idol-set group, including media and other
-                    // metadata blocks, so this batch cannot manufacture an
-                    // invalid undated index.
-                    cheki.idx = isDatedGroup ? offset + 1 : nil
-                    if cheki.updatedAt != now { cheki.updatedAt = now }
+                    guard let retained = ordered(selected).first else {
+                        throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
+                    }
+                    ordered(selected).dropFirst().forEach(modelContext.delete)
+                    guard quantity > 0 else {
+                        modelContext.delete(retained)
+                        resultIDs = []
+                        return
+                    }
+                    let updated = try ChekinanaChekiRecordStore.update(
+                        retained,
+                        idols: ChekinanaIdolOrdering.ordered(idols),
+                        event: event,
+                        date: recordDate,
+                        size: draft.identity.sizeRawValue
+                            .flatMap(ChekiSize.init(rawValue:)),
+                        note: note,
+                        count: quantity,
+                        in: modelContext
+                    )
+                    resultIDs = updated.map { [$0.id] } ?? []
                 }
-                guard let mergedIdentity = retained.first.flatMap(
-                    ChekinanaIdolNoMediaChekiIdentity.init
-                ) else {
-                    throw ChekinanaIdolNoMediaChekiBatchError.changedRecords
-                }
-                // A Note edit can merge this block with a pre-existing block
-                // whose remaining metadata is identical. Return that complete
-                // post-save identity so the child view's count and any second
-                // edit operate on the merged group instead of stale IDs.
-                resultIDs = ordered(affected.filter {
-                    ChekinanaIdolNoMediaChekiIdentity($0) == mergedIdentity
-                }).map(\.id)
+                try modelContext.save()
             }
             return resultIDs
         } catch {
@@ -8172,12 +9880,10 @@ enum ChekinanaIdolNoMediaChekiBatchWriter {
         }
     }
 
-    private static func ordered(_ values: [Cheki]) -> [Cheki] {
-        values.sorted { lhs, rhs in
-            if lhs.idx != rhs.idx { return (lhs.idx ?? Int.max) < (rhs.idx ?? Int.max) }
-            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
+    private static func ordered(
+        _ values: [ChekiRecord]
+    ) -> [ChekiRecord] {
+        values.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }
 
@@ -8202,9 +9908,22 @@ private struct ChekinanaIdolChekiGroupSection: Identifiable {
     }
 }
 
+private struct ChekinanaIdolRecordDisplayGroup: Identifiable {
+    let identity: ChekinanaIdolNoMediaChekiIdentity
+    let records: [ChekiRecord]
+
+    var recordIDs: [UUID] { records.map(\.id) }
+    var quantity: Int { ChekinanaChekiRecordStore.totalCount(records) }
+
+    var id: String {
+        recordIDs.map(\.uuidString).sorted().joined(separator: ",")
+    }
+}
+
 private struct ChekinanaIdolMediaDateGroupView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
@@ -8246,31 +9965,15 @@ private struct ChekinanaIdolMediaDateGroupView: View {
             Set(cheki.idols.map(\.id))
         }
         return grouped.map { idolIDs, values in
-            let ordered = ChekinanaRecordOrdering.orderedChekis(values)
-            var blocks: [ChekinanaIdolChekiDisplayBlock] = []
-            var noMediaBlockIndices: [ChekinanaIdolNoMediaChekiIdentity: Int] = [:]
-            for cheki in ordered {
-                if !ChekinanaNoMediaPolicy.hasNoImage(cheki.imageRef) {
-                    blocks.append(.init(
-                        id: "media-\(cheki.id.uuidString.lowercased())",
-                        chekis: [cheki],
-                        noMediaIdentity: nil
-                    ))
-                    continue
-                }
-                guard let identity = ChekinanaIdolNoMediaChekiIdentity(cheki) else {
-                    continue
-                }
-                if let index = noMediaBlockIndices[identity] {
-                    blocks[index].chekis.append(cheki)
-                } else {
-                    noMediaBlockIndices[identity] = blocks.count
-                    blocks.append(.init(
-                        id: "no-media-\(cheki.id.uuidString.lowercased())",
-                        chekis: [cheki],
-                        noMediaIdentity: identity
-                    ))
-                }
+            let ordered = ChekinanaRecordOrdering.orderedChekis(
+                values.filter { $0.imageRef?.nonEmpty != nil }
+            )
+            let blocks = ordered.map { cheki in
+                ChekinanaIdolChekiDisplayBlock(
+                    id: "media-\(cheki.id.uuidString.lowercased())",
+                    chekis: [cheki],
+                    noMediaIdentity: nil
+                )
             }
             let names = values.first?.idols
                 .sorted { lhs, rhs in
@@ -8292,6 +9995,34 @@ private struct ChekinanaIdolMediaDateGroupView: View {
             )
         }
         .sorted { $0.id < $1.id }
+    }
+
+    private var dateGroupMediaChekis: [Cheki] {
+        items.compactMap { item in
+            guard case .cheki(let cheki) = item,
+                  cheki.imageRef?.nonEmpty != nil else { return nil }
+            return cheki
+        }
+    }
+
+    private var recordGroups: [ChekinanaIdolRecordDisplayGroup] {
+        let values = chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.containsIdol($0, idolID: idol.id)
+                && key(for: $0.date) == groupKey
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }
+        return Dictionary(
+            grouping: values,
+            by: ChekinanaIdolNoMediaChekiIdentity.init
+        ).map { identity, records in
+            ChekinanaIdolRecordDisplayGroup(
+                identity: identity,
+                records: records.sorted { $0.id.uuidString < $1.id.uuidString }
+            )
+        }.sorted { $0.id < $1.id }
     }
 
     var body: some View {
@@ -8326,6 +10057,26 @@ private struct ChekinanaIdolMediaDateGroupView: View {
                             )
                         }
                     }
+                }
+                ForEach(recordGroups) { group in
+                    NavigationLink {
+                        ChekinanaIdolNoMediaChekiGroupView(
+                            recordIDs: group.recordIDs
+                        )
+                    } label: {
+                        compactNoMediaRow(
+                            title: ChekinanaProductCopy.text(
+                                "calendar.simple_record",
+                                "Cheki record"
+                            ),
+                            note: group.identity.note,
+                            count: group.quantity,
+                            systemImage: "doc.text"
+                        )
+                    }
+                    .accessibilityIdentifier(
+                        "chekinana.idols.detail.record-group.\(group.id)"
+                    )
                 }
             } else {
                 let media = items.filter(\.hasMedia)
@@ -8378,7 +10129,11 @@ private struct ChekinanaIdolMediaDateGroupView: View {
         }
         .fullScreenCover(item: $selected) { item in
             switch item {
-            case .cheki(let value): ChekinanaGalleryDetailView(cheki: value)
+            case .cheki(let value):
+                ChekinanaGalleryDetailView(
+                    chekis: dateGroupMediaChekis,
+                    initialID: value.id
+                )
             case .shame(let value): ChekinanaGalleryMediaDetailView(shame: value)
             case .douga(let value): ChekinanaGalleryMediaDetailView(douga: value)
             }
@@ -8538,7 +10293,8 @@ private struct ChekinanaIdolMediaDateGroupView: View {
         for item: ChekinanaGalleryItem
     ) -> ChekinanaCalendarNoMediaRecord {
         switch item {
-        case .cheki(let value): .cheki(value)
+        case .cheki:
+            preconditionFailure("Media Cheki cannot be opened in the no-media editor")
         case .shame(let value): .shame(value)
         case .douga(let value): .douga(value)
         }
@@ -8546,7 +10302,7 @@ private struct ChekinanaIdolMediaDateGroupView: View {
 }
 
 private struct ChekinanaIdolNoMediaChekiGroupView: View {
-    @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @State private var recordIDs: [UUID]
     @State private var selectedRecord: ChekinanaCalendarNoMediaRecord?
     @State private var batchDraft: ChekinanaIdolNoMediaChekiBatchDraft?
@@ -8556,47 +10312,51 @@ private struct ChekinanaIdolNoMediaChekiGroupView: View {
         _recordIDs = State(initialValue: recordIDs)
     }
 
-    private var records: [Cheki] {
+    private var records: [ChekiRecord] {
         let ids = Set(recordIDs)
-        return ChekinanaRecordOrdering.orderedChekis(
-            chekis.filter {
-                ids.contains($0.id)
-                    && ChekinanaNoMediaPolicy.hasNoImage($0.imageRef)
-            }
-        )
+        return chekiRecords.filter { ids.contains($0.id) }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+
+    private var canBatchEdit: Bool {
+        Set(records.map(ChekinanaIdolNoMediaChekiIdentity.init)).count == 1
     }
 
     var body: some View {
         List {
             if !records.isEmpty {
-                Section {
-                    Button {
-                        prepareBatchEdit()
-                    } label: {
-                        HStack {
-                            Label(
-                                ChekinanaProductCopy.text(
-                                    "idols.no_media_group.edit",
-                                    "Edit group"
-                                ),
-                                systemImage: "square.and.pencil"
-                            )
-                            Spacer()
-                            Text(ChekinanaRecordKind.cheki.countLabel(records.count))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                if canBatchEdit {
+                    Section {
+                        Button {
+                            prepareBatchEdit()
+                        } label: {
+                            HStack {
+                                Label(
+                                    ChekinanaProductCopy.text(
+                                        "idols.no_media_group.edit",
+                                        "Edit group"
+                                    ),
+                                    systemImage: "square.and.pencil"
+                                )
+                                Spacer()
+                                Text(ChekinanaRecordKind.cheki.countLabel(
+                                    ChekinanaChekiRecordStore.totalCount(records)
+                                ))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
                         }
-                        .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
+                        .accessibilityIdentifier(
+                            "chekinana.idols.detail.no-media.cheki-group.edit"
+                        )
                     }
-                    .accessibilityIdentifier(
-                        "chekinana.idols.detail.no-media.cheki-group.edit"
-                    )
                 }
 
                 Section {
-                    ForEach(records) { cheki in
+                    ForEach(records) { record in
                         Button {
-                            selectedRecord = .cheki(cheki)
+                            selectedRecord = .record(record)
                         } label: {
                             HStack(spacing: 10) {
                                 Image(systemName: "photo")
@@ -8604,12 +10364,14 @@ private struct ChekinanaIdolNoMediaChekiGroupView: View {
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(
-                                        cheki.idx.map { "#\($0)" }
-                                            ?? ChekinanaRecordKind.cheki.title
+                                        ChekinanaProductCopy.text(
+                                            "calendar.simple_record",
+                                            "Cheki record"
+                                        )
                                     )
                                     .font(.subheadline.weight(.semibold))
                                     Text(
-                                        cheki.note.nonEmpty
+                                        record.note.nonEmpty
                                             ?? ChekinanaProductCopy.text(
                                                 "common.no_note",
                                                 "No note"
@@ -8620,6 +10382,13 @@ private struct ChekinanaIdolNoMediaChekiGroupView: View {
                                     .lineLimit(1)
                                 }
                                 Spacer()
+                                Text(
+                                    ChekinanaRecordKind.cheki.countLabel(
+                                        max(1, record.count)
+                                    )
+                                )
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
                                 Image(systemName: "chevron.right")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.tertiary)
@@ -8629,14 +10398,16 @@ private struct ChekinanaIdolNoMediaChekiGroupView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier(
-                            "chekinana.idols.detail.no-media.cheki.\(cheki.id.uuidString.lowercased())"
+                            "chekinana.idols.detail.record.\(record.id.uuidString.lowercased())"
                         )
                     }
                 }
             }
         }
         .listStyle(.plain)
-        .navigationTitle(ChekinanaRecordKind.cheki.countLabel(records.count))
+        .navigationTitle(ChekinanaRecordKind.cheki.countLabel(
+            ChekinanaChekiRecordStore.totalCount(records)
+        ))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $selectedRecord) {
             ChekinanaCalendarNoMediaRecordEditor(record: $0)
@@ -8664,7 +10435,7 @@ private struct ChekinanaIdolNoMediaChekiGroupView: View {
         do {
             let draft = try ChekinanaIdolNoMediaChekiBatchWriter.draft(
                 selectedRecordIDs: recordIDs,
-                allChekis: chekis
+                allRecords: chekiRecords
             )
             batchDraft = draft
         } catch {
@@ -8697,17 +10468,11 @@ private struct ChekinanaIdolNoMediaChekiBatchEditor: View {
         NavigationStack {
             Form {
                 Section(ChekinanaProductCopy.text("common.metadata", "Metadata")) {
-                    Stepper(
-                        ChekinanaProductCopy.format(
-                            "calendar.quantity_value",
-                            "Quantity: %lld",
-                            Int64(quantity)
-                        ),
+                    ChekinanaQuantityControl(
                         value: $quantity,
-                        in: 1...100
-                    )
-                    .accessibilityIdentifier(
-                        "chekinana.idols.detail.no-media.cheki-group.quantity"
+                        allowedRange: 0...ChekinanaQuantityInputPolicy.maximum,
+                        accessibilityIdentifier:
+                            "chekinana.idols.detail.no-media.cheki-group.quantity"
                     )
                     TextField(
                         ChekinanaProductCopy.text("common.note", "Note"),
@@ -8947,7 +10712,11 @@ private struct ChekinanaCatalogueIdolCardAvatar: View {
             size: 58,
             preparedImage: preparedImage
         )
-        .accessibilityLabel("Avatar for \(candidate.idolName)")
+        .accessibilityLabel(ChekinanaProductCopy.format(
+            "idols.catalogue_avatar_for",
+            "Avatar for %@",
+            candidate.idolName
+        ))
         .accessibilityValue(preparedImage == nil ? "Unavailable" : "Loaded")
         .accessibilityIdentifier("chekinana.idols.editor.catalogue-avatar.\(index)")
         .task(id: ChekinanaCatalogueIdolCardAvatarPresentation.identity(for: candidate)) {
@@ -8976,11 +10745,52 @@ private struct ChekinanaIndexedCatalogueIdolCandidate: Identifiable {
     }
 }
 
+private struct ChekinanaIdolEditorAvatarPickerLabel: View {
+    let idol: Idol?
+    let preview: ChekinanaRenderedImage?
+    let showsPlaceholder: Bool
+
+    @ViewBuilder
+    var body: some View {
+        if !showsPlaceholder, let preview {
+            Image(decorative: preview.cgImage, scale: 1)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 62, height: 62)
+                .clipped()
+                .clipShape(Circle())
+                .overlay {
+                    Circle().stroke(
+                        ChekinanaProductTheme.border,
+                        lineWidth: 1
+                    )
+                }
+        } else if showsPlaceholder {
+            placeholder
+        } else if let idol {
+            ChekinanaIdolAvatar(idol: idol, size: 62)
+        } else {
+            placeholder
+        }
+    }
+
+    private var placeholder: some View {
+        Image(systemName: "person.fill")
+            .frame(width: 62, height: 62)
+            .background(Color(uiColor: .tertiarySystemGroupedBackground))
+            .clipShape(Circle())
+    }
+}
+
 private struct ChekinanaIdolEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query private var storedIdols: [Idol]
+    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let idol: Idol?
+    let onMerged: (ChekinanaIdolAvatarCleanupTarget?) -> Void
+    let onHidden: () -> Void
+    let onDeleted: (ChekinanaIdolAvatarCleanupTarget?) -> Void
 
     @State private var mode: ChekinanaIdolEditorMode
     @State private var query = ""
@@ -9004,14 +10814,23 @@ private struct ChekinanaIdolEditorView: View {
     @State private var bio: String
     @State private var note: String
     @State private var patterns: [[Float]]
+    @State private var pendingPatternRemovalIndex: Int?
     @State private var cataloguePatternSelection = ChekinanaCataloguePatternSelectionState()
     @State private var referenceItem: PhotosPickerItem?
+    @State private var avatarPickerItem: PhotosPickerItem?
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarPreview: ChekinanaRenderedImage?
     @State private var removesAvatar = false
     @State private var isSearching = false
     @State private var isPreparingCatalogueAvatar = false
+    @State private var isPreparingAvatarPreview = false
     @State private var isSaving = false
+    @State private var isMerging = false
+    @State private var isDeleting = false
+    @State private var mergeTargetID: UUID?
+    @State private var isMergeConfirmationPresented = false
+    @State private var isHideConfirmationPresented = false
+    @State private var isDeleteConfirmationPresented = false
     @State private var errorMessage: String?
     @State private var pendingAvatarCleanup: ChekinanaIdolAvatarCleanupTarget?
     @State private var pendingAvatarCleanupPurpose: ChekinanaIdolAvatarCleanupPurpose?
@@ -9019,8 +10838,16 @@ private struct ChekinanaIdolEditorView: View {
     @State private var saveGeneration = 0
     @State private var previewGeneration = 0
 
-    init(idol: Idol?) {
+    init(
+        idol: Idol?,
+        onMerged: @escaping (ChekinanaIdolAvatarCleanupTarget?) -> Void = { _ in },
+        onHidden: @escaping () -> Void = {},
+        onDeleted: @escaping (ChekinanaIdolAvatarCleanupTarget?) -> Void = { _ in }
+    ) {
         self.idol = idol
+        self.onMerged = onMerged
+        self.onHidden = onHidden
+        self.onDeleted = onDeleted
         _mode = State(initialValue: idol == nil ? .catalogue : .manual)
         _sourceId = State(initialValue: idol?.sourceId)
         _name = State(initialValue: idol?.name ?? "")
@@ -9052,19 +10879,24 @@ private struct ChekinanaIdolEditorView: View {
         _bio = State(initialValue: idol?.bio ?? "")
         _note = State(initialValue: idol?.note ?? "")
         _patterns = State(initialValue: idol?.recognitionPatterns ?? [])
+        _pendingPatternRemovalIndex = State(initialValue: nil)
     }
 
     var body: some View {
         // PhotosPicker's label is Sendable in the Swift 6 SDK. Capture the
         // state-derived title before constructing that closure.
-        let avatarPickerTitle = avatarItem == nil ? "Choose avatar" : "Replace avatar"
+        let hasVisibleAvatar = !removesAvatar
+            && (avatarPreview != nil || avatarItem != nil || idol?.avatarImageRef != nil)
+        let avatarPickerTitle = hasVisibleAvatar
+            ? ChekinanaProductCopy.text("idols.avatar.replace", "Replace avatar")
+            : ChekinanaProductCopy.text("idols.avatar.choose", "Choose avatar")
+        let avatarPickerLabel = ChekinanaIdolEditorAvatarPickerLabel(
+            idol: idol,
+            preview: avatarPreview,
+            showsPlaceholder: removesAvatar
+        )
         NavigationStack {
             Form {
-                if sourceId != nil {
-                    ChekinanaAccessibilityMarker(
-                        identifier: "chekinana.idols.editor.catalogue-applied"
-                    )
-                }
                 if idol == nil {
                     Section {
                         Picker("Source", selection: $mode) {
@@ -9076,7 +10908,13 @@ private struct ChekinanaIdolEditorView: View {
 
                 if idol == nil, mode == .catalogue {
                     Section("Search catalogue") {
-                        TextField("Idol name", text: $query)
+                        TextField(
+                            ChekinanaProductCopy.text(
+                                "idols.name",
+                                "Idol name"
+                            ),
+                            text: $query
+                        )
                             .accessibilityIdentifier("chekinana.idols.editor.catalogue-query")
                         Button {
                             Task { await searchCatalogue() }
@@ -9097,7 +10935,11 @@ private struct ChekinanaIdolEditorView: View {
                             }
                             .buttonStyle(.plain)
                             .disabled(item.candidate.birthdayIsInvalid)
-                            .accessibilityLabel("Use \(item.candidate.idolName) catalogue information")
+                            .accessibilityLabel(ChekinanaProductCopy.format(
+                                "idols.catalogue.use_information",
+                                "Use %@ catalogue information",
+                                item.candidate.idolName
+                            ))
                             .accessibilityHint(
                                 item.candidate.birthdayIsInvalid
                                     ? ChekinanaProductCopy.text(
@@ -9111,29 +10953,41 @@ private struct ChekinanaIdolEditorView: View {
                     }
                 }
 
-                Section("Idol") {
+                Section(ChekinanaProductCopy.text("common.idol", "Idol")) {
                     HStack(spacing: 14) {
-                        if !removesAvatar, let avatarPreview {
-                            Image(decorative: avatarPreview.cgImage, scale: 1)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: 62, height: 62)
-                                .clipped()
-                                .clipShape(Circle())
-                                .overlay {
-                                    Circle().stroke(
-                                        ChekinanaProductTheme.border,
-                                        lineWidth: 1
-                                    )
-                                }
+                        PhotosPicker(selection: $avatarPickerItem, matching: .images) {
+                            avatarPickerLabel
                         }
-                        else if removesAvatar { Image(systemName: "person.fill").frame(width: 62, height: 62).background(Color(uiColor: .tertiarySystemGroupedBackground)).clipShape(Circle()) }
-                        else if let idol { ChekinanaIdolAvatar(idol: idol, size: 62) }
-                        else { Image(systemName: "person.fill").frame(width: 62, height: 62).background(Color(uiColor: .tertiarySystemGroupedBackground)).clipShape(Circle()) }
-                        PhotosPicker(selection: $avatarItem, matching: .images) {
-                            Label(avatarPickerTitle, systemImage: "person.crop.circle.badge.plus")
+                        .accessibilityLabel(avatarPickerTitle)
+                        .accessibilityHint(ChekinanaProductCopy.text(
+                            "idols.avatar.picker.hint",
+                            "Opens the photo library. Cancelling keeps the current avatar."
+                        ))
+                        .accessibilityIdentifier("chekinana.idols.editor.avatar.picker")
+                        if !removesAvatar,
+                           avatarItem != nil || avatarPreview != nil
+                                || selectedCatalogueCandidate?.avatarThumbnailImage != nil
+                                || idol?.avatarImageRef != nil {
+                            Button(role: .destructive) {
+                                let next = ChekinanaIdolAvatarSelectionPolicy.afterDelete(
+                                    generation: previewGeneration
+                                )
+                                previewGeneration = next.generation
+                                isPreparingCatalogueAvatar = next.isPreparingCatalogueAvatar
+                                isPreparingAvatarPreview = false
+                                avatarPickerItem = nil
+                                avatarItem = nil
+                                avatarPreview = nil
+                                removesAvatar = next.removesAvatar
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .accessibilityLabel(ChekinanaProductCopy.text(
+                                "idols.avatar.remove",
+                                "Remove avatar"
+                            ))
+                            .accessibilityIdentifier("chekinana.idols.editor.avatar.remove")
                         }
-                        if avatarItem != nil || avatarPreview != nil || selectedCatalogueCandidate?.avatarThumbnailImage != nil || idol?.avatarImageRef != nil { Button(role: .destructive) { let next = ChekinanaIdolAvatarSelectionPolicy.afterDelete(generation: previewGeneration); previewGeneration = next.generation; avatarItem = nil; avatarPreview = nil; removesAvatar = next.removesAvatar } label: { Image(systemName: "trash") } }
                     }
                     TextField("Name", text: $name)
                         .accessibilityIdentifier("chekinana.idols.editor.name")
@@ -9196,47 +11050,33 @@ private struct ChekinanaIdolEditorView: View {
                         .accessibilityIdentifier("chekinana.idols.editor.birthday.mode")
 
                         if birthdayMode == .unknownYear {
-                            HStack {
-                                Picker(
-                                    ChekinanaProductCopy.text("common.month", "Month"),
-                                    selection: Binding(
-                                        get: { unknownBirthdayMonth },
-                                        set: { month in
-                                            unknownBirthdayMonth = month
-                                            unknownBirthdayDay = ChekinanaBirthdayEditorPolicy.clampedDay(
-                                                unknownBirthdayDay,
-                                                month: month
-                                            )
-                                            birthdayWasEdited = true
-                                        }
-                                    )
-                                ) {
-                                    ForEach(1...12, id: \.self) { month in
-                                        Text(month.formatted()).tag(month)
+                            ChekinanaExpandableMonthDayWheels(
+                                title: ChekinanaProductCopy.text(
+                                    "idols.birthday",
+                                    "Birthday"
+                                ),
+                                month: Binding(
+                                    get: { unknownBirthdayMonth },
+                                    set: { value in
+                                        unknownBirthdayMonth = value
+                                        unknownBirthdayDay = ChekinanaBirthdayEditorPolicy.clampedDay(
+                                            unknownBirthdayDay,
+                                            month: value
+                                        )
+                                        birthdayWasEdited = true
                                     }
-                                }
-                                .accessibilityIdentifier("chekinana.idols.editor.birthday.month")
-                                Picker(
-                                    ChekinanaProductCopy.text("common.day", "Day"),
-                                    selection: Binding(
-                                        get: { unknownBirthdayDay },
-                                        set: { day in
-                                            unknownBirthdayDay = day
-                                            birthdayWasEdited = true
-                                        }
-                                    )
-                                ) {
-                                    ForEach(
-                                        ChekinanaBirthdayEditorPolicy.dayRange(
-                                            month: unknownBirthdayMonth
-                                        ),
-                                        id: \.self
-                                    ) { day in
-                                        Text(day.formatted()).tag(day)
+                                ),
+                                day: Binding(
+                                    get: { unknownBirthdayDay },
+                                    set: { value in
+                                        unknownBirthdayDay = value
+                                        birthdayWasEdited = true
                                     }
-                                }
-                                .accessibilityIdentifier("chekinana.idols.editor.birthday.day")
-                            }
+                                ),
+                                monthIdentifier: "chekinana.idols.editor.birthday.month-wheel",
+                                dayIdentifier: "chekinana.idols.editor.birthday.day-wheel",
+                                identifier: "chekinana.idols.editor.birthday.month-day-wheels"
+                            )
                             Text(ChekinanaProductCopy.text(
                                 "idols.birthday_year_unknown.detail",
                                 "Only month and day are saved; no year is assumed."
@@ -9244,7 +11084,7 @@ private struct ChekinanaIdolEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         } else {
-                            DatePicker(
+                            ChekinanaExpandableDateWheel(
                                 ChekinanaProductCopy.text(
                                     "idols.birthday",
                                     "Birthday"
@@ -9257,10 +11097,8 @@ private struct ChekinanaIdolEditorView: View {
                                         fullBirthdayYearConfirmed = true
                                     }
                                 ),
-                                displayedComponents: .date
+                                accessibilityIdentifier: "chekinana.idols.editor.birthday.date"
                             )
-                            .datePickerStyle(.compact)
-                            .accessibilityIdentifier("chekinana.idols.editor.birthday.date")
                             if !fullBirthdayYearConfirmed {
                                 Button(
                                     ChekinanaProductCopy.text(
@@ -9310,7 +11148,10 @@ private struct ChekinanaIdolEditorView: View {
                     }
                     .accessibilityIdentifier("chekinana.idols.editor.reference")
                     if referenceItem != nil {
-                        Text("The original photo will be encoded on this device. For a new Idol it also becomes the avatar.")
+                        Text(ChekinanaProductCopy.text(
+                            "idols.reference.detail",
+                            "The original photo will be encoded on this device. For a new Idol it also becomes the avatar."
+                        ))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if patterns.isEmpty {
@@ -9321,11 +11162,15 @@ private struct ChekinanaIdolEditorView: View {
                             HStack {
                                 Label("Pattern \(index + 1) · 256D", systemImage: "waveform.path.ecg")
                                 Spacer()
-                                Button(role: .destructive) { patterns.remove(at: index) } label: {
+                                Button(role: .destructive) {
+                                    pendingPatternRemovalIndex = index
+                                } label: {
                                     Image(systemName: "trash")
                                 }
                                 .accessibilityLabel("Remove pattern \(index + 1)")
-                                .accessibilityIdentifier("chekinana.idols.editor.pattern.remove.\(index)")
+                                .accessibilityIdentifier(
+                                    "chekinana.idols.editor.pattern.remove.\(index)"
+                                )
                             }
                         }
                     }
@@ -9347,18 +11192,139 @@ private struct ChekinanaIdolEditorView: View {
                         value: patterns.count.formatted()
                     )
                 }
+                .alert(
+                    ChekinanaProductCopy.text(
+                        "idols.pattern.remove.confirm.title",
+                        "Remove this pattern?"
+                    ),
+                    isPresented: Binding(
+                        get: { pendingPatternRemovalIndex != nil },
+                        set: {
+                            if !$0 { pendingPatternRemovalIndex = nil }
+                        }
+                    )
+                ) {
+                    Button(
+                        ChekinanaProductCopy.text("common.remove", "Remove"),
+                        role: .destructive,
+                        action: confirmPatternRemoval
+                    )
+                    .accessibilityIdentifier(
+                        "chekinana.idols.editor.pattern.remove.confirm"
+                    )
+                    Button(
+                        ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                        role: .cancel
+                    ) {
+                        pendingPatternRemovalIndex = nil
+                    }
+                    .accessibilityIdentifier(
+                        "chekinana.idols.editor.pattern.remove.cancel"
+                    )
+                } message: {
+                    Text(ChekinanaProductCopy.text(
+                        "idols.pattern.remove.confirm.message",
+                        "The pattern will be removed from this draft. Save the Idol to make the change permanent."
+                    ))
+                }
+
+                if idol != nil {
+                    Section(
+                        ChekinanaProductCopy.text(
+                            "idols.merge.section",
+                            "Merge into Existing Idol"
+                        )
+                    ) {
+                        if mergeTargets.isEmpty {
+                            Text(ChekinanaProductCopy.text(
+                                "idols.merge.unavailable",
+                                "There are no visible Idols available as a merge target."
+                            ))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("chekinana.idols.editor.merge.unavailable")
+                        } else {
+                            Picker(
+                                ChekinanaProductCopy.text(
+                                    "idols.merge.target",
+                                    "Target Idol"
+                                ),
+                                selection: $mergeTargetID
+                            ) {
+                                Text(ChekinanaProductCopy.text(
+                                    "idols.merge.select",
+                                    "Select an Idol"
+                                ))
+                                .tag(UUID?.none)
+                                ForEach(mergeTargets) { target in
+                                    Text(target.name).tag(Optional(target.id))
+                                }
+                            }
+                            .accessibilityIdentifier("chekinana.idols.editor.merge.target")
+                        }
+                        Button(
+                            ChekinanaProductCopy.text(
+                                "idols.merge.action",
+                                "Merge into Selected Idol"
+                            ),
+                            role: .destructive
+                        ) {
+                            isMergeConfirmationPresented = true
+                        }
+                        .disabled(
+                            selectedMergeTarget == nil
+                                || isSaving
+                                || isPreparingCatalogueAvatar
+                                || isPreparingAvatarPreview
+                                || pendingAvatarCleanup != nil
+                        )
+                        .accessibilityIdentifier("chekinana.idols.editor.merge.request")
+                    }
+                    .accessibilityIdentifier("chekinana.idols.editor.merge.section")
+                }
 
                 if let errorMessage {
                     Section { Text(errorMessage).foregroundStyle(.red) }
                 }
+
+                if idol != nil {
+                    Section {
+                        Button(
+                            ChekinanaProductCopy.text("idols.hide", "Hide Idol"),
+                            action: { isHideConfirmationPresented = true }
+                        )
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("chekinana.idols.editor.hide")
+                        Button(
+                            ChekinanaProductCopy.text("idols.delete", "Delete Idol"),
+                            role: .destructive
+                        ) {
+                            isDeleteConfirmationPresented = true
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("chekinana.idols.editor.delete.request")
+                    }
+                    .accessibilityIdentifier("chekinana.idols.editor.hide.section")
+                }
             }
-            .disabled(isSaving)
-            .navigationTitle(idol == nil ? "Add Idol" : "Edit Idol")
+            .overlay(alignment: .topLeading) {
+                if sourceId != nil {
+                    ChekinanaAccessibilityMarker(
+                        identifier: "chekinana.idols.editor.catalogue-applied"
+                    )
+                }
+            }
+            .disabled(isSaving || isMerging || isDeleting)
+            .navigationTitle(
+                idol == nil
+                    ? ChekinanaProductCopy.text("idols.add", "Add Idol")
+                    : ChekinanaProductCopy.text("idols.edit", "Edit Idol")
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { requestCancel() }
-                        .disabled(isSaving)
+                        .disabled(isSaving || isMerging || isDeleting)
                         .accessibilityIdentifier("chekinana.idols.editor.cancel")
                         .accessibilityHint(
                             pendingAvatarCleanup == nil
@@ -9374,6 +11340,8 @@ private struct ChekinanaIdolEditorView: View {
                         .disabled(
                             name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || isSaving
+                                || isMerging
+                                || isDeleting
                                 || isPreparingCatalogueAvatar
                                 || pendingAvatarCleanup != nil
                                 || (hasBirthday
@@ -9384,7 +11352,76 @@ private struct ChekinanaIdolEditorView: View {
                 }
             }
         }
-        .interactiveDismissDisabled(isSaving || pendingAvatarCleanup != nil)
+        .interactiveDismissDisabled(
+            isSaving || isMerging || isDeleting || pendingAvatarCleanup != nil
+        )
+        .alert(
+            ChekinanaProductCopy.text("idols.merge.confirm.title", "Merge Idols?"),
+            isPresented: $isMergeConfirmationPresented
+        ) {
+            Button(
+                ChekinanaProductCopy.text(
+                    "idols.merge.confirm.action",
+                    "Merge and Delete Current Idol"
+                ),
+                role: .destructive,
+                action: mergeIntoSelectedTarget
+            )
+            .accessibilityIdentifier("chekinana.idols.editor.merge.confirm")
+            Button(ChekinanaProductCopy.text("common.cancel", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(mergeConfirmationMessage)
+        }
+        .alert(
+            ChekinanaProductCopy.text(
+                "idols.hide.confirm.title",
+                "Hide this Idol?"
+            ),
+            isPresented: $isHideConfirmationPresented
+        ) {
+            Button(
+                ChekinanaProductCopy.text(
+                    "idols.hide.confirm.action",
+                    "Hide Idol"
+                ),
+                action: hideIdol
+            )
+            .accessibilityIdentifier("chekinana.idols.editor.hide.confirm")
+            Button(
+                ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                role: .cancel
+            ) {}
+            .accessibilityIdentifier("chekinana.idols.editor.hide.cancel")
+        } message: {
+            Text(ChekinanaProductCopy.text(
+                "idols.hide.confirm.message",
+                "This Idol will disappear from visible lists. You can unhide it in Settings."
+            ))
+        }
+        .alert(
+            ChekinanaProductCopy.text(
+                "idols.delete.confirm.title",
+                "Delete this Idol?"
+            ),
+            isPresented: $isDeleteConfirmationPresented
+        ) {
+            Button(
+                ChekinanaProductCopy.text("idols.delete", "Delete Idol"),
+                role: .destructive,
+                action: deleteIdol
+            )
+            .accessibilityIdentifier("chekinana.idols.editor.delete.confirm")
+            Button(
+                ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                role: .cancel
+            ) {}
+            .accessibilityIdentifier("chekinana.idols.editor.delete.cancel")
+        } message: {
+            Text(ChekinanaProductCopy.text(
+                "idols.delete.confirm.message",
+                "This cannot be undone. An Idol with linked records cannot be deleted."
+            ))
+        }
         .onDisappear {
             saveGeneration &+= 1
             saveTask?.cancel()
@@ -9392,11 +11429,20 @@ private struct ChekinanaIdolEditorView: View {
         }
         .onChange(of: mode) { _, selectedMode in
             guard idol == nil, selectedMode == .manual else { return }
+            let invalidation = ChekinanaIdolAvatarSelectionPolicy
+                .invalidatingCataloguePreparation(generation: previewGeneration)
+            previewGeneration = invalidation.generation
+            isPreparingCatalogueAvatar = invalidation.isPreparingCatalogueAvatar
+            isPreparingAvatarPreview = false
             sourceId = nil
             cataloguePatternSelection.clear()
             patterns = []
             remoteAvatarRef = nil
             selectedCatalogueCandidate = nil
+            if avatarItem == nil {
+                avatarPickerItem = nil
+                avatarPreview = nil
+            }
             isFavorite = false
             note = ""
             hasBirthday = false
@@ -9405,17 +11451,34 @@ private struct ChekinanaIdolEditorView: View {
             birthdaySourceValue = nil
             birthdayWasEdited = true
         }
-        .onChange(of: avatarItem) { _, item in
+        .onChange(of: avatarPickerItem) { _, item in
             guard let item else { return }
-            removesAvatar = false
-            previewGeneration &+= 1
+            let invalidation = ChekinanaIdolAvatarSelectionPolicy
+                .invalidatingCataloguePreparation(generation: previewGeneration)
+            previewGeneration = invalidation.generation
+            isPreparingCatalogueAvatar = invalidation.isPreparingCatalogueAvatar
+            isPreparingAvatarPreview = true
             let generation = previewGeneration
             let identity = String(describing: item)
             Task {
+                defer {
+                    if generation == previewGeneration {
+                        isPreparingAvatarPreview = false
+                    }
+                }
                 guard let image = try? await ChekinanaProductMediaLoader.load(item) else { return }
-                let preview = await ChekinanaImageWorker.thumbnailImage(from: image.data, maxDimension: 256)
-                guard ChekinanaIdolAvatarSelectionPolicy.acceptsPreview(generation: generation, currentGeneration: previewGeneration, itemMatches: avatarItem.map({ String(describing: $0) }) == identity, removesAvatar: removesAvatar) else { return }
+                guard let preview = await ChekinanaImageWorker.thumbnailImage(
+                    from: image.data,
+                    maxDimension: 256
+                ) else { return }
+                guard ChekinanaIdolAvatarSelectionPolicy.acceptsPreview(
+                    generation: generation,
+                    currentGeneration: previewGeneration,
+                    itemMatches: avatarPickerItem.map({ String(describing: $0) }) == identity
+                ) else { return }
+                avatarItem = item
                 avatarPreview = preview
+                removesAvatar = false
             }
         }
         .accessibilityIdentifier("chekinana.idols.editor")
@@ -9427,6 +11490,96 @@ private struct ChekinanaIdolEditorView: View {
                 index: $0.offset,
                 candidate: $0.element
             )
+        }
+    }
+
+    private var mergeTargets: [Idol] {
+        guard let idol else { return [] }
+        return ChekinanaIdolMergePolicy.targets(
+            from: storedIdols,
+            sourceID: idol.id,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        )
+    }
+
+    private var selectedMergeTarget: Idol? {
+        guard let mergeTargetID else { return nil }
+        return mergeTargets.first { $0.id == mergeTargetID }
+    }
+
+    private var mergeConfirmationMessage: String {
+        guard let source = idol, let target = selectedMergeTarget else { return "" }
+        return ChekinanaProductCopy.format(
+            "idols.merge.confirm.message",
+            "The target Idol “%1$@” keeps all of its profile and settings. The current Idol “%2$@” will be deleted after its records are moved.",
+            target.name,
+            source.name
+        )
+    }
+
+    private func confirmPatternRemoval() {
+        guard let index = pendingPatternRemovalIndex,
+              patterns.indices.contains(index) else {
+            pendingPatternRemovalIndex = nil
+            return
+        }
+        patterns.remove(at: index)
+        pendingPatternRemovalIndex = nil
+    }
+
+    private func hideIdol() {
+        guard let idol, !isSaving, !isMerging, !isDeleting else { return }
+        hiddenIdols.hide(idol.id)
+        dismiss()
+        onHidden()
+    }
+
+    @MainActor
+    private func deleteIdol() {
+        guard let idol,
+              !isSaving,
+              !isMerging,
+              !isDeleting,
+              pendingAvatarCleanup == nil else { return }
+        isDeleting = true
+        errorMessage = nil
+        do {
+            let result = try ChekinanaIdolPersistence.delete(
+                idol,
+                from: modelContext
+            )
+            hiddenIdols.removeDeleted(idol.id)
+            dismiss()
+            onDeleted(result.pendingAvatarCleanup)
+        } catch {
+            isDeleting = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func mergeIntoSelectedTarget() {
+        guard !isSaving,
+              !isMerging,
+              !isPreparingCatalogueAvatar,
+              !isPreparingAvatarPreview,
+              pendingAvatarCleanup == nil,
+              let source = idol,
+              let target = selectedMergeTarget else { return }
+        isMerging = true
+        errorMessage = nil
+        do {
+            let result = try ChekinanaIdolPersistence.merge(
+                sourceID: source.id,
+                into: target.id,
+                in: modelContext
+            )
+            hiddenIdols.removeDeleted(source.id)
+            onMerged(result.pendingAvatarCleanup)
+            dismiss()
+        } catch {
+            isMerging = false
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -9463,11 +11616,18 @@ private struct ChekinanaIdolEditorView: View {
         previewGeneration &+= 1
         let generation = previewGeneration
         sourceId = candidate.sourceId
-        selectedCatalogueCandidate = nil
+        // Candidate metadata is already authoritative. Avatar bytes are
+        // published later only if this generation remains current.
+        selectedCatalogueCandidate = ChekinanaPreparedIdolCandidate(
+            candidate: candidate,
+            avatarThumbnailData: nil,
+            avatarIdentity: nil
+        )
         remoteAvatarRef = nil
         if avatarItem == nil { avatarPreview = nil }
-        cataloguePatternSelection.select(sourceId: candidate.sourceId)
-        patterns = cataloguePatternSelection.patterns
+        cataloguePatternSelection.clear()
+        patterns = []
+        isPreparingCatalogueAvatar = true
         name = candidate.idolName
         group = candidate.groupName ?? ""
         color = candidate.color ?? ""
@@ -9499,8 +11659,31 @@ private struct ChekinanaIdolEditorView: View {
             isFavorite = false
             note = ""
         }
-        isPreparingCatalogueAvatar = true
         errorMessage = nil
+        do {
+            let resolvedPatterns = try await ChekinanaRemotePatternResources.shared
+                .patterns(for: candidate.patternIds)
+            guard ChekinanaIdolAvatarSelectionPolicy.acceptsCatalogueCompletion(
+                generation: generation,
+                currentGeneration: previewGeneration,
+                candidateMatches: sourceId == candidateIdentity
+            ) else { return }
+            cataloguePatternSelection.select(
+                sourceId: candidate.sourceId,
+                patternIds: candidate.patternIds,
+                patterns: resolvedPatterns
+            )
+            patterns = resolvedPatterns
+        } catch {
+            guard ChekinanaIdolAvatarSelectionPolicy.acceptsCatalogueCompletion(
+                generation: generation,
+                currentGeneration: previewGeneration,
+                candidateMatches: sourceId == candidateIdentity
+            ) else { return }
+            isPreparingCatalogueAvatar = false
+            errorMessage = error.localizedDescription
+            return
+        }
         do {
             let prepared = try await ChekinanaCatalogueIdolAvatarResolver.prepare(candidate)
             guard ChekinanaIdolAvatarSelectionPolicy.acceptsCataloguePreview(
@@ -9513,10 +11696,18 @@ private struct ChekinanaIdolEditorView: View {
             selectedCatalogueCandidate = prepared
             avatarPreview = prepared.avatarThumbnailImage
         } catch {
-            guard generation == previewGeneration, sourceId == candidateIdentity else { return }
+            guard ChekinanaIdolAvatarSelectionPolicy.acceptsCatalogueCompletion(
+                generation: generation,
+                currentGeneration: previewGeneration,
+                candidateMatches: sourceId == candidateIdentity
+            ) else { return }
             errorMessage = "Catalogue avatar could not be prepared. Tap this result to retry: \(error.localizedDescription)"
         }
-        if generation == previewGeneration, sourceId == candidateIdentity {
+        if ChekinanaIdolAvatarSelectionPolicy.acceptsCatalogueCompletion(
+            generation: generation,
+            currentGeneration: previewGeneration,
+            candidateMatches: sourceId == candidateIdentity
+        ) {
             isPreparingCatalogueAvatar = false
         }
     }
@@ -9576,17 +11767,61 @@ private struct ChekinanaIdolEditorView: View {
             let previousAvatarRef = target.avatarImageRef
             let explicitlyRemovingAvatar = removesAvatar
             var avatarRef = explicitlyRemovingAvatar ? nil : previousAvatarRef
-            var newPatterns: [[Float]]
-            if isNewCatalogueSelection {
-                newPatterns = ChekinanaLocalPatternRegistry.mergedPatterns([
-                    target.recognitionPatterns,
-                    patterns,
-                    ChekinanaLocalPatternRegistry.patterns(for: sourceId),
-                ])
+            let existingPatternState = try ChekinanaIdolPatternPersistence.state(
+                for: target.id,
+                in: modelContext
+            )
+            var cataloguePatternIDs: [String]
+            var cataloguePatterns: [[Float]]
+            var customPatterns: [[Float]]
+            if isNewCatalogueSelection, resolution.shouldInsert {
+                guard let selectedCatalogueCandidate,
+                      selectedCatalogueCandidate.candidate.sourceId == sourceId else {
+                    throw ChekinanaPatternResourceError.invalidResponse
+                }
+                let candidate = selectedCatalogueCandidate.candidate
+                let resolvedPatterns = try await ChekinanaRemotePatternResources.shared
+                    .patterns(for: candidate.patternIds)
+                if cataloguePatternSelection.isResolved,
+                   cataloguePatternSelection.sourceId == candidate.sourceId,
+                   cataloguePatternSelection.patternIds == candidate.patternIds {
+                    var remaining = patterns.filter(
+                        ChekinanaPatternClassifier.isValidEmbedding
+                    )
+                    cataloguePatternIDs = []
+                    cataloguePatterns = []
+                    for (patternID, prototype) in zip(
+                        candidate.patternIds,
+                        resolvedPatterns
+                    ) {
+                        guard let index = remaining.firstIndex(of: prototype) else {
+                            continue
+                        }
+                        cataloguePatternIDs.append(patternID)
+                        cataloguePatterns.append(prototype)
+                        remaining.remove(at: index)
+                    }
+                    customPatterns = remaining
+                } else {
+                    cataloguePatternIDs = candidate.patternIds
+                    cataloguePatterns = resolvedPatterns
+                    customPatterns = []
+                }
             } else {
-                // Editing an existing Idol is authoritative: patterns removed
-                // in the editor must not be silently restored from the registry.
-                newPatterns = ChekinanaLocalPatternRegistry.mergedPatterns([patterns])
+                // Existing current-version state is authoritative. This also
+                // prevents selecting an already-added catalogue Idol from
+                // restoring a cloud prototype the user previously removed.
+                let editedPatterns = isNewCatalogueSelection
+                    ? target.recognitionPatterns
+                    : patterns
+                let split = ChekinanaIdolPatternPersistence.splitEditedPatterns(
+                    editedPatterns,
+                    for: target,
+                    state: existingPatternState
+                )
+                cataloguePatternIDs = split.cataloguePatternIDs
+                cataloguePatterns = split.cataloguePatterns
+                customPatterns = split.customPatterns
             }
             var stagedAvatar: ChekinanaIdolReferenceStore.StoredAvatar?
             if !explicitlyRemovingAvatar, let avatarItem {
@@ -9599,8 +11834,8 @@ private struct ChekinanaIdolEditorView: View {
                 let image = try await ChekinanaProductMediaLoader.load(referenceItem)
                 guard generation == saveGeneration, !Task.isCancelled else { return }
                 let encoded = try await ChekinanaPatternEncoder.shared.encode(image.data)
-                newPatterns = ChekinanaLocalPatternRegistry.mergedPatterns([
-                    newPatterns,
+                customPatterns = ChekinanaPatternVectors.mergedPatterns([
+                    customPatterns,
                     [encoded],
                 ])
                 if sourceId == nil, stagedAvatar == nil {
@@ -9645,6 +11880,13 @@ private struct ChekinanaIdolEditorView: View {
                 throw ChekinanaCatalogueIdolAvatarLocalizerError.missingAvatar
             }
             guard generation == saveGeneration, !Task.isCancelled else { return }
+            _ = try ChekinanaIdolPatternPersistence.replaceCataloguePatterns(
+                for: target,
+                patternIDs: cataloguePatternIDs,
+                prototypes: cataloguePatterns,
+                customPatterns: customPatterns,
+                in: modelContext
+            )
             let result = try ChekinanaIdolPersistence.save(
                 target,
                 inserting: resolution.shouldInsert,
@@ -9666,8 +11908,6 @@ private struct ChekinanaIdolEditorView: View {
                 target.verification = verification.nonEmpty
                 target.bio = bio.nonEmpty
                 target.note = note
-                target.pattern = nil
-                target.patterns = newPatterns.filter(ChekinanaPatternClassifier.isValidEmbedding)
                 target.updatedAt = Date()
             }
             guard generation == saveGeneration, !Task.isCancelled else { return }
@@ -9678,7 +11918,10 @@ private struct ChekinanaIdolEditorView: View {
             if let cleanup = result.pendingAvatarCleanup {
                 pendingAvatarCleanup = cleanup
                 pendingAvatarCleanupPurpose = .afterSuccessfulSave
-                errorMessage = "Idol was saved, but the previous managed avatar could not be removed. Retry cleanup before closing."
+                errorMessage = ChekinanaProductCopy.text(
+                    "idols.avatar_cleanup_after_save",
+                    "Idol was saved, but the previous managed avatar could not be removed. Retry cleanup before closing."
+                )
                 return
             }
             dismiss()
@@ -9718,7 +11961,11 @@ private struct ChekinanaIdolEditorView: View {
             if pendingAvatarCleanupPurpose == .rollbackAfterFailedSave {
                 errorMessage = "Database changes remain unsaved and the staged avatar still needs cleanup: \(error.localizedDescription)"
             } else {
-                errorMessage = "Idol is saved, but old avatar cleanup still failed: \(error.localizedDescription)"
+                errorMessage = ChekinanaProductCopy.format(
+                    "idols.avatar_cleanup_retry_after_save",
+                    "Idol is saved, but old avatar cleanup still failed: %@",
+                    error.localizedDescription
+                )
             }
         }
     }
@@ -9726,8 +11973,14 @@ private struct ChekinanaIdolEditorView: View {
     private func requestCancel() {
         guard pendingAvatarCleanup == nil else {
             errorMessage = pendingAvatarCleanupPurpose == .rollbackAfterFailedSave
-                ? "The Idol was not saved, but its staged avatar still needs cleanup. Retry cleanup before closing."
-                : "The Idol was saved, but its previous avatar still needs cleanup. Retry cleanup before closing."
+                ? ChekinanaProductCopy.text(
+                    "idols.avatar_cleanup_without_save",
+                    "The Idol was not saved, but its staged avatar still needs cleanup. Retry cleanup before closing."
+                )
+                : ChekinanaProductCopy.text(
+                    "idols.avatar_cleanup_after_save",
+                    "The Idol was saved, but its previous avatar still needs cleanup. Retry cleanup before closing."
+                )
             return
         }
         dismiss()
@@ -9741,15 +11994,49 @@ struct ChekinanaIdolAvatarCleanupTarget: Equatable {
 }
 
 enum ChekinanaIdolAvatarSelectionPolicy {
-    static func afterDelete(generation: Int) -> (generation: Int, removesAvatar: Bool) {
-        (generation &+ 1, true)
+    static func invalidatingCataloguePreparation(
+        generation: Int
+    ) -> (generation: Int, isPreparingCatalogueAvatar: Bool) {
+        (generation &+ 1, false)
     }
-    static func acceptsPreview(generation: Int, currentGeneration: Int, itemMatches: Bool, removesAvatar: Bool) -> Bool {
-        generation == currentGeneration && itemMatches && !removesAvatar
+
+    static func afterDelete(
+        generation: Int
+    ) -> (
+        generation: Int,
+        removesAvatar: Bool,
+        isPreparingCatalogueAvatar: Bool
+    ) {
+        let invalidation = invalidatingCataloguePreparation(
+            generation: generation
+        )
+        return (
+            invalidation.generation,
+            true,
+            invalidation.isPreparingCatalogueAvatar
+        )
+    }
+    static func acceptsPreview(
+        generation: Int,
+        currentGeneration: Int,
+        itemMatches: Bool
+    ) -> Bool {
+        generation == currentGeneration && itemMatches
     }
     static func shouldReadExistingAvatar(explicitlyRemoving: Bool) -> Bool { !explicitlyRemoving }
+    static func acceptsCatalogueCompletion(
+        generation: Int,
+        currentGeneration: Int,
+        candidateMatches: Bool
+    ) -> Bool {
+        generation == currentGeneration && candidateMatches
+    }
     static func acceptsCataloguePreview(generation: Int, currentGeneration: Int, candidateMatches: Bool, removesAvatar: Bool, hasLocalItem: Bool) -> Bool {
-        generation == currentGeneration && candidateMatches && !removesAvatar && !hasLocalItem
+        acceptsCatalogueCompletion(
+            generation: generation,
+            currentGeneration: currentGeneration,
+            candidateMatches: candidateMatches
+        ) && !removesAvatar && !hasLocalItem
     }
 }
 
@@ -9759,6 +12046,10 @@ enum ChekinanaIdolAvatarCleanupPurpose {
 }
 
 enum ChekinanaIdolPersistenceError: LocalizedError {
+    case linkedChekiRecords(Int)
+    case mergeSourceMissing
+    case mergeTargetMissing
+    case mergeTargetMatchesSource
     case databaseSaveAndStagedAvatarCleanupFailed(
         save: String,
         cleanup: String,
@@ -9767,6 +12058,9 @@ enum ChekinanaIdolPersistenceError: LocalizedError {
 
     var pendingCleanupTarget: ChekinanaIdolAvatarCleanupTarget? {
         switch self {
+        case .linkedChekiRecords, .mergeSourceMissing, .mergeTargetMissing,
+                .mergeTargetMatchesSource:
+            return nil
         case .databaseSaveAndStagedAvatarCleanupFailed(_, _, let target):
             return target
         }
@@ -9774,14 +12068,76 @@ enum ChekinanaIdolPersistenceError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .linkedChekiRecords(let count):
+            return ChekinanaProductCopy.format(
+                "idols.delete.error.linked_records",
+                "This Idol has %lld linked Cheki record(s). Reassign them before deleting.",
+                Int64(count)
+            )
+        case .mergeSourceMissing:
+            return ChekinanaProductCopy.text(
+                "idols.merge.error.source_missing",
+                "The Idol being merged no longer exists. Close this editor and try again."
+            )
+        case .mergeTargetMissing:
+            return ChekinanaProductCopy.text(
+                "idols.merge.error.target_missing",
+                "The selected target Idol no longer exists. Choose another target and try again."
+            )
+        case .mergeTargetMatchesSource:
+            return ChekinanaProductCopy.text(
+                "idols.merge.error.same_idol",
+                "An Idol cannot be merged into itself."
+            )
         case .databaseSaveAndStagedAvatarCleanupFailed(let save, let cleanup, _):
-            return "The database was not saved and the previous Idol/avatar reference remains unchanged. The new staged avatar still needs cleanup (save: \(save); cleanup: \(cleanup)). Retry cleanup before closing."
+            return ChekinanaProductCopy.format(
+                "idols.avatar_cleanup_database_failure",
+                "The database was not saved and the previous Idol/avatar reference remains unchanged. The new staged avatar still needs cleanup (save: %1$@; cleanup: %2$@). Retry cleanup before closing.",
+                save,
+                cleanup
+            )
         }
     }
 }
 
 struct ChekinanaIdolPersistenceResult {
     let pendingAvatarCleanup: ChekinanaIdolAvatarCleanupTarget?
+}
+
+enum ChekinanaIdolMergePolicy {
+    static func targets(
+        from storedIdols: [Idol],
+        sourceID: UUID,
+        hiddenIDs: Set<UUID>
+    ) -> [Idol] {
+        ChekinanaIdolOrdering.ordered(storedIdols).filter {
+            $0.id != sourceID && !hiddenIDs.contains($0.id)
+        }
+    }
+
+    static func replacingSource(
+        in idols: [Idol],
+        sourceID: UUID,
+        with target: Idol
+    ) -> [Idol] {
+        var seen = Set<UUID>()
+        return idols.compactMap { idol in
+            let replacement = idol.id == sourceID ? target : idol
+            return seen.insert(replacement.id).inserted ? replacement : nil
+        }
+    }
+
+    static func replacingSource(
+        in idolIDs: [UUID],
+        sourceID: UUID,
+        with targetID: UUID
+    ) -> [UUID] {
+        var seen = Set<UUID>()
+        return idolIDs.compactMap { idolID in
+            let replacement = idolID == sourceID ? targetID : idolID
+            return seen.insert(replacement).inserted ? replacement : nil
+        }
+    }
 }
 
 @MainActor
@@ -9847,19 +12203,142 @@ enum ChekinanaIdolPersistence {
         avatarDirectory: URL? = nil,
         saveContext: SaveContext = { try $0.save() }
     ) throws -> ChekinanaIdolPersistenceResult {
-        let avatarRef = idol.avatarImageRef
-        let idolID = idol.id
-        modelContext.delete(idol)
-        do {
-            try saveContext(modelContext)
-        } catch {
-            modelContext.rollback()
-            throw error
+        let (avatarRef, idolID) = try ChekinanaChekiRecordStore.withMutationLock {
+            do {
+                let idolID = idol.id
+                let mediaCount = try modelContext.fetch(
+                    FetchDescriptor<Cheki>()
+                ).filter { $0.idols.contains(where: { $0.id == idolID }) }.count
+                let shameCount = try modelContext.fetch(
+                    FetchDescriptor<Shame>()
+                ).filter { $0.idols.contains(where: { $0.id == idolID }) }.count
+                let dougaCount = try modelContext.fetch(
+                    FetchDescriptor<Douga>()
+                ).filter { $0.idols.contains(where: { $0.id == idolID }) }.count
+                let simpleCount = try modelContext.fetch(
+                    FetchDescriptor<ChekiRecord>()
+                ).filter { $0.idolIDs.contains(idolID) }
+                    .reduce(0) { $0 + max(1, $1.count) }
+                let linkedRecordCount = mediaCount + shameCount + dougaCount + simpleCount
+                guard linkedRecordCount == 0 else {
+                    throw ChekinanaIdolPersistenceError.linkedChekiRecords(
+                        linkedRecordCount
+                    )
+                }
+                let avatarRef = idol.avatarImageRef
+                if let patternState = (try? ChekinanaIdolPatternPersistence.state(
+                    for: idolID,
+                    in: modelContext
+                )) ?? nil {
+                    modelContext.delete(patternState)
+                }
+                modelContext.delete(idol)
+                try saveContext(modelContext)
+                return (avatarRef, idolID)
+            } catch {
+                modelContext.rollback()
+                throw error
+            }
         }
         return cleanupResult(
             avatarRef,
             replacingWith: nil,
             idolID: idolID,
+            directory: avatarDirectory
+        )
+    }
+
+    static func merge(
+        sourceID: UUID,
+        into targetID: UUID,
+        in modelContext: ModelContext,
+        avatarDirectory: URL? = nil,
+        saveContext: SaveContext = { try $0.save() }
+    ) throws -> ChekinanaIdolPersistenceResult {
+        guard sourceID != targetID else {
+            throw ChekinanaIdolPersistenceError.mergeTargetMatchesSource
+        }
+        let avatarRef = try ChekinanaChekiRecordStore.withMutationLock {
+            var chekiSnapshots: [(model: Cheki, idols: [Idol])] = []
+            var shameSnapshots: [(model: Shame, idols: [Idol])] = []
+            var dougaSnapshots: [(model: Douga, idols: [Idol])] = []
+            var recordSnapshots: [(model: ChekiRecord, idolIDs: [UUID])] = []
+            do {
+                let idols = try modelContext.fetch(FetchDescriptor<Idol>())
+                guard let source = idols.first(where: { $0.id == sourceID }) else {
+                    throw ChekinanaIdolPersistenceError.mergeSourceMissing
+                }
+                guard let target = idols.first(where: { $0.id == targetID }) else {
+                    throw ChekinanaIdolPersistenceError.mergeTargetMissing
+                }
+
+                chekiSnapshots = try modelContext.fetch(FetchDescriptor<Cheki>())
+                    .filter { $0.idols.contains(where: { $0.id == sourceID }) }
+                    .map { ($0, $0.idols) }
+                shameSnapshots = try modelContext.fetch(FetchDescriptor<Shame>())
+                    .filter { $0.idols.contains(where: { $0.id == sourceID }) }
+                    .map { ($0, $0.idols) }
+                dougaSnapshots = try modelContext.fetch(FetchDescriptor<Douga>())
+                    .filter { $0.idols.contains(where: { $0.id == sourceID }) }
+                    .map { ($0, $0.idols) }
+                recordSnapshots = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
+                    .filter { $0.idolIDs.contains(sourceID) }
+                    .map { ($0, $0.idolIDs) }
+
+                for snapshot in chekiSnapshots {
+                    let cheki = snapshot.model
+                    cheki.idols = ChekinanaIdolMergePolicy.replacingSource(
+                        in: cheki.idols,
+                        sourceID: sourceID,
+                        with: target
+                    )
+                }
+                for snapshot in shameSnapshots {
+                    let shame = snapshot.model
+                    shame.idols = ChekinanaIdolMergePolicy.replacingSource(
+                        in: shame.idols,
+                        sourceID: sourceID,
+                        with: target
+                    )
+                }
+                for snapshot in dougaSnapshots {
+                    let douga = snapshot.model
+                    douga.idols = ChekinanaIdolMergePolicy.replacingSource(
+                        in: douga.idols,
+                        sourceID: sourceID,
+                        with: target
+                    )
+                }
+                for snapshot in recordSnapshots {
+                    let record = snapshot.model
+                    record.idolIDs = ChekinanaIdolMergePolicy.replacingSource(
+                        in: record.idolIDs,
+                        sourceID: sourceID,
+                        with: targetID
+                    )
+                }
+
+                for state in try modelContext.fetch(FetchDescriptor<IdolPatternState>())
+                where state.idolID == sourceID {
+                    modelContext.delete(state)
+                }
+                let previousAvatarRef = source.avatarImageRef
+                modelContext.delete(source)
+                try saveContext(modelContext)
+                return previousAvatarRef
+            } catch {
+                for snapshot in chekiSnapshots { snapshot.model.idols = snapshot.idols }
+                for snapshot in shameSnapshots { snapshot.model.idols = snapshot.idols }
+                for snapshot in dougaSnapshots { snapshot.model.idols = snapshot.idols }
+                for snapshot in recordSnapshots { snapshot.model.idolIDs = snapshot.idolIDs }
+                modelContext.rollback()
+                throw error
+            }
+        }
+        return cleanupResult(
+            avatarRef,
+            replacingWith: nil,
+            idolID: sourceID,
             directory: avatarDirectory
         )
     }
@@ -10028,9 +12507,15 @@ enum ChekinanaCatalogueIdolAvatarLocalizerError: LocalizedError {
         case .missingAvatar:
             "The catalogue avatar is unavailable. Retry the same catalogue result before saving."
         case .identityMismatch:
-            "The prepared avatar does not match this catalogue Idol. Search and select the Idol again."
+            ChekinanaProductCopy.text(
+                "idols.catalogue_avatar_identity_mismatch",
+                "The prepared avatar does not match this catalogue Idol. Search and select the Idol again."
+            )
         case .cleanupRequired:
-            "The Idol was saved, but an old managed avatar still requires cleanup."
+            ChekinanaProductCopy.text(
+                "idols.avatar_cleanup_required_after_save",
+                "The Idol was saved, but an old managed avatar still requires cleanup."
+            )
         }
     }
 }
@@ -10351,6 +12836,158 @@ private enum ChekinanaEventListPage: String, CaseIterable, Identifiable {
     }
 }
 
+enum ChekinanaEventListPresentation {
+    static func remainingDays(
+        until eventDate: Date,
+        from now: Date,
+        calendar: Calendar = .current
+    ) -> Int {
+        let today = calendar.startOfDay(for: now)
+        let eventDay = calendar.startOfDay(for: eventDate)
+        return calendar.dateComponents([.day], from: today, to: eventDay).day ?? 0
+    }
+
+    static func remainingDaysLabel(_ dayDifference: Int) -> String {
+        switch dayDifference {
+        case 0:
+            ChekinanaProductCopy.text("events.remaining_days.today", "Today")
+        case 1:
+            ChekinanaProductCopy.text(
+                "events.remaining_days.tomorrow",
+                "Tomorrow"
+            )
+        default:
+            ChekinanaProductCopy.format(
+                "events.remaining_days.future",
+                "In %lld days",
+                Int64(dayDifference)
+            )
+        }
+    }
+
+    static func displayedCity(_ city: String?) -> String? {
+        guard let city = city?.nonEmpty else { return nil }
+        guard city.hasSuffix("市") else { return city }
+        return String(city.dropLast()).nonEmpty
+    }
+}
+
+enum ChekinanaTravelTimelinePolicy {
+    static func isUpcoming(
+        departureTime: Date,
+        from now: Date,
+        calendar: Calendar = .current
+    ) -> Bool {
+        ChekinanaEventListPresentation.remainingDays(
+            until: departureTime,
+            from: now,
+            calendar: calendar
+        ) >= 0
+    }
+
+    static func futureSegments(
+        _ segments: [TravelSegment],
+        from now: Date,
+        calendar: Calendar = .current
+    ) -> [TravelSegment] {
+        segments.filter {
+            isUpcoming(
+                departureTime: $0.departureTime,
+                from: now,
+                calendar: calendar
+            )
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    static func pruneExpiredSegments(
+        _ segments: [TravelSegment],
+        from now: Date,
+        calendar: Calendar = .current,
+        in modelContext: ModelContext
+    ) -> Int {
+        var deletedCount = 0
+        for segment in segments where !isUpcoming(
+            departureTime: segment.departureTime,
+            from: now,
+            calendar: calendar
+        ) {
+            do {
+                try ChekinanaTravelSegmentPersistence.delete(
+                    segment,
+                    from: modelContext
+                )
+                deletedCount += 1
+            } catch {
+                // Opportunistic cleanup is retried when Events next refreshes.
+                continue
+            }
+        }
+        return deletedCount
+    }
+}
+
+enum ChekinanaEventChekiCount {
+    static func visibleRecords(
+        _ records: [ChekiRecord],
+        eventID: UUID,
+        hiddenIDs: Set<UUID>
+    ) -> [ChekiRecord] {
+        records.filter {
+            ChekinanaChekiRecordReadPolicy.isLinked($0, eventID: eventID)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIDs
+                )
+        }
+    }
+
+    static func total(
+        eventID: UUID,
+        mediaChekis: [Cheki],
+        simpleRecords: [ChekiRecord],
+        hiddenIDs: Set<UUID>
+    ) -> Int {
+        let mediaCount = mediaChekis.filter {
+            $0.event?.id == eventID
+                && ChekinanaVisibilityPolicy.includesRecord(
+                    idols: $0.idols,
+                    hiddenIDs: hiddenIDs
+                )
+        }.count
+        let simpleCount = ChekinanaChekiRecordStore.totalCount(
+            visibleRecords(
+                simpleRecords,
+                eventID: eventID,
+                hiddenIDs: hiddenIDs
+            )
+        )
+        let (total, overflow) = mediaCount.addingReportingOverflow(simpleCount)
+        return overflow ? Int.max : total
+    }
+}
+
+private enum ChekinanaEventTimelineEntry: Identifiable {
+    case event(Event)
+    case travel(TravelSegment)
+
+    var id: String {
+        switch self {
+        case .event(let event): "event-\(event.id.uuidString.lowercased())"
+        case .travel(let segment): "travel-\(segment.id.uuidString.lowercased())"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .event(let event): event.name
+        case .travel(let segment):
+            "\(segment.displayedDepartureLocation) → \(segment.displayedArrivalLocation)"
+        }
+    }
+}
+
 enum ChekinanaEventRemoteImagePolicy {
     private static let trustedHosts = ["sinaimg.cn", "weibo.cn", "weibocdn.com"]
 
@@ -10401,7 +13038,6 @@ final class ChekinanaEventRemoteImageRedirectDelegate: NSObject,
 
 actor ChekinanaEventRemoteImageDownloader {
     static let shared = ChekinanaEventRemoteImageDownloader()
-    static let maximumBodySize = 8 * 1_024 * 1_024
 
     typealias DownloadOperation = @Sendable (URLRequest) async throws -> (URL, URLResponse)
 
@@ -10410,7 +13046,6 @@ actor ChekinanaEventRemoteImageDownloader {
         case invalidResponse
         case invalidContentType
         case emptyBody
-        case bodyTooLarge
     }
 
     private let download: DownloadOperation
@@ -10447,15 +13082,10 @@ actor ChekinanaEventRemoteImageDownloader {
         guard contentType?.hasPrefix("image/") == true else {
             throw DownloadError.invalidContentType
         }
-        if response.expectedContentLength > Int64(Self.maximumBodySize) {
-            throw DownloadError.bodyTooLarge
-        }
         let fileSize = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
         guard let fileSize, fileSize > 0 else { throw DownloadError.emptyBody }
-        guard fileSize <= Self.maximumBodySize else { throw DownloadError.bodyTooLarge }
         let data = try Data(contentsOf: temporaryURL)
         guard !data.isEmpty else { throw DownloadError.emptyBody }
-        guard data.count <= Self.maximumBodySize else { throw DownloadError.bodyTooLarge }
         return data
     }
 
@@ -10524,10 +13154,12 @@ enum ChekinanaEventMediaJournal {
     ) throws {
         let eventRefs = try modelContext.fetch(FetchDescriptor<Event>())
             .compactMap(\.avatarImageRef)
+        let travelRefs = try modelContext.fetch(FetchDescriptor<TravelSegment>())
+            .compactMap(\.operatorIconRef)
         let imageRefs = try modelContext.fetch(FetchDescriptor<EventImage>())
             .map(\.imageRef)
         recover(
-            referencedRefs: Set(eventRefs + imageRefs),
+            referencedRefs: Set(eventRefs + travelRefs + imageRefs),
             directory: directory,
             defaults: defaults,
             removeItem: removeItem
@@ -10701,6 +13333,9 @@ enum ChekinanaEventAvatarStore {
     }
 
     static func image(for ref: String?) -> UIImage? {
+        if let assetName = ChekinanaTravelOperatorIcon.assetName(from: ref) {
+            return UIImage(named: assetName)
+        }
         guard let ref, isManaged(ref),
               let url = ChekiImageRefResolver.managedLocalFileURL(for: ref) else { return nil }
         return UIImage(contentsOfFile: url.path)
@@ -10720,7 +13355,6 @@ enum ChekinanaEventAvatarStore {
 enum ChekinanaEventImageStore {
     static let maximumImageCount = 12
     static let maximumConcurrentDownloads = 3
-    private static let maximumImageBytes = 8 * 1_024 * 1_024
 
     typealias RemoteFetcher = @Sendable (URL) async throws -> Data
     typealias StagedObserver = @Sendable (Int, String) async -> Void
@@ -10729,12 +13363,11 @@ enum ChekinanaEventImageStore {
         let filename = "event-image-\(eventID.uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
         ChekinanaEventMediaJournal.recordPending(filename)
         do {
-            guard data.count <= maximumImageBytes,
-                  let jpeg = await ChekinanaImageWorker.downsampledJPEGData(
-                    from: data,
-                    maxDimension: 2_048,
-                    compressionQuality: 0.9
-                  ), !jpeg.isEmpty else {
+            guard let jpeg = await ChekinanaImageWorker.downsampledJPEGData(
+                from: data,
+                maxDimension: 2_048,
+                compressionQuality: 0.9
+            ), !jpeg.isEmpty else {
                 throw ChekinanaProductMediaError.unreadableImage
             }
             let directory = try ChekiImageRefResolver.chekiImagesDirectory()
@@ -10822,8 +13455,18 @@ struct ChekinanaEventImageValue: Equatable, Sendable {
 
 @MainActor
 enum ChekinanaEventPersistence {
-    enum PersistenceError: Error {
+    enum PersistenceError: LocalizedError {
         case invalidImages
+        case linkedChekiRecords(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidImages:
+                "The Event images are invalid."
+            case .linkedChekiRecords(let count):
+                "This Event has \(count) linked Cheki record(s). Reassign them before deleting."
+            }
+        }
     }
 
     static func images(
@@ -10838,10 +13481,14 @@ enum ChekinanaEventPersistence {
 
     static func save(
         _ event: Event,
+        inserting: Bool,
+        expectedUpdatedAt: Date? = nil,
         images values: [ChekinanaEventImageValue],
+        schedule: ChekinanaEventScheduleValue? = nil,
         previousAvatarRef: String?,
         in modelContext: ModelContext,
-        saveContext: (ModelContext) throws -> Void = { try $0.save() }
+        saveContext: (ModelContext) throws -> Void = { try $0.save() },
+        apply: (Event) -> Void = { _ in }
     ) throws {
         let refs = values.map(\.imageRef)
         guard values.count <= ChekinanaEventImageStore.maximumImageCount,
@@ -10849,49 +13496,130 @@ enum ChekinanaEventPersistence {
               refs.allSatisfy(ChekinanaEventImageStore.isManaged) else {
             throw PersistenceError.invalidImages
         }
-        let existing = try images(for: event.id, in: modelContext)
-        let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
-        var retainedIDs = Set<UUID>()
-        for (sortOrder, value) in values.enumerated() {
-            if let id = value.id,
-               let record = existingByID[id],
-               record.eventID == event.id {
-                record.imageRef = value.imageRef
-                record.sortOrder = sortOrder
-                retainedIDs.insert(id)
-            } else {
-                let record = EventImage(
-                    eventID: event.id,
-                    imageRef: value.imageRef,
-                    sortOrder: sortOrder
-                )
-                modelContext.insert(record)
-                retainedIDs.insert(record.id)
+        var committedAvatarRef: String?
+        var deletionRefs: [String] = []
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            do {
+                let liveEvent: Event
+                if inserting {
+                    let matches = try modelContext.fetch(FetchDescriptor<Event>())
+                        .filter { $0.id == event.id }
+                    guard matches.isEmpty else {
+                        throw ChekinanaEventMutationError.changedOrMissingEvent
+                    }
+                    modelContext.insert(event)
+                    liveEvent = event
+                } else {
+                    let authoritativeUpdatedAt = try
+                        ChekinanaEventSchedulePersistence.persistedEventUpdatedAtLocked(
+                            eventID: event.id,
+                            from: modelContext
+                        )
+                    let matches = try modelContext.fetch(FetchDescriptor<Event>())
+                        .filter { $0.id == event.id }
+                    guard matches.count == 1,
+                          expectedUpdatedAt == nil
+                            || authoritativeUpdatedAt == expectedUpdatedAt else {
+                        throw ChekinanaEventMutationError.changedOrMissingEvent
+                    }
+                    liveEvent = matches[0]
+                }
+                apply(liveEvent)
+
+                let existing = try images(for: liveEvent.id, in: modelContext)
+                let existingByID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+                var retainedIDs = Set<UUID>()
+                for (sortOrder, value) in values.enumerated() {
+                    if let id = value.id,
+                       let record = existingByID[id],
+                       record.eventID == liveEvent.id {
+                        record.imageRef = value.imageRef
+                        record.sortOrder = sortOrder
+                        retainedIDs.insert(id)
+                    } else {
+                        let record = EventImage(
+                            eventID: liveEvent.id,
+                            imageRef: value.imageRef,
+                            sortOrder: sortOrder
+                        )
+                        modelContext.insert(record)
+                        retainedIDs.insert(record.id)
+                    }
+                }
+                for record in existing where !retainedIDs.contains(record.id) {
+                    modelContext.delete(record)
+                }
+                if let schedule {
+                    try ChekinanaEventSchedulePersistence.applyLocked(
+                        eventID: liveEvent.id,
+                        openTime: schedule.openTime,
+                        startTime: schedule.startTime,
+                        in: modelContext
+                    )
+                }
+
+                let retainedRefs = Set(refs)
+                deletionRefs = existing.map(\.imageRef)
+                    .filter { !retainedRefs.contains($0) }
+                if let previousAvatarRef,
+                   previousAvatarRef != liveEvent.avatarImageRef,
+                   ChekinanaEventAvatarStore.isManaged(previousAvatarRef) {
+                    deletionRefs.append(previousAvatarRef)
+                }
+                ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
+                try saveContext(modelContext)
+                committedAvatarRef = liveEvent.avatarImageRef
+            } catch {
+                modelContext.rollback()
+                ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
+                throw error
             }
         }
-        for record in existing where !retainedIDs.contains(record.id) {
-            modelContext.delete(record)
-        }
-
-        let retainedRefs = Set(refs)
-        var deletionRefs = existing.map(\.imageRef).filter { !retainedRefs.contains($0) }
-        if let previousAvatarRef,
-           previousAvatarRef != event.avatarImageRef,
-           ChekinanaEventAvatarStore.isManaged(previousAvatarRef) {
-            deletionRefs.append(previousAvatarRef)
-        }
-        ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
-        do {
-            try saveContext(modelContext)
-        } catch {
-            modelContext.rollback()
-            ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
-            throw error
-        }
         ChekinanaEventMediaJournal.clearPending(
-            refs + [event.avatarImageRef].compactMap { $0 }
+            refs + [committedAvatarRef].compactMap { $0 }
         )
         try? ChekinanaEventMediaJournal.recover(modelContext: modelContext)
+    }
+
+    @discardableResult
+    static func update(
+        eventID: UUID,
+        expectedUpdatedAt: Date,
+        schedule: ChekinanaEventScheduleValue? = nil,
+        in modelContext: ModelContext,
+        saveContext: (ModelContext) throws -> Void = { try $0.save() },
+        apply: (Event) -> Void
+    ) throws -> Event {
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            do {
+                let authoritativeUpdatedAt = try
+                    ChekinanaEventSchedulePersistence.persistedEventUpdatedAtLocked(
+                        eventID: eventID,
+                        from: modelContext
+                    )
+                let matches = try modelContext.fetch(FetchDescriptor<Event>())
+                    .filter { $0.id == eventID }
+                guard matches.count == 1,
+                      authoritativeUpdatedAt == expectedUpdatedAt else {
+                    throw ChekinanaEventMutationError.changedOrMissingEvent
+                }
+                let liveEvent = matches[0]
+                apply(liveEvent)
+                if let schedule {
+                    try ChekinanaEventSchedulePersistence.applyLocked(
+                        eventID: eventID,
+                        openTime: schedule.openTime,
+                        startTime: schedule.startTime,
+                        in: modelContext
+                    )
+                }
+                try saveContext(modelContext)
+                return liveEvent
+            } catch {
+                modelContext.rollback()
+                throw error
+            }
+        }
     }
 
     static func delete(
@@ -10899,18 +13627,52 @@ enum ChekinanaEventPersistence {
         from modelContext: ModelContext,
         saveContext: (ModelContext) throws -> Void = { try $0.save() }
     ) throws {
-        let records = try images(for: event.id, in: modelContext)
-        let deletionRefs = records.map(\.imageRef)
-            + [event.avatarImageRef].compactMap { $0 }
-        ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
-        records.forEach(modelContext.delete)
-        modelContext.delete(event)
-        do {
-            try saveContext(modelContext)
-        } catch {
-            modelContext.rollback()
-            ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
-            throw error
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            var deletionRefs: [String] = []
+            do {
+                let eventID = event.id
+                _ = try ChekinanaEventSchedulePersistence
+                    .persistedEventUpdatedAtLocked(
+                        eventID: eventID,
+                        from: modelContext
+                    )
+                let eventMatches = try modelContext.fetch(FetchDescriptor<Event>())
+                    .filter { $0.id == eventID }
+                guard eventMatches.count == 1 else {
+                    throw ChekinanaEventMutationError.changedOrMissingEvent
+                }
+                let liveEvent = eventMatches[0]
+                let mediaCount = try modelContext.fetch(
+                    FetchDescriptor<Cheki>()
+                ).filter { $0.event?.id == eventID }.count
+                let simpleCount = try modelContext.fetch(
+                    FetchDescriptor<ChekiRecord>()
+                ).filter { $0.eventID == eventID }
+                    .reduce(0) { $0 + max(1, $1.count) }
+                let linkedRecordCount = mediaCount + simpleCount
+                guard linkedRecordCount == 0 else {
+                    throw PersistenceError.linkedChekiRecords(linkedRecordCount)
+                }
+                let records = try images(for: eventID, in: modelContext)
+                deletionRefs = records.map(\.imageRef)
+                    + [liveEvent.avatarImageRef].compactMap { $0 }
+                ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
+                records.forEach(modelContext.delete)
+                try ChekinanaEventSchedulePersistence.deleteLocked(
+                    eventID: eventID,
+                    in: modelContext
+                )
+                try ChekinanaMediaEventLinkStore.delete(
+                    eventID: eventID,
+                    in: modelContext
+                )
+                modelContext.delete(liveEvent)
+                try saveContext(modelContext)
+            } catch {
+                modelContext.rollback()
+                ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
+                throw error
+            }
         }
         try? ChekinanaEventMediaJournal.recover(modelContext: modelContext)
     }
@@ -11013,39 +13775,97 @@ private struct ChekinanaEventRemoteAvatarPreview: View {
 
 private struct ChekinanaEventsView: View {
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var travelSegments: [TravelSegment]
+    @Query private var chekiRecords: [ChekiRecord]
     let openMenu: () -> Void
     @State private var isAdding = false
+    @State private var isAddingTravel = false
     @State private var selectedEvent: Event?
+    @State private var selectedTravel: TravelSegment?
     @State private var page = ChekinanaEventListPage.upcoming
-    @State private var sortsAscending = true
+    @State private var eventListNow = Date()
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
 
-    private func visibleChekis(_ event: Event) -> [Cheki] {
-        event.chekis.filter {
-            ChekinanaVisibilityPolicy.includesRecord(
-                idols: $0.idols,
-                hiddenIDs: hiddenIdols.hiddenIDs
+    private func chekiCount(_ event: Event) -> Int {
+        ChekinanaEventChekiCount.total(
+            eventID: event.id,
+            mediaChekis: event.chekis,
+            simpleRecords: chekiRecords,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        )
+    }
+
+    private func effectiveTime(_ value: ChekinanaEventTimelineEntry) -> Date? {
+        switch value {
+        case .event(let event):
+            ChekinanaEventOrdering.effectiveDate(
+                for: event,
+                schedules: eventSchedules
+            )
+        case .travel(let segment):
+            segment.departureTime
+        }
+    }
+
+    private func fixedOrder(
+        _ values: [ChekinanaEventTimelineEntry],
+        ascending: Bool
+    ) -> [ChekinanaEventTimelineEntry] {
+        let keyed = values.compactMap { value -> ChekinanaTimelineOrderingValue? in
+            guard let effectiveTime = effectiveTime(value) else { return nil }
+            return ChekinanaTimelineOrderingValue(
+                id: value.id,
+                title: value.title,
+                effectiveTime: effectiveTime
             )
         }
+        let orderedIDs = ChekinanaTimelineOrdering.ordered(
+            keyed,
+            ascending: ascending
+        ).map(\.id)
+        let byID = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
+        return orderedIDs.compactMap { byID[$0] }
     }
 
-    private func ordered(_ values: [Event]) -> [Event] {
-        let dated = values.filter { $0.date != nil }.sorted { lhs, rhs in
-            guard let left = lhs.date, let right = rhs.date else { return false }
-            if left != right { return sortsAscending ? left < right : left > right }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-        return dated + values.filter { $0.date == nil }.sorted { $0.id.uuidString < $1.id.uuidString }
+    private var datedEvents: [ChekinanaEventTimelineEntry] {
+        events.filter { $0.date != nil }.map(ChekinanaEventTimelineEntry.event)
     }
 
-    private var future: [Event] {
-        ordered(events.filter { ($0.date ?? .distantPast) >= ChekinanaProductDate.today })
+    private var future: [ChekinanaEventTimelineEntry] {
+        let futureTravel = ChekinanaTravelTimelinePolicy.futureSegments(
+            travelSegments,
+            from: eventListNow
+        ).map(ChekinanaEventTimelineEntry.travel)
+        return fixedOrder(datedEvents.filter {
+            guard let date = effectiveTime($0) else { return false }
+            return ChekinanaEventListPresentation.remainingDays(
+                until: date,
+                from: eventListNow
+            ) >= 0
+        } + futureTravel, ascending: true)
     }
-    private var past: [Event] {
-        ordered(events.filter { $0.date != nil && ($0.date ?? .distantFuture) < ChekinanaProductDate.today })
+    private var past: [ChekinanaEventTimelineEntry] {
+        fixedOrder(datedEvents.filter {
+            guard let date = effectiveTime($0) else { return false }
+            return ChekinanaEventListPresentation.remainingDays(
+                until: date,
+                from: eventListNow
+            ) < 0
+        }, ascending: false)
     }
-    private var undated: [Event] { ordered(events.filter { $0.date == nil }) }
+    private var undated: [ChekinanaEventTimelineEntry] {
+        events.filter { $0.date == nil }
+            .sorted {
+                let nameOrder = $0.name.localizedStandardCompare($1.name)
+                if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .map(ChekinanaEventTimelineEntry.event)
+    }
     private var currentPageIsEmpty: Bool {
         switch page {
         case .upcoming:
@@ -11053,6 +13873,12 @@ private struct ChekinanaEventsView: View {
         case .past:
             past.isEmpty && undated.isEmpty
         }
+    }
+
+    private var travelCleanupSignature: [String] {
+        travelSegments.map {
+            "\($0.id.uuidString.lowercased()):\($0.departureTime.timeIntervalSinceReferenceDate)"
+        }.sorted()
     }
 
     private func count(for value: ChekinanaEventListPage) -> Int {
@@ -11101,10 +13927,22 @@ private struct ChekinanaEventsView: View {
                 } else {
                     List {
                         if page == .upcoming {
-                            eventSection(ChekinanaProductCopy.text("events.upcoming", "Upcoming"), events: future)
+                            eventSection(
+                                ChekinanaProductCopy.text("events.upcoming", "Upcoming"),
+                                events: future,
+                                showsRemainingDays: true
+                            )
                         } else {
-                            eventSection(ChekinanaProductCopy.text("events.past", "Past"), events: past)
-                            eventSection(ChekinanaProductCopy.text("events.undated", "Undated"), events: undated)
+                            eventSection(
+                                ChekinanaProductCopy.text("events.past", "Past"),
+                                events: past,
+                                showsRemainingDays: false
+                            )
+                            eventSection(
+                                ChekinanaProductCopy.text("events.undated", "Undated"),
+                                events: undated,
+                                showsRemainingDays: false
+                            )
                         }
                     }
                     .listStyle(.insetGrouped)
@@ -11116,69 +13954,111 @@ private struct ChekinanaEventsView: View {
             .toolbar {
                 ChekinanaPageToolbar(pageID: "events", openMenu: openMenu)
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { sortsAscending.toggle() } label: { Image(systemName: sortsAscending ? "arrow.up" : "arrow.down") }
-                        .frame(width: 44, height: 44)
+                    HStack(spacing: 0) {
+                        Button { isAddingTravel = true } label: {
+                            Image(systemName: "airplane.departure")
+                                .font(.system(size: 14, weight: .regular))
+                                .frame(width: 44, height: 44)
+                        }
                         .accessibilityLabel(
-                            ChekinanaProductCopy.text("events.sort", "Sort Events")
+                            ChekinanaProductCopy.text("travel.add", "Add trip")
                         )
-                        .accessibilityValue(
-                            sortsAscending
-                                ? ChekinanaProductCopy.text(
-                                    "events.sort.ascending",
-                                    "Oldest first"
-                                )
-                                : ChekinanaProductCopy.text(
-                                    "events.sort.descending",
-                                    "Newest first"
-                                )
-                        )
-                        .accessibilityIdentifier("chekinana.events.sort")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { isAdding = true } label: { Image(systemName: "plus").frame(width: 44, height: 44) }
+                        .accessibilityIdentifier("chekinana.events.add-travel")
+
+                        Button { isAdding = true } label: {
+                            Image(systemName: "plus").frame(width: 44, height: 44)
+                        }
                         .accessibilityLabel(ChekinanaProductCopy.text("events.add", "Add Event"))
                         .accessibilityIdentifier("chekinana.events.add")
+                    }
                 }
             }
             .sheet(isPresented: $isAdding) { ChekinanaEventEditorView(event: nil) }
+            .sheet(isPresented: $isAddingTravel) {
+                ChekinanaTravelSegmentEditorView(segment: nil)
+            }
             .sheet(item: $selectedEvent) { ChekinanaEventDetailView(event: $0) }
+            .sheet(item: $selectedTravel) {
+                ChekinanaTravelSegmentDetailView(segment: $0)
+            }
         }
         .accessibilityIdentifier("chekinana.events.page")
         .chekinanaScreenMarker("chekinana.events.page")
+        .onReceive(
+            NotificationCenter.default.publisher(for: .NSCalendarDayChanged)
+        ) { _ in
+            refreshTimeline()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                refreshTimeline()
+            }
+        }
+        .onChange(of: travelCleanupSignature) { _, _ in
+            pruneExpiredTravelSegments(from: eventListNow)
+        }
+        .task {
+            pruneExpiredTravelSegments(from: eventListNow)
+        }
+    }
+
+    private func refreshTimeline() {
+        let now = Date()
+        eventListNow = now
+        pruneExpiredTravelSegments(from: now)
+    }
+
+    private func pruneExpiredTravelSegments(from now: Date) {
+        if let selectedTravel,
+           !ChekinanaTravelTimelinePolicy.isUpcoming(
+                departureTime: selectedTravel.departureTime,
+                from: now
+           ) {
+            self.selectedTravel = nil
+        }
+        ChekinanaTravelTimelinePolicy.pruneExpiredSegments(
+            travelSegments,
+            from: now,
+            in: modelContext
+        )
     }
 
     @ViewBuilder
-    private func eventSection(_ title: String, events values: [Event]) -> some View {
+    private func eventSection(
+        _ title: String,
+        events values: [ChekinanaEventTimelineEntry],
+        showsRemainingDays: Bool
+    ) -> some View {
         if !values.isEmpty {
             Section(title) {
-                ForEach(values) { event in
-                    Button { selectedEvent = event } label: {
+                ForEach(values) { entry in
+                    Button { open(entry) } label: {
                         HStack(spacing: 12) {
-                            ChekinanaEventAvatar(event: event)
+                            timelineAvatar(entry)
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(event.name)
+                                Text(entry.title)
                                     .font(.headline)
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
-                                Text([
-                                    event.date.map(ChekinanaProductDate.displayString),
-                                    event.city?.nonEmpty,
-                                    event.resolvedLivehouse,
-                                ].compactMap { $0 }.joined(separator: " · ").nonEmpty
-                                    ?? ChekinanaProductCopy.text("events.no_date_venue", "No date or venue"))
+                                Text(timelineSubtitle(entry))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                             }
                             Spacer()
-                            Text(ChekinanaRecordKind.cheki.countLabel(visibleChekis(event).count))
+                            Text(
+                                timelineTrailingText(
+                                    entry,
+                                    showsRemainingDays: showsRemainingDays
+                                )
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                         }
                         .contentShape(Rectangle())
-                        .frame(height: 68)
+                        .frame(height: 62)
                         .padding(.horizontal, 12)
                         .background(ChekinanaDesignSystem.cardBackground)
                         .clipShape(RoundedRectangle(cornerRadius: ChekinanaDesignSystem.compactRadius))
@@ -11193,9 +14073,852 @@ private struct ChekinanaEventsView: View {
                     .buttonStyle(.plain)
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .accessibilityIdentifier("chekinana.events.card.\(event.id.uuidString.lowercased())")
+                    .listRowInsets(
+                        EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16)
+                    )
+                    .accessibilityIdentifier("chekinana.events.card.\(entry.id)")
                 }
             }
+        }
+    }
+
+    private func timelineTrailingText(
+        _ entry: ChekinanaEventTimelineEntry,
+        showsRemainingDays: Bool
+    ) -> String {
+        if showsRemainingDays, let date = effectiveTime(entry) {
+            let dayDifference = ChekinanaEventListPresentation.remainingDays(
+                until: date,
+                from: eventListNow
+            )
+            return ChekinanaEventListPresentation.remainingDaysLabel(dayDifference)
+        }
+        if case .event(let event) = entry {
+            return ChekinanaRecordKind.cheki.countLabel(chekiCount(event))
+        }
+        return ""
+    }
+
+    private func open(_ entry: ChekinanaEventTimelineEntry) {
+        switch entry {
+        case .event(let event): selectedEvent = event
+        case .travel(let segment): selectedTravel = segment
+        }
+    }
+
+    private func timelineSubtitle(_ entry: ChekinanaEventTimelineEntry) -> String {
+        switch entry {
+        case .event(let event):
+            return [
+                event.date.map(ChekinanaProductDate.displayString),
+                ChekinanaEventListPresentation.displayedCity(event.city),
+                event.resolvedLivehouse,
+            ].compactMap { $0 }.joined(separator: " · ").nonEmpty
+                ?? ChekinanaProductCopy.text("events.no_date_venue", "No date or venue")
+        case .travel(let segment):
+            return [
+                ChekinanaProductDate.displayString(segment.departureTime),
+                segment.departureTime.formatted(date: .omitted, time: .shortened),
+                segment.serviceNumber.nonEmpty,
+            ].compactMap { $0 }.joined(separator: " · ")
+        }
+    }
+
+    @ViewBuilder
+    private func timelineAvatar(
+        _ entry: ChekinanaEventTimelineEntry
+    ) -> some View {
+        switch entry {
+        case .event(let event): ChekinanaEventAvatar(event: event)
+        case .travel(let segment): ChekinanaTravelOperatorAvatar(segment: segment)
+        }
+    }
+}
+
+private struct ChekinanaTravelOperatorAvatar: View {
+    let segment: TravelSegment
+    var size: CGFloat = 44
+
+    var body: some View {
+        Group {
+            if let image = ChekinanaEventAvatarStore.image(
+                for: segment.operatorIconRef
+            ) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    Circle().fill(ChekinanaProductTheme.softAccent)
+                    Image(systemName: segment.mode.systemImage)
+                        .font(.system(size: size * 0.44, weight: .semibold))
+                        .foregroundStyle(ChekinanaProductTheme.accent)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .accessibilityHidden(true)
+    }
+}
+
+private struct ChekinanaTravelSegmentDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    let segment: TravelSegment
+    @State private var isEditing = false
+    @State private var confirmsDeletion = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 16) {
+                        ChekinanaTravelOperatorAvatar(segment: segment, size: 76)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("\(segment.displayedDepartureLocation) → \(segment.displayedArrivalLocation)")
+                                .font(.title3.bold())
+                                .lineLimit(2)
+                            Text(segment.serviceNumber)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(ChekinanaProductTheme.accent)
+                        }
+                    }
+                    .frame(minHeight: 82)
+                }
+                Section(ChekinanaProductCopy.text("travel.schedule", "Schedule")) {
+                    LabeledContent(
+                        ChekinanaProductCopy.text("travel.departure", "Departure"),
+                        value: segment.departureTime.formatted(
+                            date: .abbreviated,
+                            time: .shortened
+                        )
+                    )
+                    LabeledContent(
+                        ChekinanaProductCopy.text("travel.departure_location", "From"),
+                        value: segment.displayedDepartureLocation
+                    )
+                    LabeledContent(
+                        ChekinanaProductCopy.text("travel.arrival", "Arrival"),
+                        value: segment.arrivalTime.formatted(
+                            date: .abbreviated,
+                            time: .shortened
+                        )
+                    )
+                    LabeledContent(
+                        ChekinanaProductCopy.text("travel.arrival_location", "To"),
+                        value: segment.displayedArrivalLocation
+                    )
+                }
+                Section(ChekinanaProductCopy.text("travel.details", "Trip details")) {
+                    LabeledContent(
+                        segment.mode == .flight
+                            ? ChekinanaProductCopy.text("travel.flight_number", "Flight")
+                            : ChekinanaProductCopy.text("travel.train_number", "Train"),
+                        value: segment.serviceNumber
+                    )
+                    if segment.mode == .train,
+                       let carriage = segment.carriageNumber?.nonEmpty {
+                        LabeledContent(
+                            ChekinanaProductCopy.text("travel.carriage", "Carriage"),
+                            value: carriage
+                        )
+                    }
+                    if let seat = segment.seatNumber.nonEmpty {
+                        LabeledContent(
+                            ChekinanaProductCopy.text("travel.seat", "Seat"),
+                            value: seat
+                        )
+                    }
+                    if let note = segment.note.nonEmpty {
+                        LabeledContent(
+                            ChekinanaProductCopy.text("common.note", "Note"),
+                            value: note
+                        )
+                    }
+                }
+            }
+            .chekinanaGroupedPageBackground()
+            .navigationTitle(ChekinanaProductCopy.text("travel.title", "Trip"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.done", "Done")) {
+                        dismiss()
+                    }
+                }
+                ToolbarItemGroup(placement: .confirmationAction) {
+                    Button(ChekinanaProductCopy.text("common.edit", "Edit")) {
+                        isEditing = true
+                    }
+                    Button(role: .destructive) { confirmsDeletion = true } label: {
+                        Image(systemName: "trash")
+                    }
+                }
+            }
+            .sheet(isPresented: $isEditing) {
+                ChekinanaTravelSegmentEditorView(segment: segment)
+            }
+            .confirmationDialog(
+                ChekinanaProductCopy.text("travel.delete.confirm", "Delete this trip?"),
+                isPresented: $confirmsDeletion,
+                titleVisibility: .visible
+            ) {
+                Button(
+                    ChekinanaProductCopy.text("common.delete", "Delete"),
+                    role: .destructive
+                ) { deleteSegment() }
+                Button(
+                    ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                    role: .cancel
+                ) {}
+            }
+            .alert(
+                ChekinanaProductCopy.text("common.error", "Error"),
+                isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }
+                )
+            ) {
+                Button(ChekinanaProductCopy.text("common.ok", "OK"), role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
+            .accessibilityIdentifier("chekinana.travel.detail")
+        }
+    }
+
+    private func deleteSegment() {
+        do {
+            try ChekinanaTravelSegmentPersistence.delete(
+                segment,
+                from: modelContext
+            )
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct ChekinanaTravelOperatorIconPickerLabel: View {
+    let selectedIconData: Data?
+    let resolvedIconReference: String?
+    let mode: ChekinanaTravelMode
+    let isImporting: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Group {
+                if let selectedIconData,
+                   let image = UIImage(data: selectedIconData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else if let image = ChekinanaEventAvatarStore.image(
+                    for: resolvedIconReference
+                ) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Circle().fill(ChekinanaProductTheme.softAccent)
+                        Image(systemName: mode.systemImage)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(ChekinanaProductTheme.accent)
+                    }
+                }
+            }
+            .frame(width: 54, height: 54)
+            .clipShape(Circle())
+            .accessibilityHidden(true)
+            Text(
+                ChekinanaProductCopy.text(
+                    "travel.icon.choose",
+                    "Choose or replace icon"
+                )
+            )
+            .foregroundStyle(ChekinanaProductTheme.accent)
+            Spacer()
+            if isImporting { ProgressView() }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+private struct ChekinanaTravelSegmentEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    let segment: TravelSegment?
+
+    @State private var mode: ChekinanaTravelMode
+    @State private var routeDate: Date
+    @State private var serviceNumber: String
+    @State private var seatNumber: String
+    @State private var carriageNumber: String
+    @State private var note: String
+    @State private var scheduleResult: ChekinanaScheduleResult?
+    @State private var resultSignature: ChekinanaScheduleRequestSignature?
+    @State private var originIndex: Int?
+    @State private var destinationIndex: Int?
+    @State private var hasInvalidatedStoredRoute = false
+    @State private var isLookingUp = false
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    @State private var lookupTask: Task<Void, Never>?
+    @State private var lookupRequestID: UUID?
+    @State private var scheduleClient = ChekinanaScheduleClient()
+    @State private var iconPickerItem: PhotosPickerItem?
+    @State private var selectedIconData: Data?
+    @State private var iconImportTask: Task<Void, Never>?
+    @State private var iconImportRequestID: UUID?
+    @State private var isImportingIcon = false
+    @FocusState private var isServiceNumberFocused: Bool
+
+    private let draftID: UUID
+    private let expectedUpdatedAt: Date?
+    private let originalSignature: ChekinanaScheduleRequestSignature?
+    private let storedRoute: ChekinanaTravelResolvedRoute?
+    private let storedIconReference: String?
+
+    init(segment: TravelSegment?) {
+        self.segment = segment
+        let now = Date()
+        let initialMode = segment?.mode ?? .flight
+        let initialDate = segment?.departureTime ?? now
+        let initialNumber = segment?.serviceNumber ?? ""
+        _mode = State(initialValue: initialMode)
+        _routeDate = State(initialValue: initialDate)
+        _serviceNumber = State(initialValue: initialNumber)
+        _seatNumber = State(initialValue: segment?.seatNumber ?? "")
+        _carriageNumber = State(initialValue: segment?.carriageNumber ?? "")
+        _note = State(initialValue: segment?.note ?? "")
+        draftID = segment?.id ?? UUID()
+        expectedUpdatedAt = segment?.updatedAt
+        originalSignature = segment.map { _ in
+            ChekinanaScheduleRequestSignature(
+                mode: initialMode,
+                serviceNumber: initialNumber,
+                date: initialDate
+            )
+        }
+        storedRoute = segment.map {
+            ChekinanaTravelResolvedRoute(
+                departureLocation: $0.displayedDepartureLocation,
+                arrivalLocation: $0.displayedArrivalLocation,
+                departureTime: $0.departureTime,
+                arrivalTime: $0.arrivalTime
+            )
+        }
+        storedIconReference = segment?.operatorIconRef
+    }
+
+    private var currentSignature: ChekinanaScheduleRequestSignature {
+        ChekinanaScheduleRequestSignature(
+            mode: mode,
+            serviceNumber: serviceNumber,
+            date: routeDate
+        )
+    }
+
+    private var resolvedRoute: ChekinanaTravelResolvedRoute? {
+        if let scheduleResult, resultSignature == currentSignature {
+            return ChekinanaTravelRouteSelectionPolicy.resolvedRoute(
+                result: scheduleResult,
+                originIndex: originIndex,
+                destinationIndex: destinationIndex
+            )
+        }
+        guard !hasInvalidatedStoredRoute,
+              originalSignature == currentSignature else { return nil }
+        return storedRoute
+    }
+
+    private var resolvedIconReference: String? {
+        if let scheduleResult, resultSignature == currentSignature {
+            return ChekinanaTravelOperatorIcon.assetReference(
+                forOperatorCode: scheduleResult.operatorCode
+            )
+        }
+        guard !hasInvalidatedStoredRoute,
+              originalSignature == currentSignature else { return nil }
+        return storedIconReference
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker(
+                        ChekinanaProductCopy.text("travel.mode", "Mode"),
+                        selection: $mode
+                    ) {
+                        ForEach(ChekinanaTravelMode.allCases) { value in
+                            Label(value.title, systemImage: value.systemImage).tag(value)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    DatePicker(
+                        ChekinanaProductCopy.text("travel.schedule.date", "Date"),
+                        selection: $routeDate,
+                        displayedComponents: .date
+                    )
+                    TextField(
+                        mode == .flight
+                            ? ChekinanaProductCopy.text("travel.flight_number", "Flight number")
+                            : ChekinanaProductCopy.text("travel.train_number", "Train number"),
+                        text: $serviceNumber
+                    )
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .focused($isServiceNumberFocused)
+                    .onSubmit { lookupSchedule() }
+
+                    Button(action: lookupSchedule) {
+                        HStack {
+                            if isLookingUp { ProgressView() }
+                            Text(
+                                isLookingUp
+                                    ? ChekinanaProductCopy.text("travel.schedule.looking_up", "Looking up…")
+                                    : errorMessage == nil
+                                        ? ChekinanaProductCopy.text("travel.schedule.lookup", "Look up schedule")
+                                        : ChekinanaProductCopy.text("travel.schedule.retry", "Retry lookup")
+                            )
+                            Spacer()
+                            if !isLookingUp { Image(systemName: "magnifyingglass") }
+                        }
+                    }
+                    .disabled(
+                        isLookingUp
+                            || isImportingIcon
+                            || currentSignature.serviceNumber.isEmpty
+                    )
+                    .accessibilityIdentifier("chekinana.travel.schedule.lookup")
+                }
+
+                if let scheduleResult, resultSignature == currentSignature {
+                    scheduleSelection(result: scheduleResult)
+                } else if let storedRoute = resolvedRoute {
+                    routeSummary(storedRoute)
+                }
+
+                Section(ChekinanaProductCopy.text("travel.seat_details", "Seat")) {
+                    if mode == .train {
+                        TextField(
+                            ChekinanaProductCopy.text("travel.carriage", "Carriage"),
+                            text: $carriageNumber
+                        )
+                    }
+                    TextField(
+                        ChekinanaProductCopy.text("travel.seat", "Seat"),
+                        text: $seatNumber
+                    )
+                    TextField(
+                        ChekinanaProductCopy.text("common.note", "Note"),
+                        text: $note,
+                        axis: .vertical
+                    )
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("chekinana.travel.schedule.error")
+                    }
+                }
+            }
+            .navigationTitle(
+                segment == nil
+                    ? ChekinanaProductCopy.text("travel.add", "Add trip")
+                    : ChekinanaProductCopy.text("travel.edit", "Edit trip")
+            )
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(ChekinanaProductCopy.text("common.save", "Save")) {
+                        Task { await save() }
+                    }
+                    .disabled(
+                        isSaving
+                            || isLookingUp
+                            || isImportingIcon
+                            || resolvedRoute == nil
+                    )
+                    .accessibilityIdentifier("chekinana.travel.editor.save")
+                }
+            }
+            .onChange(of: mode) { _, value in
+                if value == .flight { carriageNumber = "" }
+                invalidateScheduleInput()
+            }
+            .onChange(of: routeDate) { _, _ in invalidateScheduleInput() }
+            .onChange(of: serviceNumber) { _, _ in invalidateScheduleInput() }
+            .onDisappear {
+                lookupTask?.cancel()
+                lookupTask = nil
+                lookupRequestID = nil
+                iconImportTask?.cancel()
+                iconImportTask = nil
+                iconImportRequestID = nil
+                Task { await scheduleClient.cancel() }
+            }
+            .onChange(of: iconPickerItem) { _, item in
+                guard let item else { return }
+                iconImportTask?.cancel()
+                let requestID = UUID()
+                iconImportRequestID = requestID
+                isImportingIcon = true
+                iconImportTask = Task { @MainActor in
+                    defer {
+                        if iconImportRequestID == requestID {
+                            isImportingIcon = false
+                            iconImportTask = nil
+                            iconPickerItem = nil
+                        }
+                    }
+                    let transfer = try? await item.loadTransferable(
+                        type: ChekinanaProductTransferableImage.self
+                    )
+                    guard !Task.isCancelled,
+                       iconImportRequestID == requestID else { return }
+                    selectedIconData = ChekinanaTravelIconPickerPolicy.selectedData(
+                        afterPickerResult: transfer?.data,
+                        current: selectedIconData
+                    )
+                }
+            }
+            .interactiveDismissDisabled(isSaving)
+            .accessibilityIdentifier("chekinana.travel.editor")
+        }
+    }
+
+    @ViewBuilder
+    private func scheduleSelection(result: ChekinanaScheduleResult) -> some View {
+        Section(ChekinanaProductCopy.text("travel.route", "Route")) {
+            operatorIconPicker
+            ForEach(result.stops.indices, id: \.self) { index in
+                Button {
+                    selectStop(index, in: result)
+                } label: {
+                    HStack(spacing: 9) {
+                        Image(
+                            systemName: isSelectedStop(index)
+                                ? "checkmark.circle.fill" : "circle"
+                        )
+                        .foregroundStyle(
+                            isSelectedStop(index)
+                                ? ChekinanaProductTheme.accent : Color.secondary
+                        )
+                        Text(result.stops[index].name)
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(stopTimeLabel(at: index, in: result))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .disabled(
+                    result.stops.count > 2
+                        && !isSelectableStop(index, in: result)
+                )
+                .accessibilityIdentifier("chekinana.travel.schedule.stop.\(index)")
+            }
+            if let route = resolvedRoute { routeSummaryRows(route) }
+        }
+    }
+
+    @ViewBuilder
+    private func routeSummary(_ route: ChekinanaTravelResolvedRoute) -> some View {
+        Section(ChekinanaProductCopy.text("travel.route", "Route")) {
+            operatorIconPicker
+            routeSummaryRows(route)
+        }
+    }
+
+    @MainActor
+    private var operatorIconPicker: some View {
+        let label = ChekinanaTravelOperatorIconPickerLabel(
+            selectedIconData: selectedIconData,
+            resolvedIconReference: resolvedIconReference,
+            mode: mode,
+            isImporting: isImportingIcon
+        )
+        return PhotosPicker(selection: $iconPickerItem, matching: .images) {
+            label
+        }
+        .buttonStyle(.plain)
+        .disabled(isImportingIcon || isSaving)
+        .accessibilityIdentifier("chekinana.travel.icon-picker")
+    }
+
+    @ViewBuilder
+    private func routeSummaryRows(_ route: ChekinanaTravelResolvedRoute) -> some View {
+        LabeledContent(
+            ChekinanaProductCopy.text("travel.departure_location", "From"),
+            value: route.departureLocation
+        )
+        LabeledContent(
+            ChekinanaProductCopy.text("travel.departure", "Departure"),
+            value: route.departureTime.formatted(date: .abbreviated, time: .shortened)
+        )
+        LabeledContent(
+            ChekinanaProductCopy.text("travel.arrival_location", "To"),
+            value: route.arrivalLocation
+        )
+        LabeledContent(
+            ChekinanaProductCopy.text("travel.arrival", "Arrival"),
+            value: route.arrivalTime.formatted(date: .abbreviated, time: .shortened)
+        )
+    }
+
+    private func stopTimeLabel(
+        at index: Int,
+        in result: ChekinanaScheduleResult
+    ) -> String {
+        let stop = result.stops[index]
+        if destinationIndex == index, let arrival = stop.arrival {
+            return ChekinanaProductCopy.format(
+                "travel.schedule.arrival_time",
+                "Arr %@",
+                localScheduleTime(arrival, timeZone: stop.arrivalTimeZone)
+            )
+        }
+        if originIndex == index, let departure = stop.departure {
+            return ChekinanaProductCopy.format(
+                "travel.schedule.departure_time",
+                "Dep %@",
+                localScheduleTime(departure, timeZone: stop.departureTimeZone)
+            )
+        }
+        if let departure = stop.departure {
+            return ChekinanaProductCopy.format(
+                "travel.schedule.departure_time",
+                "Dep %@",
+                localScheduleTime(departure, timeZone: stop.departureTimeZone)
+            )
+        }
+        if let arrival = stop.arrival {
+            return ChekinanaProductCopy.format(
+                "travel.schedule.arrival_time",
+                "Arr %@",
+                localScheduleTime(arrival, timeZone: stop.arrivalTimeZone)
+            )
+        }
+        return ChekinanaProductCopy.text("common.none", "None")
+    }
+
+    private func localScheduleTime(_ date: Date, timeZone: TimeZone?) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = ChekinanaLanguagePreference.displayLocale()
+        formatter.timeZone = timeZone ?? .current
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    private func isSelectedStop(_ index: Int) -> Bool {
+        originIndex == index || destinationIndex == index
+    }
+
+    private func isSelectableStop(
+        _ index: Int,
+        in result: ChekinanaScheduleResult
+    ) -> Bool {
+        ChekinanaTravelStopTapSelectionPolicy.isSelectable(
+            index,
+            in: result,
+            selection: .init(
+                originIndex: originIndex,
+                destinationIndex: destinationIndex
+            )
+        )
+    }
+
+    private func selectStop(
+        _ index: Int,
+        in result: ChekinanaScheduleResult
+    ) {
+        guard result.stops.count > 2,
+              isSelectableStop(index, in: result) else { return }
+        let updated = ChekinanaTravelStopTapSelectionPolicy.selection(
+            afterTapping: index,
+            in: result,
+            current: .init(
+                originIndex: originIndex,
+                destinationIndex: destinationIndex
+            )
+        )
+        originIndex = updated.originIndex
+        destinationIndex = updated.destinationIndex
+    }
+
+    @MainActor
+    private func invalidateScheduleInput() {
+        lookupTask?.cancel()
+        lookupTask = nil
+        lookupRequestID = nil
+        Task { await scheduleClient.cancel() }
+        isLookingUp = false
+        scheduleResult = nil
+        resultSignature = nil
+        originIndex = nil
+        destinationIndex = nil
+        errorMessage = nil
+        if currentSignature != originalSignature {
+            hasInvalidatedStoredRoute = true
+        }
+    }
+
+    @MainActor
+    private func lookupSchedule() {
+        isServiceNumberFocused = false
+        guard !isLookingUp else { return }
+        let signature = currentSignature
+        let queryDate = routeDate
+        guard !signature.serviceNumber.isEmpty else {
+            errorMessage = ChekinanaScheduleClientError.missingQuery.localizedDescription
+            return
+        }
+        lookupTask?.cancel()
+        let requestID = UUID()
+        lookupRequestID = requestID
+        isLookingUp = true
+        errorMessage = nil
+        scheduleResult = nil
+        resultSignature = nil
+        originIndex = nil
+        destinationIndex = nil
+        lookupTask = Task {
+            do {
+                let result = try await scheduleClient.schedule(
+                    mode: signature.mode,
+                    serviceNumber: signature.serviceNumber,
+                    date: queryDate
+                )
+                guard !Task.isCancelled,
+                      lookupRequestID == requestID,
+                      currentSignature == signature else { return }
+                iconImportTask?.cancel()
+                iconImportTask = nil
+                iconImportRequestID = nil
+                isImportingIcon = false
+                iconPickerItem = nil
+                selectedIconData = nil
+                scheduleResult = result
+                resultSignature = signature
+                if let automatic = ChekinanaTravelRouteSelectionPolicy.automaticSelection(
+                    for: result
+                ) {
+                    originIndex = automatic.0
+                    destinationIndex = automatic.1
+                } else if let segment,
+                          let matchedOrigin = result.stops.firstIndex(where: {
+                              $0.name == segment.displayedDepartureLocation
+                                  && $0.departure != nil
+                          }),
+                          let matchedDestination = result.stops.indices.first(where: {
+                              $0 > matchedOrigin
+                                  && result.stops[$0].name == segment.displayedArrivalLocation
+                                  && result.stops[$0].arrival != nil
+                          }) {
+                    originIndex = matchedOrigin
+                    destinationIndex = matchedDestination
+                }
+                lookupTask = nil
+                lookupRequestID = nil
+                isLookingUp = false
+            } catch is CancellationError {
+                guard lookupRequestID == requestID,
+                      currentSignature == signature else { return }
+                lookupTask = nil
+                lookupRequestID = nil
+                isLookingUp = false
+            } catch {
+                guard !Task.isCancelled,
+                      lookupRequestID == requestID,
+                      currentSignature == signature else { return }
+                lookupTask = nil
+                lookupRequestID = nil
+                isLookingUp = false
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func save() async {
+        guard !isSaving, let resolvedRoute else {
+            errorMessage = ChekinanaTravelSegmentValidationError
+                .missingRequiredFields.localizedDescription
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        let fields = ChekinanaTravelSegmentFields(
+            mode: mode,
+            operatorName: "",
+            serviceNumber: currentSignature.serviceNumber,
+            departureCity: "",
+            departureLocation: resolvedRoute.departureLocation,
+            arrivalCity: "",
+            arrivalLocation: resolvedRoute.arrivalLocation,
+            departureTime: resolvedRoute.departureTime,
+            arrivalTime: resolvedRoute.arrivalTime,
+            seatNumber: seatNumber,
+            carriageNumber: carriageNumber,
+            note: note
+        )
+        let target = segment ?? TravelSegment(
+            id: draftID,
+            mode: mode,
+            serviceNumber: currentSignature.serviceNumber,
+            departureCity: "",
+            departureLocation: resolvedRoute.departureLocation,
+            arrivalCity: "",
+            arrivalLocation: resolvedRoute.arrivalLocation,
+            departureTime: resolvedRoute.departureTime,
+            arrivalTime: resolvedRoute.arrivalTime
+        )
+        var stagedIconReference: String?
+        do {
+            if let selectedIconData {
+                stagedIconReference = try await ChekinanaEventAvatarStore.save(
+                    selectedIconData,
+                    eventID: target.id
+                )
+            }
+            try Task.checkCancellation()
+            _ = try ChekinanaTravelSegmentPersistence.save(
+                target,
+                inserting: segment == nil,
+                expectedUpdatedAt: expectedUpdatedAt,
+                fields: fields,
+                operatorIconRef: stagedIconReference ?? resolvedIconReference,
+                previousIconRef: segment?.operatorIconRef,
+                in: modelContext
+            )
+            try? ChekinanaEventMediaJournal.recover(modelContext: modelContext)
+            dismiss()
+        } catch {
+            ChekinanaEventAvatarStore.remove(stagedIconReference)
+            errorMessage = error.localizedDescription
         }
     }
 }
@@ -11205,15 +14928,20 @@ private struct ChekinanaEventDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query private var eventImages: [EventImage]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var chekiRecords: [ChekiRecord]
+    @Query private var idols: [Idol]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let event: Event
     @State private var isEditing = false
-    @State private var selectedChekiGroup: ChekinanaEventChekiOrdering.GroupKey?
+    @State private var selectedChekiGroupID: String?
     @State private var selectedCheki: Cheki?
+    @State private var selectedChekiRecord: ChekiRecord?
     @State private var message: String?
     @State private var isEditingNote = false
     @State private var selectedEventImage: ChekinanaEventImageViewerSelection?
     @State private var noteDraft = ""
+    @State private var noteExpectedUpdatedAt: Date?
     @FocusState private var isNoteFocused: Bool
 
     init(event: Event) {
@@ -11222,6 +14950,9 @@ private struct ChekinanaEventDetailView: View {
         _eventImages = Query(
             filter: #Predicate<EventImage> { $0.eventID == eventID },
             sort: \EventImage.sortOrder
+        )
+        _eventSchedules = Query(
+            filter: #Predicate<EventSchedule> { $0.eventID == eventID }
         )
     }
 
@@ -11232,31 +14963,45 @@ private struct ChekinanaEventDetailView: View {
         )
     }
 
-    private var chekiGroups: [ChekinanaEventChekiOrdering.Group] {
-        ChekinanaEventChekiOrdering.groups(
-            event.chekis,
+    private var visibleChekiRecords: [ChekiRecord] {
+        ChekinanaEventChekiCount.visibleRecords(
+            chekiRecords,
+            eventID: event.id,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        ).sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+
+    private var chekiCount: Int {
+        ChekinanaEventChekiCount.total(
+            eventID: event.id,
+            mediaChekis: event.chekis,
+            simpleRecords: chekiRecords,
             hiddenIDs: hiddenIdols.hiddenIDs
         )
     }
 
-    private var selectedGroup: ChekinanaEventChekiOrdering.Group? {
-        guard let selectedChekiGroup else { return nil }
-        return chekiGroups.first { $0.key == selectedChekiGroup }
+    private var chekiGroups: [ChekinanaCalendarIdolGroup] {
+        ChekinanaCalendarIdolGroup.groups(
+            for: visibleChekis,
+            records: visibleChekiRecords,
+            relationshipIndex: ChekinanaChekiRecordRelationshipIndex(idols: idols)
+        )
+    }
+
+    private var selectedGroup: ChekinanaCalendarIdolGroup? {
+        guard let selectedChekiGroupID else { return nil }
+        return chekiGroups.first { $0.id == selectedChekiGroupID }
     }
 
     var body: some View {
         let _ = languageRevision
         NavigationStack {
-            if let selectedCheki {
-                ChekinanaGalleryDetailView(
-                    cheki: selectedCheki,
-                    onClose: { self.selectedCheki = nil }
-                )
-            } else if let group = selectedGroup {
+            if let group = selectedGroup {
                 ChekinanaEventChekiGroupView(
                     group: group,
                     selectCheki: { selectedCheki = $0 },
-                    onBack: { selectedChekiGroup = nil }
+                    selectRecord: { selectedChekiRecord = $0 },
+                    onBack: { selectedChekiGroupID = nil }
                 )
             } else {
                 List {
@@ -11291,6 +15036,15 @@ private struct ChekinanaEventDetailView: View {
                     .listRowBackground(Color.clear)
                 }
                 Section(ChekinanaProductCopy.text("events.details", "Details")) {
+                    if let schedule = eventSchedules.first,
+                       let summary = ChekinanaEventTime.summary(
+                           openTime: schedule.openTime,
+                           startTime: schedule.startTime
+                       ) {
+                        Text(summary)
+                            .font(.body.monospacedDigit())
+                            .accessibilityIdentifier("chekinana.events.detail.schedule")
+                    }
                     if let city = event.city?.nonEmpty {
                         LabeledContent(
                             ChekinanaProductCopy.text("events.city", "City"),
@@ -11348,6 +15102,7 @@ private struct ChekinanaEventDetailView: View {
                     } else {
                         Button {
                             noteDraft = event.note
+                            noteExpectedUpdatedAt = event.updatedAt
                             isEditingNote = true
                             isNoteFocused = true
                         } label: {
@@ -11411,8 +15166,8 @@ private struct ChekinanaEventDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Section(ChekinanaRecordKind.cheki.countLabel(visibleChekis.count)) {
-                    if visibleChekis.isEmpty {
+                Section(ChekinanaRecordKind.cheki.countLabel(chekiCount)) {
+                    if chekiCount == 0 {
                         Text(
                             ChekinanaProductCopy.text(
                                 "events.no_linked_cheki",
@@ -11422,15 +15177,15 @@ private struct ChekinanaEventDetailView: View {
                         .foregroundStyle(.secondary)
                     }
                     ForEach(chekiGroups) { group in
-                        Button { selectedChekiGroup = group.key } label: {
+                        Button { selectedChekiGroupID = group.id } label: {
                             HStack(spacing: 12) {
                                 ChekinanaIdolAvatarRow(
-                                    idols: group.idols,
+                                    idols: group.idol.map { [$0] } ?? [],
                                     size: 36,
                                     showsNames: true
                                 )
                                 Spacer(minLength: 8)
-                                Text(eventChekiGroupCount(group.chekis.count))
+                                Text(eventChekiGroupCount(group.count))
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                 Image(systemName: "chevron.right")
@@ -11444,12 +15199,11 @@ private struct ChekinanaEventDetailView: View {
                         .accessibilityLabel(ChekinanaProductCopy.format(
                             "events.cheki_group_accessibility",
                             "%1$@, %2$@",
-                            group.idols.map(\.name).joined(separator: " · ").nonEmpty
-                                ?? ChekinanaProductCopy.text("common.unassigned", "Unassigned"),
-                            eventChekiGroupCount(group.chekis.count)
+                            group.name,
+                            eventChekiGroupCount(group.count)
                         ))
                         .accessibilityIdentifier(
-                            "chekinana.events.detail.cheki-group.\(group.key.stableIdentifier)"
+                            "chekinana.events.detail.cheki-group.\(group.id)"
                         )
                     }
                 }
@@ -11485,17 +15239,29 @@ private struct ChekinanaEventDetailView: View {
                 Text(message ?? "")
             }
             .chekinanaScreenMarker("chekinana.events.detail")
-            .onChange(of: chekiGroups.map(\.key)) { _, keys in
-                if let selectedChekiGroup, !keys.contains(selectedChekiGroup) {
-                    self.selectedChekiGroup = nil
+            .onChange(of: chekiGroups.map(\.id)) { _, ids in
+                if let selectedChekiGroupID, !ids.contains(selectedChekiGroupID) {
+                    self.selectedChekiGroupID = nil
                 }
                 if let selectedCheki,
                    !visibleChekis.contains(where: { $0.id == selectedCheki.id }) {
                     self.selectedCheki = nil
                 }
+                if let selectedChekiRecord,
+                   !visibleChekiRecords.contains(where: {
+                       $0.id == selectedChekiRecord.id
+                   }) {
+                    self.selectedChekiRecord = nil
+                }
             }
         }
-    }
+        }
+        .sheet(item: $selectedChekiRecord) { record in
+            ChekinanaChekiRecordEditor(record: record)
+        }
+        .fullScreenCover(item: $selectedCheki) { cheki in
+            ChekinanaGalleryDetailView(cheki: cheki)
+        }
     }
 
     private func eventChekiGroupCount(_ count: Int) -> String {
@@ -11508,11 +15274,15 @@ private struct ChekinanaEventDetailView: View {
     }
 
     private func deleteEvent() {
-        guard event.chekis.isEmpty else {
+        let linkedRecordCount = chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.isLinked($0, eventID: event.id)
+        }.reduce(0) { $0 + max(1, $1.count) }
+        let linkedCount = event.chekis.count + linkedRecordCount
+        guard linkedCount == 0 else {
             message = ChekinanaProductCopy.format(
                 "events.delete_linked_error",
                 "This Event has %lld linked Cheki. Reassign them before deleting.",
-                Int64(event.chekis.count)
+                Int64(linkedCount)
             )
             return
         }
@@ -11525,14 +15295,27 @@ private struct ChekinanaEventDetailView: View {
     }
 
     private func saveNote() {
-        event.note = noteDraft
-        event.updatedAt = Date()
+        guard let noteExpectedUpdatedAt else {
+            message = ChekinanaProductCopy.text(
+                "error.event_changed_reopen",
+                "This Event changed or was deleted. Reopen it and try again."
+            )
+            return
+        }
         do {
-            try modelContext.save()
+            try ChekinanaEventPersistence.update(
+                eventID: event.id,
+                expectedUpdatedAt: noteExpectedUpdatedAt,
+                in: modelContext,
+                apply: {
+                    $0.note = noteDraft
+                    $0.updatedAt = Date()
+                }
+            )
             isEditingNote = false
             isNoteFocused = false
+            self.noteExpectedUpdatedAt = nil
         } catch {
-            modelContext.rollback()
             noteDraft = event.note
             message = error.localizedDescription
         }
@@ -11540,13 +15323,13 @@ private struct ChekinanaEventDetailView: View {
 }
 
 private struct ChekinanaEventChekiGroupView: View {
-    let group: ChekinanaEventChekiOrdering.Group
+    let group: ChekinanaCalendarIdolGroup
     let selectCheki: (Cheki) -> Void
+    let selectRecord: (ChekiRecord) -> Void
     let onBack: () -> Void
 
     private var title: String {
-        group.idols.map(\.name).joined(separator: " · ").nonEmpty
-            ?? ChekinanaProductCopy.text("common.unassigned", "Unassigned")
+        group.name
     }
 
     var body: some View {
@@ -11580,6 +15363,39 @@ private struct ChekinanaEventChekiGroupView: View {
                         "chekinana.events.detail.cheki.\(cheki.id.uuidString.lowercased())"
                     )
                 }
+                ForEach(group.records) { record in
+                    Button { selectRecord(record) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "doc.text")
+                                .foregroundStyle(ChekinanaProductTheme.accent)
+                                .frame(width: 50, height: 44)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(
+                                    record.note.nonEmpty
+                                        ?? ChekinanaProductCopy.text(
+                                            "calendar.no_media_metadata",
+                                            "No media"
+                                        )
+                                )
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(ChekinanaRecordKind.cheki.countLabel(max(1, record.count)))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(
+                        "chekinana.events.detail.cheki-record.\(record.id.uuidString.lowercased())"
+                    )
+                }
             }
         }
         .chekinanaGroupedPageBackground()
@@ -11592,8 +15408,421 @@ private struct ChekinanaEventChekiGroupView: View {
             }
         }
         .accessibilityIdentifier(
-            "chekinana.events.detail.cheki-group.\(group.key.stableIdentifier).list"
+            "chekinana.events.detail.cheki-group.\(group.id).list"
         )
+    }
+}
+
+enum ChekinanaZoomPanGeometry {
+    static let minimumScale: CGFloat = 1
+    static let maximumScale: CGFloat = 4
+
+    static func clampedScale(_ scale: CGFloat) -> CGFloat {
+        guard scale.isFinite else { return minimumScale }
+        return min(maximumScale, max(minimumScale, scale))
+    }
+
+    static func aspectFitSize(
+        imageSize: CGSize,
+        viewportSize: CGSize
+    ) -> CGSize {
+        guard isValid(imageSize), isValid(viewportSize) else { return .zero }
+        let fitScale = min(
+            viewportSize.width / imageSize.width,
+            viewportSize.height / imageSize.height
+        )
+        guard fitScale.isFinite, fitScale > 0 else { return .zero }
+        let fitted = CGSize(
+            width: imageSize.width * fitScale,
+            height: imageSize.height * fitScale
+        )
+        return isFinite(fitted) ? fitted : .zero
+    }
+
+    static func clampedOffset(
+        _ offset: CGSize,
+        imageSize: CGSize,
+        viewportSize: CGSize,
+        scale: CGFloat
+    ) -> CGSize {
+        let scale = clampedScale(scale)
+        guard isValid(imageSize),
+              isValid(viewportSize),
+              scale > minimumScale,
+              offset.width.isFinite,
+              offset.height.isFinite else { return .zero }
+        let fitted = aspectFitSize(
+            imageSize: imageSize,
+            viewportSize: viewportSize
+        )
+        let maximumX = max(0, (fitted.width * scale - viewportSize.width) / 2)
+        let maximumY = max(0, (fitted.height * scale - viewportSize.height) / 2)
+        return CGSize(
+            width: min(maximumX, max(-maximumX, offset.width)),
+            height: min(maximumY, max(-maximumY, offset.height))
+        )
+    }
+
+    static func offsetKeepingAnchorFixed(
+        _ offset: CGSize,
+        from oldScale: CGFloat,
+        to newScale: CGFloat,
+        anchor: UnitPoint,
+        viewportSize: CGSize
+    ) -> CGSize {
+        guard isFinite(offset),
+              isValid(viewportSize),
+              anchor.x.isFinite,
+              anchor.y.isFinite else { return .zero }
+        let oldScale = clampedScale(oldScale)
+        let newScale = clampedScale(newScale)
+        guard oldScale > 0 else { return offset }
+        let ratio = newScale / oldScale
+        let anchorFromCenter = CGSize(
+            width: (anchor.x - 0.5) * viewportSize.width,
+            height: (anchor.y - 0.5) * viewportSize.height
+        )
+        let anchored = CGSize(
+            width: ratio * offset.width + (1 - ratio) * anchorFromCenter.width,
+            height: ratio * offset.height + (1 - ratio) * anchorFromCenter.height
+        )
+        return isFinite(anchored) ? anchored : .zero
+    }
+
+    private static func isValid(_ size: CGSize) -> Bool {
+        isFinite(size) && size.width > 0 && size.height > 0
+    }
+
+    private static func isFinite(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite
+    }
+}
+
+private struct ChekinanaZoomPinchState {
+    var magnification: CGFloat = 1
+    var anchor: UnitPoint = .center
+}
+
+enum ChekinanaZoomInteractionResolution: CaseIterable {
+    case cleanTap
+    case pan
+    case pinch
+    case panAndPinch
+
+    var routesSingleTap: Bool {
+        self == .cleanTap
+    }
+}
+
+private struct ChekinanaReliableSingleTapSurface: UIViewRepresentable {
+    let onSingleTap: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSingleTap: onSingleTap)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+        view.isAccessibilityElement = false
+        let recognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap(_:))
+        )
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        recognizer.delegate = context.coordinator
+        view.addGestureRecognizer(recognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onSingleTap = onSingleTap
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onSingleTap: () -> Void
+
+        init(onSingleTap: @escaping () -> Void) {
+            self.onSingleTap = onSingleTap
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            onSingleTap()
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+}
+
+private struct ChekinanaEditableVideoPlayer: UIViewControllerRepresentable {
+    let player: AVPlayer
+    let onSingleTap: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSingleTap: onSingleTap)
+    }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = true
+        controller.videoGravity = .resizeAspect
+        let recognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTap(_:))
+        )
+        recognizer.cancelsTouchesInView = false
+        recognizer.delegate = context.coordinator
+        controller.view.addGestureRecognizer(recognizer)
+        return controller
+    }
+
+    func updateUIViewController(
+        _ controller: AVPlayerViewController,
+        context: Context
+    ) {
+        controller.player = player
+        context.coordinator.onSingleTap = onSingleTap
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onSingleTap: () -> Void
+
+        init(onSingleTap: @escaping () -> Void) {
+            self.onSingleTap = onSingleTap
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            onSingleTap()
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldReceive touch: UITouch
+        ) -> Bool {
+            var view: UIView? = touch.view
+            while let current = view {
+                if current is UIControl { return false }
+                view = current.superview
+            }
+            return true
+        }
+    }
+}
+
+/// A shared aspect-fit image viewport whose zoom and pan state stays bounded.
+/// The parent pager is notified as soon as the live pinch moves above 1x so it
+/// can yield horizontal drags to this viewport, while ordinary 1x swipes keep
+/// paging normally.
+struct ChekinanaZoomableImageViewport<Content: View>: View {
+    let imageSize: CGSize
+    let resetID: AnyHashable
+    let isActive: Bool
+    let allowsDoubleTap: Bool
+    let onZoomChanged: (Bool) -> Void
+    let onSingleTap: (() -> Void)?
+    @ViewBuilder let content: () -> Content
+
+    @State private var scale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @GestureState private var pinch = ChekinanaZoomPinchState()
+    @GestureState private var dragTranslation: CGSize = .zero
+
+    init(
+        imageSize: CGSize,
+        resetID: AnyHashable,
+        isActive: Bool = true,
+        allowsDoubleTap: Bool = true,
+        onZoomChanged: @escaping (Bool) -> Void = { _ in },
+        onSingleTap: (() -> Void)? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.imageSize = imageSize
+        self.resetID = resetID
+        self.isActive = isActive
+        self.allowsDoubleTap = allowsDoubleTap
+        self.onZoomChanged = onZoomChanged
+        self.onSingleTap = onSingleTap
+        self.content = content
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let liveScale = ChekinanaZoomPanGeometry.clampedScale(
+                scale * pinch.magnification
+            )
+            let pinchOffset = ChekinanaZoomPanGeometry.offsetKeepingAnchorFixed(
+                offset,
+                from: scale,
+                to: liveScale,
+                anchor: pinch.anchor,
+                viewportSize: geometry.size
+            )
+            let liveOffset = ChekinanaZoomPanGeometry.clampedOffset(
+                CGSize(
+                    width: pinchOffset.width + dragTranslation.width,
+                    height: pinchOffset.height + dragTranslation.height
+                ),
+                imageSize: imageSize,
+                viewportSize: geometry.size,
+                scale: liveScale
+            )
+            let isZoomed = liveScale > ChekinanaZoomPanGeometry.minimumScale + 0.001
+
+            ZStack {
+                content()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .scaleEffect(liveScale)
+                    .offset(liveOffset)
+                if let onSingleTap {
+                    ChekinanaReliableSingleTapSurface(onSingleTap: onSingleTap)
+                        .frame(
+                            width: geometry.size.width,
+                            height: geometry.size.height
+                        )
+                        .accessibilityHidden(true)
+                }
+            }
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    interactionGesture(
+                        viewportSize: geometry.size,
+                        liveScale: liveScale,
+                        pinchOffset: pinchOffset
+                    )
+                )
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        toggleDoubleTapZoom(viewportSize: geometry.size)
+                    },
+                    including: allowsDoubleTap ? .all : .none
+                )
+                .onChange(of: isZoomed) { _, value in
+                    onZoomChanged(value)
+                }
+        }
+        .clipped()
+        .onAppear { onZoomChanged(false) }
+        .onDisappear { onZoomChanged(false) }
+        .onChange(of: resetID) { _, _ in reset() }
+        .onChange(of: isActive) { _, active in
+            if !active { reset() }
+        }
+    }
+
+    private func interactionGesture(
+        viewportSize: CGSize,
+        liveScale: CGFloat,
+        pinchOffset: CGSize
+    ) -> some Gesture {
+        let magnify = MagnifyGesture()
+            .updating($pinch) { value, state, _ in
+                state.magnification = value.magnification
+                state.anchor = value.startAnchor
+            }
+        let pan = DragGesture(minimumDistance: 4, coordinateSpace: .local)
+            .updating($dragTranslation) { value, state, _ in
+                state = value.translation
+            }
+        return magnify
+            .simultaneously(with: pan)
+            .onEnded { zoomOrPan in
+                commitZoomOrPan(
+                    magnification: zoomOrPan.first,
+                    pan: zoomOrPan.second,
+                    viewportSize: viewportSize,
+                    fallbackLiveScale: liveScale,
+                    fallbackPinchOffset: pinchOffset
+                )
+            }
+    }
+
+    private func commitZoomOrPan(
+        magnification: MagnifyGesture.Value?,
+        pan: DragGesture.Value?,
+        viewportSize: CGSize,
+        fallbackLiveScale: CGFloat,
+        fallbackPinchOffset: CGSize
+    ) {
+        let resolution: ChekinanaZoomInteractionResolution
+        switch (magnification != nil, pan != nil) {
+        case (true, true): resolution = .panAndPinch
+        case (true, false): resolution = .pinch
+        case (false, true): resolution = .pan
+        case (false, false): return
+        }
+        guard !resolution.routesSingleTap else { return }
+
+        let finalScale: CGFloat
+        let anchoredOffset: CGSize
+        if let magnification {
+            finalScale = ChekinanaZoomPanGeometry.clampedScale(
+                scale * magnification.magnification
+            )
+            anchoredOffset = ChekinanaZoomPanGeometry.offsetKeepingAnchorFixed(
+                offset,
+                from: scale,
+                to: finalScale,
+                anchor: magnification.startAnchor,
+                viewportSize: viewportSize
+            )
+        } else {
+            finalScale = fallbackLiveScale
+            anchoredOffset = fallbackPinchOffset
+        }
+        let translation = pan?.translation ?? .zero
+        scale = finalScale
+        offset = ChekinanaZoomPanGeometry.clampedOffset(
+            CGSize(
+                width: anchoredOffset.width + translation.width,
+                height: anchoredOffset.height + translation.height
+            ),
+            imageSize: imageSize,
+            viewportSize: viewportSize,
+            scale: finalScale
+        )
+        if finalScale <= ChekinanaZoomPanGeometry.minimumScale + 0.001 {
+            reset()
+        }
+    }
+
+    private func toggleDoubleTapZoom(viewportSize: CGSize) {
+        withAnimation(.snappy(duration: 0.22)) {
+            if scale > ChekinanaZoomPanGeometry.minimumScale + 0.001 {
+                reset()
+            } else {
+                scale = 2
+                offset = ChekinanaZoomPanGeometry.clampedOffset(
+                    .zero,
+                    imageSize: imageSize,
+                    viewportSize: viewportSize,
+                    scale: scale
+                )
+            }
+        }
+    }
+
+    private func reset() {
+        scale = ChekinanaZoomPanGeometry.minimumScale
+        offset = .zero
+        onZoomChanged(false)
     }
 }
 
@@ -11636,6 +15865,7 @@ private struct ChekinanaEventImageViewer: View {
     @Environment(\.dismiss) private var dismiss
     let images: [EventImage]
     @State private var selectedID: UUID
+    @State private var selectedImageIsZoomed = false
 
     init(images: [EventImage], initialID: UUID) {
         self.images = images
@@ -11644,7 +15874,7 @@ private struct ChekinanaEventImageViewer: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
+            ChekinanaProductTheme.pageBackground.ignoresSafeArea()
             if images.isEmpty {
                 ChekinanaEmptyState(
                     title: ChekinanaProductCopy.text(
@@ -11657,20 +15887,31 @@ private struct ChekinanaEventImageViewer: View {
             } else {
                 TabView(selection: $selectedID) {
                     ForEach(images) { record in
-                        ChekinanaEventZoomableImage(record: record)
+                        ChekinanaEventZoomableImage(
+                            record: record,
+                            isActive: selectedID == record.id,
+                            onZoomChanged: { isZoomed in
+                                guard selectedID == record.id else { return }
+                                selectedImageIsZoomed = isZoomed
+                            }
+                        )
                             .tag(record.id)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: images.count > 1 ? .automatic : .never))
+                .scrollDisabled(selectedImageIsZoomed)
                 .accessibilityIdentifier("chekinana.events.image-viewer.pages")
             }
 
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
                     .font(.headline)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                     .frame(width: 44, height: 44)
-                    .background(.black.opacity(0.62), in: Circle())
+                    .background(
+                        Color(uiColor: .secondarySystemGroupedBackground),
+                        in: Circle()
+                    )
             }
             .buttonStyle(.plain)
             .accessibilityLabel(ChekinanaProductCopy.text("common.close", "Close"))
@@ -11678,35 +15919,36 @@ private struct ChekinanaEventImageViewer: View {
             .padding(16)
         }
         .simultaneousGesture(DragGesture(minimumDistance: 36).onEnded { value in
+            guard !selectedImageIsZoomed else { return }
             guard abs(value.translation.height) > abs(value.translation.width),
                   value.translation.height > 100 else { return }
             dismiss()
         })
+        .onChange(of: selectedID) { _, _ in
+            selectedImageIsZoomed = false
+        }
         .accessibilityIdentifier("chekinana.events.image-viewer")
     }
 }
 
 private struct ChekinanaEventZoomableImage: View {
     let record: EventImage
-    @State private var scale: CGFloat = 1
-    @State private var gestureScale: CGFloat = 1
+    let isActive: Bool
+    let onZoomChanged: (Bool) -> Void
 
     var body: some View {
         Group {
             if let image = ChekinanaEventImageStore.image(for: record.imageRef) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(scale * gestureScale)
-                    .gesture(MagnifyGesture()
-                        .onChanged { value in
-                            gestureScale = min(4 / scale, max(1 / scale, value.magnification))
-                        }
-                        .onEnded { value in
-                            scale = min(4, max(1, scale * value.magnification))
-                            gestureScale = 1
-                        }
-                    )
+                ChekinanaZoomableImageViewport(
+                    imageSize: image.size,
+                    resetID: record.imageRef,
+                    isActive: isActive,
+                    onZoomChanged: onZoomChanged
+                ) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                }
             } else {
                 ContentUnavailableView(
                     ChekinanaProductCopy.text(
@@ -11715,10 +15957,9 @@ private struct ChekinanaEventZoomableImage: View {
                     ),
                     systemImage: "photo.badge.exclamationmark"
                 )
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             }
         }
-        .padding(12)
         .accessibilityIdentifier(
             "chekinana.events.image-viewer.image.\(record.id.uuidString.lowercased())"
         )
@@ -11786,13 +16027,18 @@ struct ChekinanaEventSaveGate: Equatable, Sendable {
 private struct ChekinanaEventEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Query private var eventSchedules: [EventSchedule]
     let event: Event?
 
     @State private var sourceURL = ""
     @State private var name: String
+    @State private var hasDate: Bool
     @State private var date: Date
+    @State private var openTimeDraft: ChekinanaEventTimeDraft
+    @State private var startTimeDraft: ChekinanaEventTimeDraft
     @State private var city: String
     @State private var livehouse: String
+    @State private var parsedAddress = ""
     @State private var price: String
     @State private var weiboURL: String
     @State private var ticketURL: String
@@ -11814,9 +16060,11 @@ private struct ChekinanaEventEditorView: View {
     @State private var imageImportTask: Task<Void, Never>?
     @State private var isImportingImages = false
     @State private var didLoadImages = false
+    @State private var didLoadSchedule = false
     @State private var isLoadingImages = false
     @State private var didCommit = false
     private let draftEventID: UUID
+    private let expectedUpdatedAt: Date?
     @FocusState private var focusedSource: SourceField?
 
     private enum SourceField: Hashable {
@@ -11827,11 +16075,20 @@ private struct ChekinanaEventEditorView: View {
 
     init(event: Event?) {
         self.event = event
-        draftEventID = event?.id ?? UUID()
+        let eventID = event?.id ?? UUID()
+        draftEventID = eventID
+        expectedUpdatedAt = event?.updatedAt
+        _eventSchedules = Query(
+            filter: #Predicate<EventSchedule> { $0.eventID == eventID }
+        )
+        _sourceURL = State(initialValue: event?.weiboURL?.absoluteString ?? "")
         _name = State(initialValue: event?.name ?? "")
+        _hasDate = State(initialValue: event?.date != nil)
         _date = State(initialValue: event?.date.flatMap {
             ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
         } ?? Date())
+        _openTimeDraft = State(initialValue: .init(storedValue: nil))
+        _startTimeDraft = State(initialValue: .init(storedValue: nil))
         _city = State(initialValue: event?.city ?? "")
         _livehouse = State(initialValue: event?.resolvedLivehouse ?? "")
         _price = State(initialValue: event?.price ?? "")
@@ -11844,32 +16101,38 @@ private struct ChekinanaEventEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                if event == nil {
-                    Section(
-                        ChekinanaProductCopy.text(
-                            "events.weibo_import",
-                            "Fill from public Weibo"
-                        )
-                    ) {
-                        ZStack(alignment: .leading) {
+                Section(
+                    ChekinanaProductCopy.text(
+                        "events.weibo_import",
+                        "Fill from public Weibo"
+                    )
+                ) {
+                        if sourceURL.isEmpty {
+                            ChekinanaSystemStringPasteControl(
+                                title: weiboPasteTitle,
+                                accessibilityIdentifier: "chekinana.events.editor.weibo-paste"
+                            ) { pasted in
+                                sourceURL = pasted
+                                focusedSource = .weiboURL
+                            }
+                            .frame(
+                                maxWidth: .infinity,
+                                minHeight: ChekinanaEventEditorLayout.singleLineInputHeight,
+                                maxHeight: ChekinanaEventEditorLayout.singleLineInputHeight
+                            )
+                            .disabled(isExtracting)
+                        } else {
                             TextField("", text: $sourceURL)
-                                .textInputAutocapitalization(.never).keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .keyboardType(.URL)
                                 .focused($focusedSource, equals: .weiboURL)
                                 .disabled(isExtracting)
-                                .accessibilityIdentifier("chekinana.events.editor.weibo-source")
-                            if sourceURL.isEmpty {
-                                Button(
-                                    ChekinanaProductCopy.text(
-                                        "events.paste_weibo",
-                                        "Paste Weibo URL"
-                                    )
-                                ) {
-                                    pasteWeiboURL()
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.blue)
-                                .accessibilityIdentifier("chekinana.events.editor.weibo-paste")
-                            }
+                                .frame(
+                                    height: ChekinanaEventEditorLayout.singleLineInputHeight
+                                )
+                                .accessibilityIdentifier(
+                                    "chekinana.events.editor.weibo-source"
+                                )
                         }
                         Button { startExtraction() } label: {
                             if isExtracting {
@@ -11890,10 +16153,11 @@ private struct ChekinanaEventEditorView: View {
                                 )
                             }
                         }
-                        .frame(minHeight: 44)
+                        .frame(
+                            height: ChekinanaEventEditorLayout.singleLineInputHeight
+                        )
                         .disabled(sourceURL.isEmpty || isExtracting || isImportingImages)
                         .accessibilityIdentifier("chekinana.events.editor.extract")
-                    }
                 }
                 Section(ChekinanaProductCopy.text("events.event", "Event")) {
                     HStack(spacing: 14) {
@@ -11954,12 +16218,31 @@ private struct ChekinanaEventEditorView: View {
                     }
                     TextField(ChekinanaProductCopy.text("events.name", "Name"), text: $name)
                         .accessibilityIdentifier("chekinana.events.editor.name")
-                    DatePicker(
-                        ChekinanaProductCopy.text("common.date", "Date"),
-                        selection: $date,
-                        displayedComponents: .date
+                    Toggle(
+                        ChekinanaProductCopy.text("common.include_date", "Include date"),
+                        isOn: $hasDate
                     )
-                        .accessibilityIdentifier("chekinana.events.editor.date")
+                    .accessibilityIdentifier("chekinana.events.editor.date.enabled")
+                    if hasDate {
+                        ChekinanaExpandableDateWheel(
+                            ChekinanaProductCopy.text("common.date", "Date"),
+                            selection: $date,
+                            accessibilityIdentifier: "chekinana.events.editor.date"
+                        )
+                    }
+                    HStack(alignment: .top, spacing: 10) {
+                        optionalTimeControl(
+                            label: "OPEN",
+                            draft: $openTimeDraft,
+                            identifier: "open-time"
+                        )
+                        Divider()
+                        optionalTimeControl(
+                            label: "START",
+                            draft: $startTimeDraft,
+                            identifier: "start-time"
+                        )
+                    }
                     TextField(ChekinanaProductCopy.text("events.city", "City"), text: $city)
                         .accessibilityIdentifier("chekinana.events.editor.city")
                     TextField(
@@ -12102,7 +16385,10 @@ private struct ChekinanaEventEditorView: View {
             }
         }
         .interactiveDismissDisabled(isSaving)
-        .onAppear { loadExistingImagesIfNeeded() }
+        .onAppear {
+            loadExistingScheduleIfNeeded()
+            loadExistingImagesIfNeeded()
+        }
         .onChange(of: avatarPickerItem) { _, item in
             guard let item else { return }
             avatarImportTask?.cancel()
@@ -12132,6 +16418,50 @@ private struct ChekinanaEventEditorView: View {
             if !didCommit { discardUncommittedImages() }
         }
         .accessibilityIdentifier("chekinana.events.editor")
+    }
+
+    private var weiboPasteTitle: String {
+        ChekinanaProductCopy.text("events.paste_weibo", "Paste Weibo URL")
+    }
+
+    private func optionalTimeControl(
+        label: String,
+        draft: Binding<ChekinanaEventTimeDraft>,
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 2)
+                Toggle("", isOn: draft.isEnabled)
+                    .labelsHidden()
+                    .controlSize(.mini)
+                    .accessibilityLabel(label)
+                    .accessibilityIdentifier(
+                        "chekinana.events.editor.\(identifier).enabled"
+                    )
+            }
+            if draft.wrappedValue.isEnabled {
+                DatePicker(
+                    "",
+                    selection: draft.selection,
+                    displayedComponents: .hourAndMinute
+                )
+                .labelsHidden()
+                .environment(\.locale, Locale(identifier: "en_GB"))
+                .accessibilityLabel(label)
+                .accessibilityIdentifier(
+                    "chekinana.events.editor.\(identifier).picker"
+                )
+            } else {
+                Text(ChekinanaProductCopy.text("common.none", "None"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(height: 30)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
     }
 
     @MainActor
@@ -12170,15 +16500,6 @@ private struct ChekinanaEventEditorView: View {
         }
     }
 
-    private func pasteWeiboURL() {
-        if let pasted = UIPasteboard.general.string?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !pasted.isEmpty {
-            sourceURL = pasted
-        }
-        focusedSource = .weiboURL
-    }
-
     @MainActor
     private func cancelExtraction() {
         extractionGate.invalidate()
@@ -12202,14 +16523,19 @@ private struct ChekinanaEventEditorView: View {
         name = candidate.name
         city = candidate.city
         livehouse = candidate.livehouse
+        parsedAddress = candidate.address
         price = candidate.price
         weiboURL = candidate.weiboURL
         ticketURL = candidate.ticketURL
+        openTimeDraft.replace(with: candidate.openTime)
+        startTimeDraft.replace(with: candidate.startTime)
         parsedAvatarURL = candidate.avatarURL
         if !parsedAvatarURL.isEmpty { clearsAvatar = false }
-        if let parsed = ChekinanaDateOnly.parse(candidate.date),
-           let displayed = ChekinanaDateOnly.displayDate(from: parsed, calendar: .current) {
+        if let displayed = ChekinanaEventDateState.parsedCandidateDate(
+            candidate.date
+        ) {
             date = displayed
+            hasDate = true
         }
     }
 
@@ -12386,6 +16712,15 @@ private struct ChekinanaEventEditorView: View {
     }
 
     @MainActor
+    private func loadExistingScheduleIfNeeded() {
+        guard !didLoadSchedule else { return }
+        didLoadSchedule = true
+        guard event != nil, let schedule = eventSchedules.first else { return }
+        openTimeDraft.replace(with: schedule.openTime)
+        startTimeDraft.replace(with: schedule.startTime)
+    }
+
+    @MainActor
     private func startSave() {
         guard let token = saveGate.begin() else { return }
         saveTask = Task { @MainActor in
@@ -12397,27 +16732,31 @@ private struct ChekinanaEventEditorView: View {
     @MainActor
     private func save(token: UInt64) async {
         guard saveGate.accepts(token, isCancelled: Task.isCancelled) else { return }
-        guard let selectedDate = ChekinanaDateOnly.canonicalDate(
-            from: date,
-            displayedIn: .current
-        ) else {
+        let selectedDate = ChekinanaEventDateState.persistedDate(
+            hasDate: hasDate,
+            selection: date
+        )
+        if hasDate, selectedDate == nil {
             errorMessage = ChekinanaProductCopy.text(
                 "error.read_date",
                 "Unable to read the selected date. Choose it again."
             )
             return
         }
-        let dateText = ChekinanaDateOnly.string(selectedDate)
+        let dateText = selectedDate.map(ChekinanaDateOnly.string) ?? ""
         let fields = ChekinanaEventCandidateFields(
             name: name,
             date: dateText,
             city: city,
             livehouse: livehouse,
+            address: parsedAddress,
             price: price,
             avatarURL: parsedAvatarURL,
             imageUrls: [],
             weiboURL: weiboURL,
             ticketURL: ticketURL,
+            openTime: openTimeDraft.persistedValue(),
+            startTime: startTimeDraft.persistedValue(),
             note: note
         )
         let blockers = ChekinanaEventCandidateValidator.blockers(for: fields).filter {
@@ -12428,7 +16767,7 @@ private struct ChekinanaEventEditorView: View {
             return
         }
         let target = event ?? Event(id: draftEventID, name: name)
-        let previousAvatarRef = target.avatarImageRef
+        let previousAvatarRef = event?.avatarImageRef
         var stagedAvatarRef: String?
         do {
             if let selectedAvatarData {
@@ -12469,22 +16808,6 @@ private struct ChekinanaEventEditorView: View {
             discardUncommittedImages()
             return
         }
-        if event == nil { modelContext.insert(target) }
-        target.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        target.date = selectedDate
-        target.city = city.nonEmpty
-        target.livehouse = livehouse.nonEmpty
-        target.legacyVenue = nil
-        target.price = price.nonEmpty
-        if clearsAvatar {
-            target.avatarImageRef = nil
-        } else if let stagedAvatarRef {
-            target.avatarImageRef = stagedAvatarRef
-        }
-        target.weiboURL = weiboURL.nonEmpty.flatMap(URL.init(string:))
-        target.ticketURL = ticketURL.nonEmpty.flatMap(URL.init(string:))
-        target.note = note
-        target.updatedAt = Date()
         do {
             guard saveGate.accepts(token, isCancelled: Task.isCancelled) else {
                 modelContext.rollback()
@@ -12494,11 +16817,34 @@ private struct ChekinanaEventEditorView: View {
             }
             try ChekinanaEventPersistence.save(
                 target,
+                inserting: event == nil,
+                expectedUpdatedAt: expectedUpdatedAt,
                 images: imageDrafts.map {
                     ChekinanaEventImageValue(id: $0.recordID, imageRef: $0.ref)
                 },
+                schedule: ChekinanaEventScheduleValue(
+                    openTime: fields.openTime,
+                    startTime: fields.startTime
+                ),
                 previousAvatarRef: previousAvatarRef,
-                in: modelContext
+                in: modelContext,
+                apply: { liveEvent in
+                    liveEvent.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    liveEvent.date = selectedDate
+                    liveEvent.city = city.nonEmpty
+                    liveEvent.livehouse = livehouse.nonEmpty
+                    liveEvent.legacyVenue = nil
+                    liveEvent.price = price.nonEmpty
+                    if clearsAvatar {
+                        liveEvent.avatarImageRef = nil
+                    } else if let stagedAvatarRef {
+                        liveEvent.avatarImageRef = stagedAvatarRef
+                    }
+                    liveEvent.weiboURL = weiboURL.nonEmpty.flatMap(URL.init(string:))
+                    liveEvent.ticketURL = ticketURL.nonEmpty.flatMap(URL.init(string:))
+                    liveEvent.note = note
+                    liveEvent.updatedAt = Date()
+                }
             )
             didCommit = true
             cancelExtraction()
@@ -13311,7 +17657,184 @@ private enum ChekinanaGalleryFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum ChekinanaGalleryShotTypeFilter: String, CaseIterable, Identifiable {
+enum ChekinanaGalleryOrder: String, CaseIterable, Identifiable {
+    case dateAscending
+    case dateDescending
+
+    var id: String { rawValue }
+
+    var stateTitle: String {
+        switch self {
+        case .dateAscending:
+            ChekinanaProductCopy.text(
+                "gallery.sort.time.ascending",
+                "Oldest first"
+            )
+        case .dateDescending:
+            ChekinanaProductCopy.text(
+                "gallery.sort.time.descending",
+                "Newest first"
+            )
+        }
+    }
+
+    var next: Self {
+        switch self {
+        case .dateAscending: .dateDescending
+        case .dateDescending: .dateAscending
+        }
+    }
+}
+
+struct ChekinanaGalleryDateRange: Equatable {
+    var start: Date
+    var end: Date
+
+    init(start: Date, end: Date) {
+        let fallback = ChekinanaProductDate.fixtureAwareToday
+        self.start = ChekinanaDateOnly.canonicalized(start) ?? fallback
+        self.end = ChekinanaDateOnly.canonicalized(end) ?? fallback
+        normalize()
+    }
+
+    mutating func setStart(_ value: Date) {
+        start = ChekinanaDateOnly.canonicalized(value) ?? start
+        if start > end { end = start }
+    }
+
+    mutating func setEnd(_ value: Date) {
+        end = ChekinanaDateOnly.canonicalized(value) ?? end
+        if start > end { start = end }
+    }
+
+    func includes(_ date: Date?) -> Bool {
+        guard let day = date.flatMap(ChekinanaDateOnly.canonicalized) else {
+            return false
+        }
+        return day >= start && day <= end
+    }
+
+    private mutating func normalize() {
+        if start > end { end = start }
+    }
+
+    static func defaultRange(earliest: Date?, today: Date) -> Self {
+        let canonicalToday = ChekinanaDateOnly.canonicalized(today) ?? today
+        return .init(start: earliest ?? canonicalToday, end: canonicalToday)
+    }
+}
+
+struct ChekinanaGalleryDateRangeState: Equatable {
+    private(set) var range: ChekinanaGalleryDateRange
+    private(set) var defaultRange: ChekinanaGalleryDateRange
+    private(set) var isActive = false
+    private(set) var hasInitialized = false
+    private(set) var didManuallyEditStart = false
+
+    init(today: Date) {
+        let value = ChekinanaGalleryDateRange.defaultRange(
+            earliest: nil,
+            today: today
+        )
+        range = value
+        defaultRange = value
+    }
+
+    mutating func syncDefaults(earliest: Date?, today: Date) {
+        let updated = ChekinanaGalleryDateRange.defaultRange(
+            earliest: earliest,
+            today: today
+        )
+        defaultRange = updated
+        if !hasInitialized {
+            range = updated
+            hasInitialized = true
+        } else if !didManuallyEditStart {
+            range.setStart(updated.start)
+        }
+    }
+
+    mutating func applyUserRange(
+        _ value: ChekinanaGalleryDateRange,
+        startWasEdited: Bool
+    ) {
+        range = value
+        isActive = true
+        didManuallyEditStart = didManuallyEditStart || startWasEdited
+    }
+
+    mutating func reset() {
+        range = defaultRange
+        isActive = false
+        didManuallyEditStart = false
+    }
+
+    func includes(_ date: Date?) -> Bool {
+        !isActive || range.includes(date)
+    }
+}
+
+enum ChekinanaGalleryOrdering {
+    static func ordered(
+        _ values: [ChekinanaGalleryItem],
+        order: ChekinanaGalleryOrder,
+        sortByIdol: Bool
+    ) -> [ChekinanaGalleryItem] {
+        let ascending = order == .dateAscending
+        guard sortByIdol else {
+            return ChekinanaRecordOrdering.ordered(values, ascending: ascending)
+        }
+        return values.sorted { lhs, rhs in
+            idolComesBefore(lhs, rhs, dateAscending: ascending)
+        }
+    }
+
+    static func primaryIdolID(for item: ChekinanaGalleryItem) -> UUID? {
+        ChekinanaIdolOrdering.ordered(item.idols).first?.id
+    }
+
+    private static func idolComesBefore(
+        _ lhs: ChekinanaGalleryItem,
+        _ rhs: ChekinanaGalleryItem,
+        dateAscending: Bool
+    ) -> Bool {
+        let left = ChekinanaIdolOrdering.ordered(lhs.idols).first
+        let right = ChekinanaIdolOrdering.ordered(rhs.idols).first
+        switch (left, right) {
+        case (nil, nil):
+            return dateOrTie(lhs, rhs, ascending: dateAscending)
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case let (left?, right?):
+            if left.id != right.id {
+                let first = ChekinanaIdolOrdering.ordered([left, right]).first?.id
+                return first == left.id
+            }
+            return dateOrTie(lhs, rhs, ascending: dateAscending)
+        }
+    }
+
+    private static func dateOrTie(
+        _ lhs: ChekinanaGalleryItem,
+        _ rhs: ChekinanaGalleryItem,
+        ascending: Bool
+    ) -> Bool {
+        switch (lhs.date, rhs.date) {
+        case let (left?, right?) where left != right:
+            return ascending ? left < right : left > right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            return ChekinanaRecordOrdering.stableTie(lhs, rhs)
+        }
+    }
+}
+
+enum ChekinanaGalleryShotFilter: String, CaseIterable, Identifiable {
     case all
     case solo
     case twoShot = "two-shot"
@@ -13320,18 +17843,88 @@ enum ChekinanaGalleryShotTypeFilter: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .all: ChekinanaProductCopy.text("gallery.shot_filter.all", "All")
-        case .solo: "solo"
-        case .twoShot: "2-shot"
+        case .all:
+            ChekinanaProductCopy.text("gallery.shot_filter.all", "All")
+        case .solo:
+            ChekinanaProductCopy.text("gallery.shot_filter.solo", "solo")
+        case .twoShot:
+            ChekinanaProductCopy.text("gallery.shot_filter.two_shot", "2-shot")
+        }
+    }
+
+    var next: Self {
+        switch self {
+        case .all: .solo
+        case .solo: .twoShot
+        case .twoShot: .all
         }
     }
 
     func includes(_ userAppears: Bool?) -> Bool {
         switch self {
         case .all: true
-        case .solo: userAppears == false
+        case .solo: userAppears != true
         case .twoShot: userAppears == true
         }
+    }
+}
+
+enum ChekinanaGalleryFilterSlot: String, CaseIterable {
+    case idol
+    case favorite
+    case dateRange
+    case dateOrder
+    case idolOrder
+    case shot
+}
+
+enum ChekinanaGalleryFilterBarPolicy {
+    static let slots = ChekinanaGalleryFilterSlot.allCases
+    static let spacing: CGFloat = 4
+
+    static func slotWidth(availableWidth: CGFloat) -> CGFloat {
+        let gaps = spacing * CGFloat(max(0, slots.count - 1))
+        return max(0, (availableWidth - gaps) / CGFloat(slots.count))
+    }
+}
+
+enum ChekinanaGalleryGridSizePolicy {
+    static let minimumColumnCount = 1
+    static let maximumColumnCount = 10
+    static let defaultColumnCount = 3
+    static let defaultAvatarDiameter: CGFloat = 24
+    static let defaultAvatarBorderLineWidth: CGFloat = 2
+    static let minimumAvatarBorderLineWidth: CGFloat = 0.75
+    static let maximumAvatarBorderLineWidth: CGFloat = 3
+
+    static func columnCount(forSliderValue value: Double) -> Int {
+        min(
+            maximumColumnCount,
+            max(minimumColumnCount, Int(value.rounded()))
+        )
+    }
+
+    static func sliderValue(forColumnCount columnCount: Int) -> Double {
+        Double(self.columnCount(forSliderValue: Double(columnCount)))
+    }
+
+    static func avatarDiameter(forColumnCount columnCount: Int) -> CGFloat {
+        let normalizedColumnCount = self.columnCount(
+            forSliderValue: Double(columnCount)
+        )
+        return defaultAvatarDiameter
+            * CGFloat(defaultColumnCount)
+            / CGFloat(normalizedColumnCount)
+    }
+
+    static func avatarBorderLineWidth(forDiameter diameter: CGFloat) -> CGFloat {
+        min(
+            maximumAvatarBorderLineWidth,
+            max(
+                minimumAvatarBorderLineWidth,
+                defaultAvatarBorderLineWidth * diameter / defaultAvatarDiameter
+            )
+        )
     }
 }
 
@@ -13486,7 +18079,7 @@ enum ChekinanaProductRecordCreationError: LocalizedError, CaseIterable {
         case .indexCollision:
             "One or more requested indices are already used in this Idol/date group."
         case .invalidBatchQuantity:
-            "Quantity must be between 1 and 100."
+            "Quantity is outside the supported range."
         }
     }
 
@@ -13552,6 +18145,57 @@ private struct ChekinanaGalleryVideoTransfer: Transferable {
     }
 }
 
+private struct ChekinanaGalleryGridSizeControl: View {
+    @Binding var columnCount: Int
+
+    private var sliderValue: Binding<Double> {
+        Binding(
+            get: {
+                ChekinanaGalleryGridSizePolicy.sliderValue(
+                    forColumnCount: columnCount
+                )
+            },
+            set: {
+                columnCount = ChekinanaGalleryGridSizePolicy.columnCount(
+                    forSliderValue: $0
+                )
+            }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "photo.fill")
+                .font(.caption)
+                .accessibilityHidden(true)
+            Slider(
+                value: sliderValue,
+                in: Double(ChekinanaGalleryGridSizePolicy.minimumColumnCount)...Double(ChekinanaGalleryGridSizePolicy.maximumColumnCount),
+                step: 1
+            )
+            .accessibilityLabel(ChekinanaProductCopy.text(
+                "gallery.grid_size.label",
+                "Image size"
+            ))
+            .accessibilityValue(ChekinanaProductCopy.format(
+                "gallery.grid_size.columns",
+                "%lld columns",
+                Int64(columnCount)
+            ))
+            .accessibilityHint(ChekinanaProductCopy.text(
+                "gallery.grid_size.hint",
+                "Move toward the large-image icon for fewer columns."
+            ))
+            .accessibilityIdentifier("chekinana.gallery.grid-size")
+            Image(systemName: "square.grid.3x3.fill")
+                .font(.caption2)
+                .accessibilityHidden(true)
+        }
+        .frame(minWidth: 96, idealWidth: 138, maxWidth: 138)
+        .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
+    }
+}
+
 private struct ChekinanaGalleryView: View {
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @Query private var chekis: [Cheki]
@@ -13563,8 +18207,15 @@ private struct ChekinanaGalleryView: View {
     @State private var selectedIdolIDs: Set<UUID> = []
     @State private var isIdolFilterPresented = false
     @State private var favoritesOnly = false
-    @State private var shotTypeFilter = ChekinanaGalleryShotTypeFilter.all
-    @State private var sortsAscending = true
+    @State private var shotFilter = ChekinanaGalleryShotFilter.all
+    @State private var galleryOrder = ChekinanaGalleryOrder.dateAscending
+    @State private var sortByIdol = false
+    @State private var gridColumnCount = ChekinanaGalleryGridSizePolicy
+        .defaultColumnCount
+    @State private var dateRangeState = ChekinanaGalleryDateRangeState(
+        today: ChekinanaProductDate.fixtureAwareToday
+    )
+    @State private var isDateFilterPresented = false
     @State private var selectedItem: ChekinanaGalleryItem?
     @State private var shamePickerItem: PhotosPickerItem?
     @State private var dougaPickerItem: PhotosPickerItem?
@@ -13578,29 +18229,44 @@ private struct ChekinanaGalleryView: View {
     @State private var cleanupGate = ChekinanaGalleryImportOnceGate()
 
     private var allItems: [ChekinanaGalleryItem] {
-        ChekinanaRecordOrdering.ordered(
-            chekis.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.cheki)
+        (chekis.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.cheki)
                 + shames.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.shame)
-                + dougas.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.douga),
-            ascending: sortsAscending
-        ).filter { $0.hasMedia }
+                + dougas.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }.map(ChekinanaGalleryItem.douga))
+            .filter { $0.hasMedia }
     }
 
     private var filteredItems: [ChekinanaGalleryItem] {
-        currentTypeItems.filter { item in
+        ChekinanaGalleryOrdering.ordered(currentTypeItems.filter { item in
             (selectedIdolIDs.isEmpty || item.idols.contains { selectedIdolIDs.contains($0.id) })
                 && (selectedType != .cheki || !favoritesOnly || item.isFavoriteCheki)
-                && (selectedType != .cheki || shotTypeFilter.includes(item.chekiUserAppears))
-        }
+                && (selectedType != .cheki
+                    || shotFilter.includes(item.chekiUserAppears))
+                && dateRangeState.includes(item.date)
+        }, order: galleryOrder, sortByIdol: sortByIdol)
     }
 
     private var currentTypeItems: [ChekinanaGalleryItem] {
         allItems.filter { $0.kind == selectedType }
     }
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4),
-    ]
+    private var filteredChekis: [Cheki] {
+        filteredItems.compactMap { item in
+            guard case .cheki(let cheki) = item else { return nil }
+            return cheki
+        }
+    }
+
+    private var earliestDatedMediaDay: Date? {
+        allItems.compactMap { $0.date.flatMap(ChekinanaDateOnly.canonicalized) }
+            .min()
+    }
+
+    private var columns: [GridItem] {
+        Array(
+            repeating: GridItem(.flexible(), spacing: 4),
+            count: gridColumnCount
+        )
+    }
 
     private var uniqueGalleryIdols: [Idol] {
         var ids = Set<UUID>()
@@ -13615,6 +18281,22 @@ private struct ChekinanaGalleryView: View {
             Group {
                     ScrollView {
                         VStack(spacing: 12) {
+                            HStack(alignment: .center, spacing: 12) {
+                                Text(ChekinanaProductTab.gallery.title)
+                                    .font(.largeTitle.bold())
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                    .layoutPriority(1)
+                                    .accessibilityIdentifier("chekinana.gallery.title")
+                                Spacer(minLength: 8)
+                                ChekinanaGalleryGridSizeControl(
+                                    columnCount: $gridColumnCount
+                                )
+                                .accessibilityIdentifier("chekinana.gallery.grid-controls")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("chekinana.gallery.header")
+
                             Picker("Media type", selection: $selectedType) {
                                 ForEach(ChekinanaRecordKind.allCases) { kind in
                                     Text(kind.title)
@@ -13626,60 +18308,126 @@ private struct ChekinanaGalleryView: View {
                             .zIndex(1)
                             .accessibilityIdentifier("chekinana.gallery.type")
 
-                            if selectedType == .cheki {
-                                HStack {
-                                    Picker(
-                                        ChekinanaProductCopy.text(
-                                            "scan.shot_type",
-                                            "Shot type"
+                            HStack(spacing: ChekinanaGalleryFilterBarPolicy.spacing) {
+                                Button { isIdolFilterPresented = true } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: ChekinanaProductCopy.text(
+                                            "gallery.filter.idols",
+                                            "Idols"
                                         ),
-                                        selection: $shotTypeFilter
-                                    ) {
-                                        ForEach(ChekinanaGalleryShotTypeFilter.allCases) { filter in
-                                            Text(filter.title)
-                                                .tag(filter)
-                                                .accessibilityIdentifier(
-                                                    "chekinana.gallery.shot-type.\(filter.rawValue)"
-                                                )
-                                        }
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .frame(maxWidth: 260)
-                                    .accessibilityIdentifier("chekinana.gallery.shot-type")
-                                    Spacer(minLength: 0)
+                                        subtitle: selectedIdolIDs.isEmpty
+                                            ? nil : selectedIdolIDs.count.formatted(),
+                                        systemImage: selectedIdolIDs.isEmpty
+                                            ? "person.crop.circle" : "person.crop.circle.fill",
+                                        isSelected: !selectedIdolIDs.isEmpty
+                                    )
                                 }
-                            }
-
-                            HStack(spacing: 10) {
-                                Button {
-                                    isIdolFilterPresented = true
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: selectedIdolIDs.isEmpty ? "person.2" : "person.2.fill")
-                                        if !selectedIdolIDs.isEmpty {
-                                            Text(selectedIdolIDs.count.formatted())
-                                        }
-                                    }
-                                    .font(.caption.weight(.semibold))
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(selectedIdolIDs.isEmpty ? "Filter Idols: All" : "Filter Idols: \(selectedIdolIDs.count) selected")
+                                .accessibilityValue(
+                                    selectedIdolIDs.isEmpty
+                                        ? ChekinanaProductCopy.text("common.all", "All")
+                                        : selectedIdolIDs.count.formatted()
+                                )
                                 .accessibilityIdentifier("chekinana.gallery.idol-filter")
-                                if selectedType == .cheki {
-                                    Button { favoritesOnly.toggle() } label: {
-                                        Label("Favorites", systemImage: favoritesOnly ? "star.fill" : "star")
-                                            .font(.caption.weight(.semibold))
+
+                                Button { favoritesOnly.toggle() } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: ChekinanaProductCopy.text(
+                                            "common.favorite",
+                                            "Favorite"
+                                        ),
+                                        systemImage: favoritesOnly ? "star.fill" : "star",
+                                        isSelected: selectedType == .cheki && favoritesOnly,
+                                        isEnabled: selectedType == .cheki
+                                    )
+                                }
+                                .disabled(selectedType != .cheki)
+                                .accessibilityValue(
+                                    favoritesOnly
+                                        ? ChekinanaProductCopy.text("common.selected", "Selected")
+                                        : ChekinanaProductCopy.text("common.not_selected", "Not selected")
+                                )
+                                .accessibilityIdentifier("chekinana.gallery.favorite")
+
+                                Button { isDateFilterPresented = true } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: ChekinanaProductCopy.text(
+                                            "gallery.date_filter",
+                                            "Period"
+                                        ),
+                                        systemImage: "calendar.badge.checkmark",
+                                        isSelected: dateRangeState.isActive
+                                    )
+                                }
+                                .accessibilityIdentifier("chekinana.gallery.date-filter")
+
+                                Button { galleryOrder = galleryOrder.next } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: galleryOrder.stateTitle,
+                                        systemImage: galleryOrder == .dateAscending
+                                            ? "arrow.up" : "arrow.down"
+                                    )
+                                }
+                                .accessibilityLabel(galleryOrder.stateTitle)
+                                .accessibilityValue(galleryOrder.stateTitle)
+                                .accessibilityHint(
+                                    ChekinanaProductCopy.text(
+                                        "gallery.order.cycle_hint",
+                                        "Toggles between oldest and newest first."
+                                    )
+                                )
+                                .accessibilityIdentifier("chekinana.gallery.order")
+
+                                Button { sortByIdol.toggle() } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: ChekinanaProductCopy.text(
+                                            "gallery.sort.idol",
+                                            "Idol order"
+                                        ),
+                                        systemImage: sortByIdol
+                                            ? "person.crop.circle.fill" : "person.crop.circle",
+                                        isSelected: sortByIdol
+                                    )
+                                }
+                                .accessibilityValue(
+                                    sortByIdol
+                                        ? ChekinanaProductCopy.text("common.selected", "Selected")
+                                        : ChekinanaProductCopy.text("common.not_selected", "Not selected")
+                                )
+                                .accessibilityIdentifier("chekinana.gallery.idol-order")
+
+                                Button {
+                                    if selectedType == .cheki {
+                                        shotFilter = shotFilter.next
                                     }
-                                    .tint(favoritesOnly ? .yellow : ChekinanaProductTheme.accent)
-                                    .accessibilityIdentifier("chekinana.gallery.favorite")
+                                } label: {
+                                    ChekinanaGalleryCompactFilterLabel(
+                                        title: selectedType == .cheki
+                                            ? shotFilter.title
+                                            : ChekinanaGalleryShotFilter.all.title,
+                                        systemImage: shotFilter == .twoShot
+                                            ? "person.2" : "person",
+                                        isSelected: selectedType == .cheki
+                                            && shotFilter != .all,
+                                        isEnabled: selectedType == .cheki
+                                    )
                                 }
-                                Spacer()
-                                Button { sortsAscending.toggle() } label: {
-                                    Image(systemName: sortsAscending ? "arrow.up" : "arrow.down")
-                                }
-                                .accessibilityLabel(sortsAscending ? "Oldest first" : "Newest first")
-                                .accessibilityIdentifier("chekinana.gallery.sort")
+                                .disabled(selectedType != .cheki)
+                                .accessibilityValue(
+                                    selectedType == .cheki
+                                        ? shotFilter.title
+                                        : ChekinanaGalleryShotFilter.all.title
+                                )
+                                .accessibilityHint(
+                                    ChekinanaProductCopy.text(
+                                        "gallery.shot_filter.cycle_hint",
+                                        "Cycles through All, solo, and 2-shot."
+                                    )
+                                )
+                                .accessibilityIdentifier("chekinana.gallery.shot-filter")
                             }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 2)
+                            .accessibilityIdentifier("chekinana.gallery.filters")
 
                             if filteredItems.isEmpty {
                                 ChekinanaEmptyState(
@@ -13693,10 +18441,22 @@ private struct ChekinanaGalleryView: View {
                                 LazyVGrid(columns: columns, spacing: 4) {
                                     ForEach(filteredItems) { item in
                                         Button { selectedItem = item } label: {
-                                            ChekinanaGalleryCard(item: item)
+                                            ChekinanaGalleryCard(
+                                                item: item,
+                                                avatarMaximumDiameter:
+                                                    ChekinanaGalleryGridSizePolicy
+                                                        .avatarDiameter(
+                                                            forColumnCount:
+                                                                gridColumnCount
+                                                        )
+                                            )
                                         }
                                         .buttonStyle(.plain)
                                         .contentShape(Rectangle())
+                                        .frame(
+                                            minHeight: ChekinanaAccessibilityMetrics
+                                                .minimumTouchTarget
+                                        )
                                         .accessibilityIdentifier("chekinana.gallery.card.\(item.id)")
                                     }
                                 }
@@ -13708,7 +18468,6 @@ private struct ChekinanaGalleryView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(ChekinanaProductTheme.pageBackground)
-            .navigationTitle(ChekinanaProductTab.gallery.title)
             .toolbar {
                 ChekinanaPageToolbar(pageID: "gallery", openMenu: openMenu)
                 ToolbarItem(placement: .topBarTrailing) {
@@ -13733,7 +18492,10 @@ private struct ChekinanaGalleryView: View {
             .fullScreenCover(item: $selectedItem) { item in
                 switch item {
                 case .cheki(let cheki):
-                    ChekinanaGalleryDetailView(cheki: cheki)
+                    ChekinanaGalleryDetailView(
+                        chekis: filteredChekis,
+                        initialID: cheki.id
+                    )
                 case .shame(let shame):
                     ChekinanaGalleryMediaDetailView(shame: shame)
                 case .douga(let douga):
@@ -13746,6 +18508,10 @@ private struct ChekinanaGalleryView: View {
                     selectedIDs: $selectedIdolIDs
                 )
                 .presentationDetents([.medium, .large])
+            }
+            .sheet(isPresented: $isDateFilterPresented) {
+                ChekinanaGalleryDateFilterView(state: $dateRangeState)
+                    .presentationDetents([.medium])
             }
             .photosPicker(
                 isPresented: $isShamePickerPresented,
@@ -13784,6 +18550,10 @@ private struct ChekinanaGalleryView: View {
             .onChange(of: dougaPickerItem) { _, item in
                 guard let item else { return }
                 beginDougaImport(item)
+            }
+            .onAppear { syncGalleryDateDefaults() }
+            .onChange(of: earliestDatedMediaDay) { _, _ in
+                syncGalleryDateDefaults()
             }
             .onDisappear { importPreparationTask?.cancel() }
             .overlay { if isLoadingImport { ProgressView("Preparing media…")
@@ -13912,6 +18682,153 @@ private struct ChekinanaGalleryView: View {
         importDraft = newDraft
     }
 
+    private func syncGalleryDateDefaults() {
+        dateRangeState.syncDefaults(
+            earliest: earliestDatedMediaDay,
+            today: ChekinanaProductDate.fixtureAwareToday
+        )
+    }
+
+}
+
+private struct ChekinanaGalleryCompactFilterLabel: View {
+    let title: String
+    var subtitle: String? = nil
+    let systemImage: String?
+    var isSelected: Bool = false
+    var isEnabled: Bool = true
+
+    var body: some View {
+        VStack(spacing: 1) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 7.5, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
+        }
+        .foregroundStyle(
+            isSelected ? ChekinanaProductTheme.accent : Color.primary
+        )
+        .opacity(isEnabled ? 1 : 0.38)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget,
+            maxHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget
+        )
+        .background(
+            isSelected
+                ? ChekinanaProductTheme.accent.opacity(0.14)
+                : Color(uiColor: .secondarySystemGroupedBackground)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(
+                isSelected
+                    ? ChekinanaProductTheme.accent.opacity(0.45)
+                    : ChekinanaProductTheme.border,
+                lineWidth: 1
+            )
+        }
+    }
+}
+
+private struct ChekinanaGalleryDateFilterView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var state: ChekinanaGalleryDateRangeState
+    @State private var draft: ChekinanaGalleryDateRange
+    @State private var startWasEdited = false
+    @State private var resetRequested = false
+
+    init(state: Binding<ChekinanaGalleryDateRangeState>) {
+        _state = state
+        _draft = State(initialValue: state.wrappedValue.range)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ChekinanaExpandableDateWheel(
+                        ChekinanaProductCopy.text(
+                            "gallery.date_filter.start",
+                            "Start date"
+                        ),
+                        selection: Binding(
+                            get: { draft.start },
+                            set: { value in
+                                resetRequested = false
+                                startWasEdited = true
+                                draft.setStart(value)
+                            }
+                        ),
+                        accessibilityIdentifier: "chekinana.gallery.date-filter.start"
+                    )
+                    ChekinanaExpandableDateWheel(
+                        ChekinanaProductCopy.text(
+                            "gallery.date_filter.end",
+                            "End date"
+                        ),
+                        selection: Binding(
+                            get: { draft.end },
+                            set: {
+                                resetRequested = false
+                                draft.setEnd($0)
+                            }
+                        ),
+                        accessibilityIdentifier: "chekinana.gallery.date-filter.end"
+                    )
+                }
+                Section {
+                    Button(
+                        ChekinanaProductCopy.text(
+                            "gallery.date_filter.reset",
+                            "Reset date range"
+                        )
+                    ) {
+                        draft = state.defaultRange
+                        startWasEdited = false
+                        resetRequested = true
+                    }
+                    .accessibilityIdentifier("chekinana.gallery.date-filter.reset")
+                }
+            }
+            .chekinanaGroupedPageBackground()
+            .navigationTitle(
+                ChekinanaProductCopy.text("gallery.date_filter", "Date range")
+            )
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(ChekinanaProductCopy.text("common.done", "Done")) {
+                        if resetRequested {
+                            state.reset()
+                        } else {
+                            state.applyUserRange(
+                                draft,
+                                startWasEdited: startWasEdited
+                            )
+                        }
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("chekinana.gallery.date-filter.done")
+                }
+            }
+        }
+    }
 }
 
 private struct ChekinanaGalleryIdolFilterPicker: View {
@@ -13919,14 +18836,13 @@ private struct ChekinanaGalleryIdolFilterPicker: View {
     let idols: [Idol]
     @Binding var selectedIDs: Set<UUID>
 
-    private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 82, maximum: 112), spacing: 12)]
-    }
-
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 18) {
+                LazyVGrid(
+                    columns: ChekinanaIdolAvatarSelectionLayout.columns,
+                    spacing: ChekinanaIdolAvatarSelectionLayout.verticalSpacing
+                ) {
                     ForEach(ChekinanaIdolOrdering.ordered(idols)) { idol in
                         idolOption(idol)
                     }
@@ -13934,7 +18850,9 @@ private struct ChekinanaGalleryIdolFilterPicker: View {
                 .padding(16)
             }
             .background(ChekinanaProductTheme.pageBackground)
-            .navigationTitle("Idols")
+            .navigationTitle(
+                ChekinanaProductCopy.text("common.idols", "Idols")
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -13978,16 +18896,25 @@ private struct ChekinanaGalleryIdolFilterPicker: View {
 private struct ChekinanaGalleryCard: View {
     let item: ChekinanaGalleryItem
     let showsIdolAvatars: Bool
+    let avatarMaximumDiameter: CGFloat
     @State private var image: ChekinanaRenderedImage?
 
-    init(item: ChekinanaGalleryItem, showsIdolAvatars: Bool = true) {
+    init(
+        item: ChekinanaGalleryItem,
+        showsIdolAvatars: Bool = true,
+        avatarMaximumDiameter: CGFloat =
+            ChekinanaGalleryGridSizePolicy.defaultAvatarDiameter
+    ) {
         self.item = item
         self.showsIdolAvatars = showsIdolAvatars
+        self.avatarMaximumDiameter = avatarMaximumDiameter
     }
 
     init(cheki: Cheki) {
         item = .cheki(cheki)
         showsIdolAvatars = true
+        avatarMaximumDiameter =
+            ChekinanaGalleryGridSizePolicy.defaultAvatarDiameter
     }
 
     private var imageReference: String? {
@@ -14013,7 +18940,10 @@ private struct ChekinanaGalleryCard: View {
             .clipped()
             .overlay(alignment: .bottomLeading) {
                 if showsIdolAvatars, !item.idols.isEmpty {
-                    ChekinanaGalleryOverlayAvatars(idols: item.idols)
+                    ChekinanaGalleryOverlayAvatars(
+                        idols: item.idols,
+                        maximumDiameter: avatarMaximumDiameter
+                    )
                         .padding(6)
                 }
             }
@@ -14031,15 +18961,22 @@ private struct ChekinanaGalleryCard: View {
 
 private struct ChekinanaGalleryOverlayAvatars: View {
     let idols: [Idol]
+    let maximumDiameter: CGFloat
     var body: some View {
         GeometryReader { proxy in
             let layout = ChekinanaGalleryAvatarLayout.make(
                 availableWidth: proxy.size.width,
-                count: idols.count
+                count: idols.count,
+                maximumDiameter: maximumDiameter
             )
             ZStack(alignment: .bottomLeading) {
                 ForEach(Array(idols.enumerated()), id: \.element.id) { index, idol in
-                    ChekinanaIdolAvatar(idol: idol, size: layout.diameter)
+                    ChekinanaIdolAvatar(
+                        idol: idol,
+                        size: layout.diameter,
+                        borderLineWidth: ChekinanaGalleryGridSizePolicy
+                            .avatarBorderLineWidth(forDiameter: layout.diameter)
+                    )
                         .offset(x: layout.x(for: index))
                 }
             }
@@ -14057,10 +18994,15 @@ struct ChekinanaGalleryAvatarLayout: Equatable {
     let diameter: CGFloat
     let step: CGFloat
     let count: Int
-    static func make(availableWidth: CGFloat, count: Int) -> Self {
+    static func make(
+        availableWidth: CGFloat,
+        count: Int,
+        maximumDiameter: CGFloat =
+            ChekinanaGalleryGridSizePolicy.defaultAvatarDiameter
+    ) -> Self {
         let n = max(count, 1)
         let width = max(availableWidth, 1)
-        let diameter = min(24, width)
+        let diameter = min(max(maximumDiameter, 1), width)
         let step = n == 1 ? 0 : max(0, min(diameter, (width - diameter) / CGFloat(n - 1)))
         return .init(diameter: diameter, step: step, count: n)
     }
@@ -14107,6 +19049,40 @@ private struct ChekinanaIdolAvatarRow: View {
     }
 }
 
+private struct ChekinanaIdolSelectionSummaryButton: View {
+    let idols: [Idol]
+    let identifier: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ChekinanaIdolAvatarRow(
+                    idols: idols,
+                    size: 38,
+                    showsNames: true
+                )
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            idols.isEmpty
+                ? ChekinanaProductCopy.text("common.unassigned", "Unassigned")
+                : idols.map(\.name).joined(separator: ", ")
+        )
+        .accessibilityHint(
+            ChekinanaProductCopy.text("common.select_idols", "Select Idols")
+        )
+        .accessibilityIdentifier(identifier)
+    }
+}
+
 enum ChekinanaGalleryDeleteDismissPolicy {
     static func canDismiss(
         pendingConfirmationCode: String?,
@@ -14116,7 +19092,281 @@ enum ChekinanaGalleryDeleteDismissPolicy {
     }
 }
 
+enum ChekinanaChekiViewerRoutingPolicy {
+    static func initialID(requested: UUID?, available: [UUID]) -> UUID? {
+        guard !available.isEmpty else { return nil }
+        if let requested, available.contains(requested) { return requested }
+        return available.first
+    }
+}
+
+enum ChekinanaChekiViewerAppearance: Equatable {
+    case standard
+    case calendar
+
+    var backgroundColor: Color {
+        ChekinanaProductTheme.pageBackground
+    }
+
+    var foregroundColor: Color {
+        .primary
+    }
+
+    var controlBackgroundColor: Color {
+        Color(uiColor: .secondarySystemGroupedBackground)
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        nil
+    }
+}
+
 private struct ChekinanaGalleryDetailView: View {
+    let chekis: [Cheki]
+    let initialID: UUID?
+    let onClose: (() -> Void)?
+
+    init(cheki: Cheki, onClose: (() -> Void)? = nil) {
+        chekis = [cheki]
+        initialID = cheki.id
+        self.onClose = onClose
+    }
+
+    init(
+        chekis: [Cheki],
+        initialID: UUID,
+        onClose: (() -> Void)? = nil
+    ) {
+        self.chekis = chekis
+        self.initialID = initialID
+        self.onClose = onClose
+    }
+
+    var body: some View {
+        ChekinanaChekiImageViewer(
+            chekis: chekis,
+            initialID: initialID,
+            onClose: onClose
+        )
+    }
+}
+
+private struct ChekinanaChekiImageViewer: View {
+    @Environment(\.dismiss) private var dismiss
+    let chekis: [Cheki]
+    let initialID: UUID?
+    let onClose: (() -> Void)?
+    let appearance: ChekinanaChekiViewerAppearance
+    let title: String?
+    @State private var visibleID: UUID?
+    @State private var editingCheki: Cheki?
+    @State private var visibleImageIsZoomed = false
+
+    init(
+        chekis: [Cheki],
+        initialID: UUID? = nil,
+        onClose: (() -> Void)? = nil,
+        appearance: ChekinanaChekiViewerAppearance = .standard,
+        title: String? = nil
+    ) {
+        let media = chekis.filter { $0.imageRef?.nonEmpty != nil }
+        self.chekis = media
+        self.initialID = initialID
+        self.onClose = onClose
+        self.appearance = appearance
+        self.title = title
+        _visibleID = State(initialValue: ChekinanaChekiViewerRoutingPolicy.initialID(
+            requested: initialID,
+            available: media.map(\.id)
+        ))
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topTrailing) {
+                appearance.backgroundColor.ignoresSafeArea()
+                if chekis.isEmpty {
+                    Image(systemName: "photo.slash")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView(.horizontal) {
+                        LazyHStack(spacing: 0) {
+                            ForEach(chekis) { cheki in
+                                ChekinanaChekiViewerPage(
+                                    cheki: cheki,
+                                    isActive: visibleID == cheki.id,
+                                    onZoomChanged: { isZoomed in
+                                        guard visibleID == cheki.id else { return }
+                                        visibleImageIsZoomed = isZoomed
+                                    },
+                                    onTap: { editingCheki = cheki },
+                                    appearance: appearance
+                                )
+                                    .frame(
+                                        width: geometry.size.width,
+                                        height: geometry.size.height
+                                    )
+                                    .contentShape(Rectangle())
+                                .id(cheki.id)
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction { editingCheki = cheki }
+                                .accessibilityHint(
+                                    ChekinanaProductCopy.text(
+                                        "gallery.viewer.edit_hint",
+                                        "Tap to edit this Cheki"
+                                    )
+                                )
+                                .accessibilityIdentifier(
+                                    "chekinana.cheki.viewer.page.\(cheki.id.uuidString.lowercased())"
+                                )
+                            }
+                        }
+                        .scrollTargetLayout()
+                    }
+                    .scrollIndicators(.hidden)
+                    .scrollTargetBehavior(.paging)
+                    .scrollPosition(id: $visibleID)
+                    .scrollDisabled(visibleImageIsZoomed)
+                }
+                ZStack(alignment: .top) {
+                    HStack(alignment: .top) {
+                        if let visibleCheki {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ChekinanaIdolAvatarRow(
+                                    idols: visibleCheki.idols,
+                                    size: 34,
+                                    showsNames: true
+                                )
+                                Text(
+                                    ChekinanaProductDate.displayString(
+                                        visibleCheki.date
+                                    )
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button(action: close) {
+                            Image(systemName: "xmark")
+                                .font(.headline)
+                                .foregroundStyle(appearance.foregroundColor)
+                                .frame(width: 44, height: 44)
+                                .background(appearance.controlBackgroundColor)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(
+                            ChekinanaProductCopy.text("common.close", "Close")
+                        )
+                        .accessibilityIdentifier("chekinana.cheki.viewer.close")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+
+                    VStack(spacing: 3) {
+                        if appearance == .calendar,
+                           let title = title?.nonEmpty {
+                            Text(title)
+                                .font(.headline)
+                                .lineLimit(1)
+                        }
+                        if let pageNumber = visiblePageNumber,
+                           chekis.count > 1 {
+                            Text("\(pageNumber)/\(chekis.count)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 140)
+                    .padding(.top, 16)
+                }
+                .foregroundStyle(appearance.foregroundColor)
+                .accessibilityIdentifier("chekinana.cheki-viewer.header")
+            }
+        }
+        .preferredColorScheme(appearance.preferredColorScheme)
+        .toolbar(.hidden, for: .navigationBar)
+        .sheet(item: $editingCheki) { cheki in
+            ChekinanaChekiEditorView(
+                cheki: cheki,
+                allowsDelete: true,
+                onDelete: close
+            )
+        }
+        .onChange(of: chekis.map(\.id)) { _, ids in
+            visibleID = ChekinanaChekiViewerRoutingPolicy.initialID(
+                requested: visibleID ?? initialID,
+                available: ids
+            )
+            if ids.isEmpty { close() }
+        }
+        .onChange(of: visibleID) { _, _ in
+            visibleImageIsZoomed = false
+        }
+        .chekinanaScreenMarker("chekinana.cheki.viewer")
+    }
+
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
+    private var visiblePageNumber: Int? {
+        guard let visibleID,
+              let index = chekis.firstIndex(where: { $0.id == visibleID }) else {
+            return nil
+        }
+        return index + 1
+    }
+
+    private var visibleCheki: Cheki? {
+        guard let visibleID else { return nil }
+        return chekis.first { $0.id == visibleID }
+    }
+}
+
+private struct ChekinanaChekiViewerPage: View {
+    let cheki: Cheki
+    let isActive: Bool
+    let onZoomChanged: (Bool) -> Void
+    let onTap: () -> Void
+    let appearance: ChekinanaChekiViewerAppearance
+    @State private var image: ChekinanaRenderedImage?
+
+    var body: some View {
+        ZStack {
+            appearance.backgroundColor
+            if let image {
+                ChekinanaZoomableImageViewport(
+                    imageSize: CGSize(
+                        width: image.cgImage.width,
+                        height: image.cgImage.height
+                    ),
+                    resetID: cheki.imageRef ?? cheki.id.uuidString,
+                    isActive: isActive,
+                    allowsDoubleTap: false,
+                    onZoomChanged: onZoomChanged,
+                    onSingleTap: onTap
+                ) {
+                    Image(decorative: image.cgImage, scale: 1)
+                        .resizable()
+                        .scaledToFit()
+                }
+            } else {
+                ProgressView().tint(appearance.foregroundColor)
+            }
+        }
+        .task(id: cheki.imageRef) {
+            image = await ChekinanaImageWorker.previewImage(
+                fromImageRef: cheki.imageRef ?? "",
+                maxDimension: 3_200
+            )
+        }
+    }
+}
+
+private struct ChekinanaLegacyGalleryDetailView: View {
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -14181,10 +19431,6 @@ private struct ChekinanaGalleryDetailView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(12)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .padding(.horizontal, 12)
 
                 if let note = cheki.note.nonEmpty {
                     Text(note)
@@ -14396,6 +19642,7 @@ private struct ChekinanaGalleryEditableMediaSnapshot {
     let idolIDs: Set<UUID>
     let date: Date?
     let note: String
+    let mediaReference: String?
 
     init(_ item: ChekinanaGalleryEditableMedia) {
         id = item.id
@@ -14404,6 +19651,7 @@ private struct ChekinanaGalleryEditableMediaSnapshot {
         idolIDs = Set(item.idols.map(\.id))
         date = item.date
         note = item.note
+        mediaReference = item.mediaReference
     }
 }
 
@@ -14415,7 +19663,6 @@ private struct ChekinanaGalleryMediaDetailView: View {
     @State private var player: AVPlayer?
     @State private var isEditing = false
     @State private var message: String?
-    @State private var isDeleting = false
     @State private var pendingRestore: [(original: URL, quarantine: URL)] = []
 
     init(shame: Shame) {
@@ -14432,7 +19679,6 @@ private struct ChekinanaGalleryMediaDetailView: View {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(item.typeName).font(.headline)
                         ChekinanaIdolAvatarRow(
                             idols: item.idols,
                             size: 34,
@@ -14451,7 +19697,9 @@ private struct ChekinanaGalleryMediaDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!pendingRestore.isEmpty)
-                    .accessibilityLabel("Close \(item.typeName) detail")
+                    .accessibilityLabel(
+                        ChekinanaProductCopy.text("common.close", "Close")
+                    )
                     .accessibilityIdentifier("chekinana.gallery.media.detail.close")
                 }
                 .padding(.horizontal, 16)
@@ -14461,15 +19709,27 @@ private struct ChekinanaGalleryMediaDetailView: View {
                     switch item {
                     case .shame:
                         if let image {
-                            Image(decorative: image.cgImage, scale: 1)
-                                .resizable()
-                                .scaledToFit()
+                            ChekinanaZoomableImageViewport(
+                                imageSize: CGSize(
+                                    width: image.cgImage.width,
+                                    height: image.cgImage.height
+                                ),
+                                resetID: item.id,
+                                onSingleTap: { isEditing = true }
+                            ) {
+                                Image(decorative: image.cgImage, scale: 1)
+                                    .resizable()
+                                    .scaledToFit()
+                            }
                         } else {
                             ProgressView()
                         }
                     case .douga:
                         if let player {
-                            VideoPlayer(player: player)
+                            ChekinanaEditableVideoPlayer(
+                                player: player,
+                                onSingleTap: { isEditing = true }
+                            )
                                 .onDisappear { player.pause() }
                         } else {
                             ProgressView()
@@ -14477,10 +19737,17 @@ private struct ChekinanaGalleryMediaDetailView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(12)
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .padding(.horizontal, 12)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { isEditing = true }
+                .accessibilityHint(
+                    ChekinanaProductCopy.text(
+                        "gallery.viewer.edit_hint",
+                        "Tap to edit this item"
+                    )
+                )
+                .accessibilityIdentifier(
+                    "chekinana.gallery.media.detail.media.\(item.id.uuidString.lowercased())"
+                )
 
                 VStack(alignment: .leading, spacing: 5) {
                     if let note = item.note.nonEmpty {
@@ -14495,12 +19762,20 @@ private struct ChekinanaGalleryMediaDetailView: View {
                 if !pendingRestore.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(
-                            "Media recovery is required before this item can be used or closed.",
+                            ChekinanaProductCopy.text(
+                                "gallery.media.recovery_required",
+                                "Media recovery is required before this item can be used or closed."
+                            ),
                             systemImage: "exclamationmark.triangle.fill"
                         )
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
-                        Button("Retry recovery") { retryRecovery() }
+                        Button(
+                            ChekinanaProductCopy.text(
+                                "common.retry_recovery",
+                                "Retry recovery"
+                            )
+                        ) { retryRecovery() }
                             .buttonStyle(.borderedProminent)
                             .accessibilityIdentifier("chekinana.gallery.media.retry-recovery")
                     }
@@ -14510,34 +19785,8 @@ private struct ChekinanaGalleryMediaDetailView: View {
                     .accessibilityIdentifier("chekinana.gallery.media.recovery-required")
                 }
 
-                HStack(spacing: 12) {
-                    Button { isEditing = true } label: {
-                        Label("Edit", systemImage: "pencil")
-                    }
-                    .accessibilityIdentifier("chekinana.gallery.media.detail.edit")
-                    .disabled(!pendingRestore.isEmpty)
-                    Button { exportMedia() } label: {
-                        Label("Export", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(!pendingRestore.isEmpty)
-                    Spacer()
-                    Button(role: .destructive) {
-                        Task { await deleteMedia() }
-                    } label: {
-                        if isDeleting {
-                            ProgressView()
-                        } else {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                    .disabled(isDeleting || !pendingRestore.isEmpty)
-                }
-                .buttonStyle(.bordered)
-                .tint(ChekinanaProductTheme.accent)
-                .padding(16)
             }
         }
-        .preferredColorScheme(.light)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chekinana.gallery.media.detail.\(item.mediaKind.rawValue)")
         .toolbar(.hidden, for: .navigationBar)
@@ -14553,89 +19802,14 @@ private struct ChekinanaGalleryMediaDetailView: View {
         }
         .sheet(isPresented: $isEditing) {
             ChekinanaGalleryMetadataEditor(
-                item: ChekinanaGalleryEditableMediaSnapshot(item)
+                item: ChekinanaGalleryEditableMediaSnapshot(item),
+                onDeleted: { dismiss() }
             )
         }
         .alert(item.typeName, isPresented: Binding(
             get: { message != nil },
             set: { if !$0 { message = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(message ?? "") }
-    }
-
-    private func exportMedia() {
-        guard let url = item.managedURL else {
-            message = ChekinanaGalleryMediaStoreError.missingManagedFile.localizedDescription
-            return
-        }
-        Task {
-            do {
-                switch item {
-                case .shame:
-                    try await ChekinanaProductPhotoSaver.saveImage(at: url)
-                case .douga:
-                    try await ChekinanaProductPhotoSaver.saveVideo(at: url)
-                }
-                message = "Saved \(item.typeName) to Photos."
-            } catch {
-                message = error.localizedDescription
-            }
-        }
-    }
-
-    @MainActor
-    private func deleteMedia() async {
-        guard !isDeleting, pendingRestore.isEmpty else { return }
-        isDeleting = true
-        defer { isDeleting = false }
-        let staged: [(original: URL, quarantine: URL)]
-        do {
-            switch item {
-            case .shame(let value):
-                staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
-                    kind: .shame,
-                    id: value.id,
-                    reference: value.imageRef
-                )
-                modelContext.delete(value)
-            case .douga(let value):
-                staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
-                    kind: .douga,
-                    id: value.id,
-                    reference: value.videoRef
-                )
-                modelContext.delete(value)
-            }
-            do {
-                try modelContext.save()
-            } catch let databaseError {
-                modelContext.rollback()
-                ChekinanaGalleryMediaStore.recordRestoreRecovery(staged)
-                do {
-                    try ChekinanaGalleryMediaStore.restoreStagedFiles(staged)
-                } catch let recoveryError {
-                    pendingRestore = staged
-                    image = nil
-                    player?.pause()
-                    player = nil
-                    message = "The database delete failed and the managed media could not be restored. Retry recovery before closing: \(recoveryError.localizedDescription)"
-                    return
-                }
-                ChekinanaGalleryMediaStore.removeRestoreRecovery(staged)
-                throw databaseError
-            }
-            ChekinanaGalleryMediaStore.recordCommittedDeletion(staged)
-            do {
-                try ChekinanaGalleryMediaStore.finalizeStagedDeletion(staged)
-            } catch {
-                // The model is already deleted. Keep the committed quarantine
-                // queued for launch/clear cleanup and close this stale detail.
-                dismiss()
-                return
-            }
-            dismiss()
-        } catch {
-            message = error.localizedDescription
-        }
     }
 
     @MainActor
@@ -14645,10 +19819,17 @@ private struct ChekinanaGalleryMediaDetailView: View {
             try ChekinanaGalleryMediaStore.restoreStagedFiles(pendingRestore)
             ChekinanaGalleryMediaStore.removeRestoreRecovery(pendingRestore)
             pendingRestore = []
-            message = "Managed media recovery completed."
+            message = ChekinanaProductCopy.text(
+                "gallery.media.recovery_complete",
+                "Media recovery completed."
+            )
             Task { await loadMedia() }
         } catch {
-            message = "Recovery is still required: \(error.localizedDescription)"
+            message = ChekinanaProductCopy.format(
+                "gallery.media.error.restore_required",
+                "The delete failed and the media could not be restored. Retry recovery before closing: %@",
+                error.localizedDescription
+            )
         }
     }
 
@@ -14671,6 +19852,8 @@ private struct ChekinanaGalleryImportEditor: View {
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Idol.name) private var idols: [Idol]
+    @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let draft: ChekinanaGalleryImportDraft
     let onSaved: () -> Void
@@ -14679,6 +19862,7 @@ private struct ChekinanaGalleryImportEditor: View {
     @State private var idolIDs = Set<UUID>()
     @State private var hasDate = false
     @State private var date = Date()
+    @State private var eventID: UUID?
     @State private var note = ""
     @State private var isIdolSelectionPresented = false
     @State private var isSaving = false
@@ -14720,20 +19904,29 @@ private struct ChekinanaGalleryImportEditor: View {
                     }
                     .frame(maxWidth: .infinity, minHeight: 180)
                 }
-                Section("Idols") {
-                    ChekinanaIdolAvatarRow(
+                Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
+                    ChekinanaIdolSelectionSummaryButton(
                         idols: visibleIdols.filter { idolIDs.contains($0.id) },
-                        size: 38,
-                        showsNames: true
-                    )
-                    Button("Choose Idols") { isIdolSelectionPresented = true }
-                        .accessibilityIdentifier("chekinana.gallery.import.idols")
+                        identifier: "chekinana.gallery.import.idols"
+                    ) {
+                        isIdolSelectionPresented = true
+                    }
                 }
                 Section("Metadata") {
                     Toggle("Include date", isOn: $hasDate)
                     if hasDate {
-                        DatePicker("Date", selection: $date, displayedComponents: .date)
+                        ChekinanaExpandableDateWheel(
+                            "Date",
+                            selection: $date,
+                            accessibilityIdentifier: "chekinana.gallery.import.date"
+                        )
                     }
+                    ChekinanaChekiEventSelectionField(
+                        eventID: $eventID,
+                        recordDate: draftCanonicalDate,
+                        events: events,
+                        schedules: eventSchedules
+                    )
                     TextField("Note", text: $note, axis: .vertical)
                 }
                 if let message {
@@ -14790,10 +19983,25 @@ private struct ChekinanaGalleryImportEditor: View {
             ) else { return }
             finish(saved: false)
         }
+        .onChange(of: hasDate) { _, _ in clearInvalidEventSelection() }
+        .onChange(of: date) { _, _ in clearInvalidEventSelection() }
     }
 
     private var visibleIdols: [Idol] {
         ChekinanaVisibilityPolicy.visibleIdols(idols, hiddenIDs: hiddenIdols.hiddenIDs)
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    private func clearInvalidEventSelection() {
+        eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
     }
 
     @MainActor
@@ -14838,6 +20046,13 @@ private struct ChekinanaGalleryImportEditor: View {
                         throw ChekinanaProductRecordCreationError.modelContextMismatch
                     }
                     shame.idols = selectedIdols
+                    try ChekinanaMediaEventLinkStore.set(
+                        mediaID: id,
+                        kind: .shame,
+                        eventID: eventID,
+                        in: modelContext,
+                        saveContext: { _ in }
+                    )
                     try modelContext.save()
                 } catch {
                     modelContext.rollback()
@@ -14880,6 +20095,13 @@ private struct ChekinanaGalleryImportEditor: View {
                         throw ChekinanaProductRecordCreationError.modelContextMismatch
                     }
                     douga.idols = selectedIdols
+                    try ChekinanaMediaEventLinkStore.set(
+                        mediaID: id,
+                        kind: .douga,
+                        eventID: eventID,
+                        in: modelContext,
+                        saveContext: { _ in }
+                    )
                     try modelContext.save()
                 } catch {
                     modelContext.rollback()
@@ -14926,55 +20148,113 @@ private struct ChekinanaGalleryMetadataEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Idol.name) private var idols: [Idol]
+    @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var mediaEventLinks: [MediaEventLink]
+    @Query private var mediaShotTypes: [MediaShotType]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let item: ChekinanaGalleryEditableMediaSnapshot
+    var onDeleted: (() -> Void)? = nil
 
     @State private var idolIDs: Set<UUID>
     @State private var hasDate: Bool
     @State private var date: Date
+    @State private var eventID: UUID?
+    @State private var userAppears: Bool
     @State private var note: String
     @State private var message: String?
     @State private var isIdolSelectionPresented = false
+    @State private var didLoadMetadata = false
+    @State private var isDeleteConfirmationPresented = false
+    @State private var isDeleting = false
+    @State private var pendingRestore: [(original: URL, quarantine: URL)] = []
 
-    init(item: ChekinanaGalleryEditableMediaSnapshot) {
+    init(
+        item: ChekinanaGalleryEditableMediaSnapshot,
+        onDeleted: (() -> Void)? = nil
+    ) {
         self.item = item
+        self.onDeleted = onDeleted
         _idolIDs = State(initialValue: item.idolIDs)
         _hasDate = State(initialValue: item.date != nil)
         _date = State(initialValue: item.date.flatMap {
             ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
         } ?? Date())
+        _eventID = State(initialValue: nil)
+        _userAppears = State(initialValue: false)
         _note = State(initialValue: item.note)
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Idols") {
-                    ChekinanaIdolAvatarRow(
-                        idols: visibleIdols.filter { idolIDs.contains($0.id) },
-                        size: 38,
-                        showsNames: true
-                    )
-                    Button("Change Idols") { isIdolSelectionPresented = true }
-                        .accessibilityIdentifier("chekinana.gallery.media.editor.idols")
-                }
-                Section("Metadata") {
-                    Toggle("Include date", isOn: $hasDate)
-                    if hasDate {
-                        DatePicker("Date", selection: $date, displayedComponents: .date)
+                Section {
+                    Button(action: exportMedia) {
+                        Text(
+                            ChekinanaProductCopy.text(
+                                "gallery.save_to_photos",
+                                "Save to Photos"
+                            )
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    TextField("Note", text: $note, axis: .vertical)
+                    .disabled(!pendingRestore.isEmpty)
+                    .accessibilityIdentifier("chekinana.gallery.media.editor.export")
                 }
+                ChekinanaMediaMetadataEditorFields(
+                    visibleIdols: visibleIdols,
+                    events: events,
+                    schedules: eventSchedules,
+                    identifierPrefix: "chekinana.gallery.media.editor",
+                    chooseIdols: { isIdolSelectionPresented = true },
+                    idolIDs: $idolIDs,
+                    hasDate: $hasDate,
+                    date: $date,
+                    eventID: $eventID,
+                    userAppears: $userAppears,
+                    note: $note
+                )
                 if let message { Section { Text(message).foregroundStyle(.red) } }
+                Section {
+                    Button(
+                        pendingRestore.isEmpty
+                            ? ChekinanaProductCopy.text("common.delete", "Delete")
+                            : ChekinanaProductCopy.text(
+                                "common.retry_recovery",
+                                "Retry recovery"
+                            ),
+                        role: .destructive
+                    ) {
+                        if pendingRestore.isEmpty {
+                            isDeleteConfirmationPresented = true
+                        } else {
+                            retryRecovery()
+                        }
+                    }
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .disabled(isDeleting)
+                    .accessibilityIdentifier("chekinana.gallery.media.editor.delete")
+                }
             }
-            .navigationTitle("Edit \(item.typeName)")
+            .navigationTitle(
+                ChekinanaProductCopy.format(
+                    "calendar.edit_record",
+                    "Edit %@",
+                    item.typeName
+                )
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                    .disabled(!pendingRestore.isEmpty || isDeleting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save)
+                    Button(ChekinanaProductCopy.text("common.save", "Save"), action: save)
+                        .disabled(!pendingRestore.isEmpty || isDeleting)
                         .accessibilityIdentifier("chekinana.gallery.media.editor.save")
                 }
             }
@@ -14985,10 +20265,70 @@ private struct ChekinanaGalleryMetadataEditor: View {
                 selectedIDs: $idolIDs
             )
         }
+        .task(id: item.id) {
+            guard !didLoadMetadata else { return }
+            didLoadMetadata = true
+            pendingRestore = ChekinanaGalleryMediaStore.restoreRecoveryFiles(
+                kind: item.kind,
+                id: item.id,
+                reference: item.mediaReference
+            )
+            eventID = ChekinanaMediaEventLinkStore.eventID(
+                mediaID: item.id,
+                kind: mediaEventKind,
+                links: mediaEventLinks
+            )
+            userAppears = ChekinanaMediaShotTypeStore.userAppears(
+                mediaID: item.id,
+                kind: mediaEventKind,
+                values: mediaShotTypes
+            )
+        }
+        .onChange(of: hasDate) { _, _ in clearInvalidEventSelection() }
+        .onChange(of: date) { _, _ in clearInvalidEventSelection() }
+        .interactiveDismissDisabled(!pendingRestore.isEmpty || isDeleting)
+        .confirmationDialog(
+            ChekinanaProductCopy.format(
+                "gallery.media.delete.confirm",
+                "Delete this %@?",
+                item.typeName
+            ),
+            isPresented: $isDeleteConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(
+                ChekinanaProductCopy.text("common.delete", "Delete"),
+                role: .destructive
+            ) { Task { await deleteMedia() } }
+            Button(
+                ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                role: .cancel
+            ) {}
+        }
     }
 
     private var visibleIdols: [Idol] {
         ChekinanaVisibilityPolicy.visibleIdols(idols, hiddenIDs: hiddenIdols.hiddenIDs)
+    }
+
+    private var mediaEventKind: ChekinanaMediaEventKind {
+        switch item.kind {
+        case .shame: .shame
+        case .douga: .douga
+        }
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    private func clearInvalidEventSelection() {
+        eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
     }
 
     private func save() {
@@ -15022,6 +20362,20 @@ private struct ChekinanaGalleryMetadataEditor: View {
                 value.date = normalizedDate
                 value.note = note
             }
+            try ChekinanaMediaShotTypeStore.set(
+                mediaID: item.id,
+                kind: mediaEventKind,
+                userAppears: userAppears,
+                in: modelContext,
+                saveContext: { _ in }
+            )
+            try ChekinanaMediaEventLinkStore.set(
+                mediaID: item.id,
+                kind: mediaEventKind,
+                eventID: eventID,
+                in: modelContext,
+                saveContext: { _ in }
+            )
             try modelContext.save()
             dismiss()
         } catch {
@@ -15029,6 +20383,127 @@ private struct ChekinanaGalleryMetadataEditor: View {
             message = error.localizedDescription
         }
     }
+
+    private var managedURL: URL? {
+        ChekinanaGalleryMediaStore.managedURL(
+            for: item.mediaReference,
+            id: item.id,
+            kind: item.kind
+        )
+    }
+
+    private func exportMedia() {
+        guard let managedURL else {
+            message = ChekinanaGalleryMediaStoreError.missingManagedFile.localizedDescription
+            return
+        }
+        Task {
+            do {
+                switch item.kind {
+                case .shame:
+                    try await ChekinanaProductPhotoSaver.saveImage(at: managedURL)
+                case .douga:
+                    try await ChekinanaProductPhotoSaver.saveVideo(at: managedURL)
+                }
+                message = ChekinanaProductCopy.text(
+                    "gallery.media.saved_to_photos",
+                    "Saved to Photos."
+                )
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func deleteMedia() async {
+        guard !isDeleting, pendingRestore.isEmpty else { return }
+        isDeleting = true
+        defer { isDeleting = false }
+        let staged: [(original: URL, quarantine: URL)]
+        do {
+            staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+                kind: item.kind,
+                id: item.id,
+                reference: item.mediaReference
+            )
+            do {
+                try ChekinanaMediaEventLinkStore.delete(
+                    mediaID: item.id,
+                    kind: mediaEventKind,
+                    in: modelContext
+                )
+                try ChekinanaMediaShotTypeStore.delete(
+                    mediaID: item.id,
+                    kind: mediaEventKind,
+                    in: modelContext
+                )
+                switch item.kind {
+                case .shame:
+                    let value = try ChekinanaModelContextResolver.shame(
+                        id: item.id,
+                        in: modelContext
+                    )
+                    modelContext.delete(value)
+                case .douga:
+                    let value = try ChekinanaModelContextResolver.douga(
+                        id: item.id,
+                        in: modelContext
+                    )
+                    modelContext.delete(value)
+                }
+                try modelContext.save()
+            } catch let databaseError {
+                modelContext.rollback()
+                ChekinanaGalleryMediaStore.recordRestoreRecovery(staged)
+                do {
+                    try ChekinanaGalleryMediaStore.restoreStagedFiles(staged)
+                } catch let recoveryError {
+                    pendingRestore = staged
+                    message = ChekinanaProductCopy.format(
+                        "gallery.media.error.restore_required",
+                        "The delete failed and the media could not be restored. Retry recovery before closing: %@",
+                        recoveryError.localizedDescription
+                    )
+                    return
+                }
+                ChekinanaGalleryMediaStore.removeRestoreRecovery(staged)
+                throw databaseError
+            }
+            ChekinanaGalleryMediaStore.recordCommittedDeletion(staged)
+            do {
+                try ChekinanaGalleryMediaStore.finalizeStagedDeletion(staged)
+            } catch {
+                // The database delete committed; launch/clear cleanup will
+                // finish removing the committed quarantine.
+            }
+            dismiss()
+            onDeleted?()
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func retryRecovery() {
+        guard !pendingRestore.isEmpty else { return }
+        do {
+            try ChekinanaGalleryMediaStore.restoreStagedFiles(pendingRestore)
+            ChekinanaGalleryMediaStore.removeRestoreRecovery(pendingRestore)
+            pendingRestore = []
+            message = ChekinanaProductCopy.text(
+                "gallery.media.recovery_complete",
+                "Media recovery completed."
+            )
+        } catch {
+            message = ChekinanaProductCopy.format(
+                "gallery.media.error.restore_required",
+                "The delete failed and the media could not be restored. Retry recovery before closing: %@",
+                error.localizedDescription
+            )
+        }
+    }
+
 }
 
 private enum ChekinanaProductPhotoSaver {
@@ -15099,6 +20574,18 @@ private struct ChekinanaIdolSelectionOption: Identifiable, Hashable {
     }
 }
 
+enum ChekinanaRequiredIdolSelectionPolicy {
+    static func resolvedIDs(
+        selectedIDs: Set<UUID>,
+        visibleIDs: [UUID]
+    ) -> [UUID] {
+        var seen = Set<UUID>()
+        return visibleIDs.filter {
+            selectedIDs.contains($0) && seen.insert($0).inserted
+        }
+    }
+}
+
 private struct ChekinanaIdolSelectionView: View {
     @Environment(\.dismiss) private var dismiss
     let options: [ChekinanaIdolSelectionOption]
@@ -15116,65 +20603,34 @@ private struct ChekinanaIdolSelectionView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !selectedIDs.isEmpty {
-                    Button(
-                        ChekinanaProductCopy.text("common.clear_all", "Clear all"),
-                        role: .destructive
-                    ) { selectedIDs.removeAll() }
-                        .accessibilityIdentifier("chekinana.gallery.editor.idols.clear")
-                }
-                ForEach(filteredIdols) { idol in
-                    Button {
-                        if selectedIDs.contains(idol.id) {
-                            selectedIDs.remove(idol.id)
-                        } else {
-                            selectedIDs.insert(idol.id)
-                        }
-                    } label: {
-                        HStack(spacing: 12) {
-                            ChekinanaIdolAvatarImage(
-                                name: idol.name,
-                                color: idol.color,
-                                imageRef: idol.avatarImageRef,
-                                cacheKey: "idol-selection-\(idol.id.uuidString.lowercased())",
-                                size: 42,
-                                managedIdolID: idol.id
+            ScrollView {
+                VStack(spacing: ChekinanaIdolAvatarSelectionLayout.verticalSpacing) {
+                    if !selectedIDs.isEmpty {
+                        Button(
+                            ChekinanaProductCopy.text("common.clear_all", "Clear all"),
+                            role: .destructive
+                        ) { selectedIDs.removeAll() }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier(
+                                "chekinana.gallery.editor.idols.clear"
                             )
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(idol.name).foregroundStyle(.primary)
-                                Text(
-                                    idol.group?.nonEmpty
-                                        ?? ChekinanaProductCopy.text(
-                                            "common.independent",
-                                            "Independent"
-                                        )
-                                )
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: selectedIDs.contains(idol.id) ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(selectedIDs.contains(idol.id) ? ChekinanaProductTheme.accent : .secondary)
-                        }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(
-                        selectedIDs.contains(idol.id)
-                            ? ChekinanaProductCopy.text("common.selected", "Selected")
-                            : ChekinanaProductCopy.text(
-                                "common.not_selected",
-                                "Not selected"
-                            )
-                    )
-                    .accessibilityIdentifier("chekinana.gallery.editor.idol.\(idol.id.uuidString.lowercased())")
+                    LazyVGrid(
+                        columns: ChekinanaIdolAvatarSelectionLayout.columns,
+                        spacing: ChekinanaIdolAvatarSelectionLayout.verticalSpacing
+                    ) {
+                        ForEach(filteredIdols) { idol in
+                            idolOption(idol)
+                        }
+                    }
                 }
+                .padding(16)
             }
             .searchable(
                 text: $query,
                 prompt: ChekinanaProductCopy.text("common.search_idols", "Search Idols")
             )
-            .chekinanaGroupedPageBackground()
+            .background(ChekinanaProductTheme.pageBackground)
             .navigationTitle(
                 ChekinanaProductCopy.text("common.select_idols", "Select Idols")
             )
@@ -15190,6 +20646,406 @@ private struct ChekinanaIdolSelectionView: View {
         }
         .accessibilityIdentifier("chekinana.gallery.editor.idol-selection")
     }
+
+    private func idolOption(_ idol: ChekinanaIdolSelectionOption) -> some View {
+        let isSelected = selectedIDs.contains(idol.id)
+        return Button {
+            if isSelected {
+                selectedIDs.remove(idol.id)
+            } else {
+                selectedIDs.insert(idol.id)
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                ChekinanaIdolAvatarImage(
+                    name: idol.name,
+                    color: idol.color,
+                    imageRef: idol.avatarImageRef,
+                    cacheKey: "idol-selection-\(idol.id.uuidString.lowercased())",
+                    size: 62,
+                    managedIdolID: idol.id
+                )
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, ChekinanaProductTheme.accent)
+                        .background(Circle().fill(.white))
+                        .offset(x: 4, y: -4)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 74)
+            .padding(.vertical, 6)
+            .background(
+                isSelected
+                    ? ChekinanaProductTheme.softAccent
+                    : ChekinanaProductTheme.cardBackground
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(idol.name)
+        .accessibilityValue(
+            isSelected
+                ? ChekinanaProductCopy.text("common.selected", "Selected")
+                : ChekinanaProductCopy.text("common.not_selected", "Not selected")
+        )
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier(
+            "chekinana.gallery.editor.idol.\(idol.id.uuidString.lowercased())"
+        )
+    }
+}
+
+private struct ChekinanaChekiEventSelectionField: View {
+    @Binding var eventID: UUID?
+    let recordDate: Date?
+    let events: [Event]
+    let schedules: [EventSchedule]
+    @State private var isAllEventsPresented = false
+
+    private var nearbyEvents: [Event] {
+        ChekinanaChekiEventSelectionPolicy.eligibleEvents(
+            events,
+            schedules: schedules,
+            for: recordDate
+        )
+    }
+
+    private var selectedTitle: String {
+        guard let eventID,
+              let event = events.first(where: { $0.id == eventID }) else {
+            return ChekinanaProductCopy.text("common.none", "None")
+        }
+        return event.name
+    }
+
+    private var hasResolvedSelection: Bool {
+        guard let eventID else { return false }
+        return events.contains { $0.id == eventID }
+    }
+
+    var body: some View {
+        Menu {
+            Button(ChekinanaProductCopy.text("common.none", "None")) {
+                eventID = nil
+            }
+            ForEach(nearbyEvents) { event in
+                Button {
+                    eventID = event.id
+                } label: {
+                    if event.id == eventID {
+                        Label(event.name, systemImage: "checkmark")
+                    } else {
+                        Text(event.name)
+                    }
+                }
+            }
+            Divider()
+            Button {
+                isAllEventsPresented = true
+            } label: {
+                Label(
+                    ChekinanaProductCopy.text("common.other", "Other"),
+                    systemImage: "ellipsis"
+                )
+            }
+        } label: {
+            HStack {
+                Text(ChekinanaProductCopy.text("events.event", "Event"))
+                Spacer()
+                Text(selectedTitle)
+                    .foregroundStyle(
+                        hasResolvedSelection
+                            ? ChekinanaProductTheme.accent : Color.secondary
+                    )
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .sheet(isPresented: $isAllEventsPresented) {
+            ChekinanaAllEventSelectionView(
+                eventID: $eventID,
+                events: events,
+                schedules: schedules
+            )
+        }
+    }
+}
+
+private struct ChekinanaAllEventSelectionView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var eventID: UUID?
+    let events: [Event]
+    let schedules: [EventSchedule]
+
+    private var orderedEvents: [Event] {
+        ChekinanaEventOrdering.ordered(
+            events,
+            schedules: schedules,
+            dateAscending: true
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(orderedEvents) { event in
+                Button {
+                    eventID = event.id
+                    dismiss()
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(event.name)
+                                .foregroundStyle(.primary)
+                            if let date = event.date {
+                                Text(ChekinanaProductDate.displayString(date))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if event.id == eventID {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(ChekinanaProductTheme.accent)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(ChekinanaProductCopy.text("events.event", "Event"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ChekinanaChekiEditorFields: View {
+    let visibleIdols: [Idol]
+    let events: [Event]
+    let schedules: [EventSchedule]
+    let identifierPrefix: String
+    let chooseIdols: () -> Void
+    @Binding var idolIDs: Set<UUID>
+    @Binding var hasDate: Bool
+    @Binding var date: Date
+    @Binding var eventID: UUID?
+    @Binding var userAppears: Bool
+    @Binding var size: ChekiSize?
+    @Binding var isFavorite: Bool
+    @Binding var hasPostedToSNS: Bool
+    @Binding var note: String
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    var body: some View {
+        Group {
+            ChekinanaIdolSelectionSummaryButton(
+                idols: visibleIdols.filter { idolIDs.contains($0.id) },
+                identifier: "\(identifierPrefix).change-idols",
+                action: chooseIdols
+            )
+            Toggle(
+                ChekinanaProductCopy.text("common.include_date", "Include date"),
+                isOn: $hasDate
+            )
+            if hasDate {
+                ChekinanaExpandableDateWheel(
+                    ChekinanaProductCopy.text("common.date", "Date"),
+                    selection: $date,
+                    accessibilityIdentifier: "\(identifierPrefix).date"
+                )
+            }
+            ChekinanaChekiEventSelectionField(
+                eventID: $eventID,
+                recordDate: draftCanonicalDate,
+                events: events,
+                schedules: schedules
+            )
+            ChekinanaUserAppearsPicker(
+                userAppears: $userAppears,
+                identifier: "\(identifierPrefix).user-appears"
+            )
+            Picker(
+                ChekinanaProductCopy.text("common.size", "Size"),
+                selection: $size
+            ) {
+                Text(ChekinanaProductCopy.text("common.unset", "Unset"))
+                    .tag(ChekiSize?.none)
+                ForEach(ChekiSize.allCases) { value in
+                    Text(value.rawValue).tag(Optional(value))
+                }
+            }
+            Toggle(
+                ChekinanaProductCopy.text("common.favorite", "Favorite"),
+                isOn: $isFavorite
+            )
+            Toggle(
+                ChekinanaProductCopy.text("common.posted_to_sns", "Posted to SNS"),
+                isOn: $hasPostedToSNS
+            )
+            TextField(
+                ChekinanaProductCopy.text("common.note", "Note"),
+                text: $note,
+                axis: .vertical
+            )
+        }
+    }
+}
+
+private struct ChekinanaChekiRecordEditorFields: View {
+    let visibleIdols: [Idol]
+    let events: [Event]
+    let schedules: [EventSchedule]
+    let identifierPrefix: String
+    let chooseIdols: () -> Void
+    @Binding var idolIDs: Set<UUID>
+    @Binding var count: Int
+    @Binding var hasDate: Bool
+    @Binding var date: Date
+    @Binding var eventID: UUID?
+    @Binding var size: ChekiSize?
+    @Binding var note: String
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    var body: some View {
+        Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
+            ChekinanaIdolSelectionSummaryButton(
+                idols: visibleIdols.filter { idolIDs.contains($0.id) },
+                identifier: "\(identifierPrefix).change-idols",
+                action: chooseIdols
+            )
+        }
+        Section(ChekinanaProductCopy.text("common.metadata", "Metadata")) {
+            ChekinanaQuantityControl(
+                value: $count,
+                allowedRange: 0...ChekinanaQuantityInputPolicy.maximum,
+                accessibilityIdentifier: "\(identifierPrefix).quantity"
+            )
+            Toggle(
+                ChekinanaProductCopy.text("common.include_date", "Include date"),
+                isOn: $hasDate
+            )
+            if hasDate {
+                ChekinanaExpandableDateWheel(
+                    ChekinanaProductCopy.text("common.date", "Date"),
+                    selection: $date,
+                    accessibilityIdentifier: "\(identifierPrefix).date"
+                )
+            }
+            ChekinanaChekiEventSelectionField(
+                eventID: $eventID,
+                recordDate: draftCanonicalDate,
+                events: events,
+                schedules: schedules
+            )
+            Picker(
+                ChekinanaProductCopy.text("common.size", "Size"),
+                selection: $size
+            ) {
+                Text(ChekinanaProductCopy.text("common.unset", "Unset"))
+                    .tag(ChekiSize?.none)
+                ForEach(ChekiSize.allCases) { value in
+                    Text(value.rawValue).tag(Optional(value))
+                }
+            }
+            TextField(
+                ChekinanaProductCopy.text("common.note", "Note"),
+                text: $note,
+                axis: .vertical
+            )
+        }
+    }
+}
+
+private struct ChekinanaMediaMetadataEditorFields: View {
+    let visibleIdols: [Idol]
+    let events: [Event]
+    let schedules: [EventSchedule]
+    let identifierPrefix: String
+    let chooseIdols: () -> Void
+    @Binding var idolIDs: Set<UUID>
+    @Binding var hasDate: Bool
+    @Binding var date: Date
+    @Binding var eventID: UUID?
+    @Binding var userAppears: Bool
+    @Binding var note: String
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    var body: some View {
+        Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
+            ChekinanaIdolSelectionSummaryButton(
+                idols: visibleIdols.filter { idolIDs.contains($0.id) },
+                identifier: "\(identifierPrefix).idols",
+                action: chooseIdols
+            )
+        }
+        Section(ChekinanaProductCopy.text("common.metadata", "Metadata")) {
+            Toggle(
+                ChekinanaProductCopy.text("common.include_date", "Include date"),
+                isOn: $hasDate
+            )
+            if hasDate {
+                ChekinanaExpandableDateWheel(
+                    ChekinanaProductCopy.text("common.date", "Date"),
+                    selection: $date,
+                    accessibilityIdentifier: "\(identifierPrefix).date"
+                )
+            }
+            ChekinanaChekiEventSelectionField(
+                eventID: $eventID,
+                recordDate: draftCanonicalDate,
+                events: events,
+                schedules: schedules
+            )
+            ChekinanaUserAppearsPicker(
+                userAppears: $userAppears,
+                identifier: "\(identifierPrefix).user-appears"
+            )
+            TextField(
+                ChekinanaProductCopy.text("common.note", "Note"),
+                text: $note,
+                axis: .vertical
+            )
+        }
+    }
+}
+
+private struct ChekinanaUserAppearsPicker: View {
+    @Binding var userAppears: Bool
+    let identifier: String
+
+    var body: some View {
+        Picker(
+            ChekinanaProductCopy.text("gallery.shot_type", "Shot type"),
+            selection: $userAppears
+        ) {
+            Text(ChekinanaGalleryShotFilter.solo.title).tag(false)
+            Text(ChekinanaGalleryShotFilter.twoShot.title).tag(true)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier(identifier)
+    }
 }
 
 private struct ChekinanaChekiEditorView: View {
@@ -15197,36 +21053,42 @@ private struct ChekinanaChekiEditorView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Idol.name) private var idols: [Idol]
     @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let cheki: Cheki
-    var allowsDelete = false
+    var allowsDelete = true
+    var onDelete: (() -> Void)? = nil
 
     @State private var idolIDs: Set<UUID>
     @State private var hasDate: Bool
     @State private var date: Date
     @State private var eventID: UUID?
-    private let preservedUserAppears: Bool?
-    private let initialIdxText: String
-    @State private var idxText: String
+    @State private var userAppears: Bool
     @State private var size: ChekiSize?
     @State private var isFavorite: Bool
     @State private var hasPostedToSNS: Bool
     @State private var note: String
     @State private var message: String?
     @State private var isIdolSelectionPresented = false
+    @State private var confirmationLedger = ChekinanaConfirmationLedger()
+    @State private var pendingDeleteConfirmationCode: String?
+    @State private var isDeleteConfirmationPresented = false
 
-    init(cheki: Cheki, allowsDelete: Bool = false) {
+    init(
+        cheki: Cheki,
+        allowsDelete: Bool = true,
+        onDelete: (() -> Void)? = nil
+    ) {
         self.cheki = cheki
         self.allowsDelete = allowsDelete
+        self.onDelete = onDelete
         _idolIDs = State(initialValue: Set(cheki.idols.map(\.id)))
         _hasDate = State(initialValue: cheki.date != nil)
         _date = State(initialValue: cheki.date.flatMap {
             ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
         } ?? Date())
         _eventID = State(initialValue: cheki.event?.id)
-        preservedUserAppears = cheki.userAppears
-        initialIdxText = cheki.idx.map(String.init) ?? ""
-        _idxText = State(initialValue: cheki.idx.map(String.init) ?? "")
+        _userAppears = State(initialValue: cheki.userAppears ?? false)
         _size = State(initialValue: cheki.size)
         _isFavorite = State(initialValue: cheki.isFavorite)
         _hasPostedToSNS = State(initialValue: cheki.hasPostedToSNS)
@@ -15236,87 +21098,50 @@ private struct ChekinanaChekiEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
-                    ChekinanaIdolAvatarRow(
-                        idols: visibleIdols.filter { idolIDs.contains($0.id) },
-                        size: 38,
-                        showsNames: true
-                    )
-                    Button {
-                        isIdolSelectionPresented = true
-                    } label: {
-                        Label(
-                            ChekinanaProductCopy.text("common.change_idols", "Change Idols"),
-                            systemImage: "person.2"
-                        )
+                Section {
+                    Button(action: exportImage) {
+                        Text(ChekinanaProductCopy.text(
+                            "gallery.save_to_photos",
+                            "Save to Photos"
+                        ))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .accessibilityIdentifier("chekinana.gallery.editor.change-idols")
-                }
-                Section(ChekinanaProductCopy.text("common.identity", "Identity")) {
-                    Toggle(
-                        ChekinanaProductCopy.text("common.include_date", "Include date"),
-                        isOn: $hasDate
+                    .accessibilityIdentifier("chekinana.gallery.editor.export")
+                    ChekinanaChekiEditorFields(
+                        visibleIdols: visibleIdols,
+                        events: events,
+                        schedules: eventSchedules,
+                        identifierPrefix: "chekinana.gallery.editor",
+                        chooseIdols: { isIdolSelectionPresented = true },
+                        idolIDs: $idolIDs,
+                        hasDate: $hasDate,
+                        date: $date,
+                        eventID: $eventID,
+                        userAppears: $userAppears,
+                        size: $size,
+                        isFavorite: $isFavorite,
+                        hasPostedToSNS: $hasPostedToSNS,
+                        note: $note
                     )
-                    if hasDate {
-                        DatePicker(
-                            ChekinanaProductCopy.text("common.date", "Date"),
-                            selection: $date,
-                            displayedComponents: .date
-                        )
+                    if let message {
+                        ChekinanaInlineStatus(message: message, kind: .error)
                     }
-                    Picker(
-                        ChekinanaProductCopy.text("events.event", "Event"),
-                        selection: $eventID
-                    ) {
-                        Text(ChekinanaProductCopy.text("common.none", "None"))
-                            .tag(UUID?.none)
-                        ForEach(events) { Text($0.name).tag(Optional($0.id)) }
+                    if allowsDelete {
+                        Button(
+                            deleteRecoveryRequired
+                                ? ChekinanaProductCopy.text(
+                                    "common.retry_recovery",
+                                    "Retry recovery"
+                                )
+                                : ChekinanaProductCopy.text("common.delete", "Delete"),
+                            role: .destructive
+                        ) {
+                            isDeleteConfirmationPresented = true
+                        }
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("chekinana.gallery.editor.delete")
                     }
-                    TextField(
-                        ChekinanaProductCopy.text(
-                            "common.index_optional",
-                            "Index (optional)"
-                        ),
-                        text: $idxText
-                    )
-                        .keyboardType(.numberPad)
-                        .accessibilityIdentifier("chekinana.gallery.editor.idx")
-                    Text(
-                        ChekinanaProductCopy.format(
-                            "common.current_index",
-                            "Current index: %@",
-                            cheki.idx.map { "#\($0)" }
-                                ?? ChekinanaProductCopy.text("common.none", "None")
-                        )
-                    )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Section(ChekinanaProductCopy.text("common.other", "Other")) {
-                    Picker(
-                        ChekinanaProductCopy.text("common.size", "Size"),
-                        selection: $size
-                    ) {
-                        Text(ChekinanaProductCopy.text("common.unset", "Unset"))
-                            .tag(ChekiSize?.none)
-                        ForEach(ChekiSize.allCases) { Text($0.rawValue).tag(Optional($0)) }
-                    }
-                    Toggle(
-                        ChekinanaProductCopy.text("common.favorite", "Favorite"),
-                        isOn: $isFavorite
-                    )
-                    Toggle(
-                        ChekinanaProductCopy.text("common.posted_to_sns", "Posted to SNS"),
-                        isOn: $hasPostedToSNS
-                    )
-                    TextField(
-                        ChekinanaProductCopy.text("common.note", "Note"),
-                        text: $note,
-                        axis: .vertical
-                    )
-                }
-                if let message {
-                    Section { ChekinanaInlineStatus(message: message, kind: .error) }
                 }
             }
             .chekinanaGroupedPageBackground()
@@ -15333,6 +21158,7 @@ private struct ChekinanaChekiEditorView: View {
                     Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
                         dismiss()
                     }
+                        .disabled(!canDismiss)
                         .accessibilityIdentifier("chekinana.gallery.editor.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -15342,29 +21168,54 @@ private struct ChekinanaChekiEditorView: View {
                     )
                         .accessibilityIdentifier("chekinana.gallery.editor.save")
                 }
-                if allowsDelete {
-                    ToolbarItem(placement: .bottomBar) {
-                        Button(
-                            ChekinanaProductCopy.text("common.delete", "Delete"),
-                            role: .destructive,
-                            action: delete
-                        )
-                            .accessibilityIdentifier("chekinana.gallery.editor.delete")
-                    }
-                }
             }
         }
         .accessibilityIdentifier("chekinana.gallery.editor")
+        .accessibilityValue(cheki.id.uuidString.lowercased())
+        .interactiveDismissDisabled(!canDismiss)
         .sheet(isPresented: $isIdolSelectionPresented) {
             ChekinanaIdolSelectionView(
                 options: visibleIdols.map(ChekinanaIdolSelectionOption.init),
                 selectedIDs: $idolIDs
             )
         }
+        .onChange(of: hasDate) { _, _ in clearInvalidEventSelection() }
+        .onChange(of: date) { _, _ in clearInvalidEventSelection() }
+        .alert(
+            ChekinanaProductCopy.text(
+                "gallery.delete_confirmation.title",
+                "Delete this item?"
+            ),
+            isPresented: $isDeleteConfirmationPresented
+        ) {
+            Button(
+                ChekinanaProductCopy.text("common.delete", "Delete"),
+                role: .destructive
+            ) {
+                Task { await delete() }
+            }
+            Button(
+                ChekinanaProductCopy.text("common.cancel", "Cancel"),
+                role: .cancel
+            ) {}
+        }
     }
 
     private var visibleIdols: [Idol] {
         ChekinanaVisibilityPolicy.visibleIdols(idols, hiddenIDs: hiddenIdols.hiddenIDs)
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    private func clearInvalidEventSelection() {
+        eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
     }
 
     private func save() {
@@ -15378,73 +21229,25 @@ private struct ChekinanaChekiEditorView: View {
             )
             return
         }
-        let newIdolIDs = Array(idolIDs)
-        let newGroup = ChekinanaChekiGroupKey(idolIDs: newIdolIDs, date: normalizedDate)
-        let normalizedIdxText = idxText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let requestedIdx: Int?
-        if normalizedIdxText.isEmpty {
-            requestedIdx = nil
-        } else if let parsed = Int(normalizedIdxText), parsed > 0 {
-            requestedIdx = parsed
-        } else {
-            message = ChekinanaProductCopy.text(
-                "error.invalid_index",
-                "Index must be empty or a positive integer."
-            )
-            return
-        }
-        let idxWasManuallyEdited = normalizedIdxText != initialIdxText
         do {
             let target = try ChekinanaModelContextResolver.cheki(
                 id: cheki.id,
                 in: modelContext
             )
+            let validEventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+                eventID,
+                recordDate: normalizedDate,
+                events: events
+            )
             let relationships = try ChekinanaModelContextResolver.relationships(
                 idolIDs: idolIDs,
-                eventID: eventID,
+                eventID: validEventID,
                 in: modelContext
             )
-            let oldGroup = ChekinanaChekiGroupKey(
-                idolIDs: target.idols.map(\.id),
-                date: target.date
-            )
-            let all = try modelContext.fetch(FetchDescriptor<Cheki>())
-            let snapshots = all.compactMap { value -> ChekinanaChekiIndexSnapshot? in
-                    guard let group = ChekinanaChekiGroupKey(
-                        idolIDs: value.idols.map(\.id),
-                        date: value.date
-                    ) else { return nil }
-                    return .init(chekiID: value.id, group: group, idx: value.idx)
-            }
-            if idxWasManuallyEdited {
-                if requestedIdx != nil, newGroup == nil {
-                    message = "A positive index requires both a date and at least one Idol."
-                    return
-                }
-                if let newGroup, let requestedIdx,
-                   snapshots.contains(where: {
-                       $0.chekiID != target.id
-                           && $0.group == newGroup
-                           && $0.idx == requestedIdx
-                   }) {
-                    message = "Index #\(requestedIdx) is already used in this Idol/date group."
-                    return
-                }
-                target.idx = requestedIdx
-            } else if let newGroup,
-                      oldGroup != newGroup || (target.idx ?? 0) < 1 {
-                target.idx = try ChekinanaChekiIndexing.nextIndex(
-                    for: newGroup,
-                    existing: snapshots,
-                    excludingChekiID: target.id
-                )
-            } else if newGroup == nil {
-                target.idx = nil
-            }
             target.idols = relationships.idols
             target.date = normalizedDate
             target.event = relationships.event
-            target.userAppears = preservedUserAppears
+            target.userAppears = userAppears
             target.size = size
             target.isFavorite = isFavorite
             target.hasPostedToSNS = hasPostedToSNS
@@ -15458,43 +21261,114 @@ private struct ChekinanaChekiEditorView: View {
         }
     }
 
-    private func delete() {
-        do {
-            let target = try ChekinanaModelContextResolver.cheki(
-                id: cheki.id,
-                in: modelContext
+    private var deleteRecoveryRequired: Bool {
+        guard let pendingDeleteConfirmationCode else { return false }
+        return confirmationLedger.cancellationRequiresRecovery(
+            pendingDeleteConfirmationCode
+        )
+    }
+
+    private var canDismiss: Bool {
+        ChekinanaGalleryDeleteDismissPolicy.canDismiss(
+            pendingConfirmationCode: pendingDeleteConfirmationCode,
+            recoveryRequired: deleteRecoveryRequired
+        )
+    }
+
+    private func exportImage() {
+        guard let url = ChekiImageRefResolver.localFileURL(for: cheki.imageRef) else {
+            message = ChekinanaProductCopy.text(
+                "gallery.image_unavailable",
+                "The stored image is unavailable."
             )
-            guard target.imageRef?.nonEmpty == nil else {
-                message = "Delete media-backed Cheki from its media detail page."
+            return
+        }
+        Task {
+            do {
+                try await ChekinanaProductPhotoSaver.saveImage(at: url)
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func delete() async {
+        let executor = ChekinanaCommandExecutor(
+            modelContext: modelContext,
+            confirmationLedger: confirmationLedger
+        )
+        let code: String
+        if let pendingDeleteConfirmationCode {
+            code = pendingDeleteConfirmationCode
+        } else {
+            let prepared = await executor.execute(
+                "deletecheki \(cheki.id.uuidString.lowercased())"
+            )
+            guard let preparedCode = ChekinanaConfirmationResponseValidator
+                .deleteChekiConfirmationCode(
+                    from: prepared,
+                    expectedChekiID: cheki.id
+                ) else {
+                message = ChekinanaConfirmationResponseValidator.failureDescription(
+                    for: prepared,
+                    fallback: ChekinanaProductCopy.text(
+                        "gallery.delete_prepare_failed",
+                        "Unable to prepare this Cheki for deletion."
+                    )
+                )
                 return
             }
-            modelContext.delete(target)
-            try modelContext.save()
-            dismiss()
-        } catch {
-            modelContext.rollback()
-            message = error.localizedDescription
+            pendingDeleteConfirmationCode = preparedCode
+            code = preparedCode
         }
+        let result = await executor.execute("confirm \(code)")
+        guard ChekinanaConfirmationResponseValidator.isDeleteChekiSuccess(result) else {
+            if confirmationLedger.entry(for: code) == nil {
+                pendingDeleteConfirmationCode = nil
+            }
+            message = ChekinanaConfirmationResponseValidator.failureDescription(
+                for: result,
+                fallback: ChekinanaProductCopy.text(
+                    "gallery.delete_failed",
+                    "Unable to delete this Cheki."
+                )
+            )
+            return
+        }
+        pendingDeleteConfirmationCode = nil
+        onDelete?()
+        dismiss()
     }
 }
 
 private struct ChekinanaCalendarView: View {
     @Environment(\.chekinanaLanguageRevision) private var languageRevision
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Cheki.date) private var chekis: [Cheki]
+    @Query(sort: \ChekiRecord.date) private var chekiRecords: [ChekiRecord]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
     @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var idols: [Idol]
+    @Query private var calendarGroupOrders: [CalendarGroupOrder]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let openMenu: () -> Void
     @Binding var navigationDate: Date?
 
     @State private var displayedMonth = ChekinanaProductDate.startOfMonth(containing: ChekinanaProductDate.fixtureAwareToday)
     @State private var selectedDate = ChekinanaProductDate.fixtureAwareToday
-    @State private var selectedGroup: ChekinanaCalendarIdolGroup?
-    @State private var selectedNoMediaRecord: ChekinanaCalendarNoMediaRecord?
+    @State private var selectedMediaSelection: ChekinanaCalendarMediaSelection?
+    @State private var isMediaViewerPresented = false
+    @State private var selectedGroupEditor: ChekinanaCalendarGroupEditorSelection?
     @State private var isAddingRecord = false
-    @State private var isPickingMonth = false
+    @State private var isMonthYearWheelExpanded = false
     @State private var isUndatedUnassignedPresented = false
+    @State private var reorderErrorMessage: String?
+#if DEBUG
+    @State private var calendarGroupGestureDebugStates: [String: String] = [:]
+#endif
 
     private var cells: [ChekinanaCalendarCell] {
         ChekinanaProductDate.monthCells(for: displayedMonth)
@@ -15502,13 +21376,28 @@ private struct ChekinanaCalendarView: View {
 
     private var selectedChekis: [Cheki] {
         ChekinanaRecordOrdering.orderedChekis(chekis.filter {
-            ChekinanaProductDate.isSameDay($0.date, selectedDate)
+            $0.imageRef?.nonEmpty != nil
+                && ChekinanaProductDate.isSameDay($0.date, selectedDate)
                 && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
         })
     }
 
+    private var selectedChekiRecords: [ChekiRecord] {
+        chekiRecords.filter {
+            ChekinanaProductDate.isSameDay($0.date, selectedDate)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+
     private var selectedEvents: [Event] {
-        events.filter { ChekinanaProductDate.isSameDay($0.date, selectedDate) }.sorted { $0.id.uuidString < $1.id.uuidString }
+        ChekinanaEventOrdering.ordered(
+            events.filter { ChekinanaProductDate.isSameDay($0.date, selectedDate) },
+            schedules: eventSchedules,
+            dateAscending: true
+        )
     }
     private var selectedShames: [Shame] { shames.filter {
         ChekinanaProductDate.isSameDay($0.date, selectedDate)
@@ -15520,14 +21409,37 @@ private struct ChekinanaCalendarView: View {
     }.sorted { $0.id.uuidString < $1.id.uuidString } }
 
     private var selectedGroups: [ChekinanaCalendarIdolGroup] {
-        ChekinanaCalendarIdolGroup.groups(for: selectedChekis)
+        ChekinanaCalendarIdolGroup.groups(
+            for: selectedChekis,
+            records: selectedChekiRecords,
+            relationshipIndex: ChekinanaChekiRecordRelationshipIndex(idols: idols),
+            groupsByExactIdolCombination: true,
+            shames: selectedShames,
+            dougas: selectedDougas
+        )
+    }
+
+    private var persistentlyOrderedSelectedGroups: [ChekinanaCalendarIdolGroup] {
+        let dateKey = ChekinanaProductDate.key(selectedDate)
+        let orderedKeys = ChekinanaCalendarGroupOrderPolicy.orderedGroupKeys(
+            selectedGroups.map(\.combinationKey.id),
+            dateKey: dateKey,
+            orders: calendarGroupOrders
+        )
+        let byKey = Dictionary(
+            uniqueKeysWithValues: selectedGroups.map { ($0.combinationKey.id, $0) }
+        )
+        return orderedKeys.compactMap { byKey[$0] }
     }
 
     private var undatedUnassignedCount: Int {
-        chekis.filter {
-            $0.imageRef?.nonEmpty == nil && $0.idols.isEmpty && $0.date == nil
-                && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
-        }.count + shames.filter {
+        ChekinanaChekiRecordStore.totalCount(chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.isUndatedAndUnassigned($0)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }) + shames.filter {
             $0.imageRef?.nonEmpty == nil && $0.idols.isEmpty && $0.date == nil
         }.count + dougas.filter {
             $0.videoRef?.nonEmpty == nil && $0.idols.isEmpty && $0.date == nil
@@ -15563,16 +21475,33 @@ private struct ChekinanaCalendarView: View {
                     .accessibilityIdentifier("chekinana.calendar.add")
                 }
             }
-            .sheet(item: $selectedGroup) { group in
-                ChekinanaCalendarGroupSummary(group: group)
-            }
-            .sheet(item: $selectedNoMediaRecord) { record in
-                ChekinanaCalendarNoMediaRecordEditor(record: record)
+            .sheet(item: $selectedGroupEditor) { selection in
+                ChekinanaCalendarGroupEditor(selection: selection)
             }
             .sheet(isPresented: $isAddingRecord) { ChekinanaCalendarRecordEditor(initialDate: selectedDate) }
-            .sheet(isPresented: $isPickingMonth) { ChekinanaMonthPicker(month: $displayedMonth, selectedDate: $selectedDate) }
             .sheet(isPresented: $isUndatedUnassignedPresented) {
                 ChekinanaUndatedUnassignedRecordsView()
+            }
+            .alert(
+                ChekinanaProductCopy.text("common.error", "Error"),
+                isPresented: Binding(
+                    get: { reorderErrorMessage != nil },
+                    set: { if !$0 { reorderErrorMessage = nil } }
+                )
+            ) {
+                Button(ChekinanaProductCopy.text("common.ok", "OK"), role: .cancel) {}
+            } message: {
+                Text(reorderErrorMessage ?? "")
+            }
+        }
+        .fullScreenCover(
+            isPresented: $isMediaViewerPresented,
+            onDismiss: { selectedMediaSelection = nil }
+        ) {
+            if let selection = selectedMediaSelection {
+                ChekinanaCalendarGroupSummary(selection: selection)
+            } else {
+                ChekinanaProductTheme.pageBackground.ignoresSafeArea()
             }
         }
         .accessibilityElement(children: .contain)
@@ -15582,6 +21511,7 @@ private struct ChekinanaCalendarView: View {
             guard let date else { return }
             selectedDate = date
             displayedMonth = ChekinanaProductDate.startOfMonth(containing: date)
+            isMonthYearWheelExpanded = false
             navigationDate = nil
         }
     }
@@ -15623,9 +21553,22 @@ private struct ChekinanaCalendarView: View {
                 HStack {
                     monthButton(systemImage: "chevron.left", offset: -1, id: "previous")
                     Spacer()
-                    Button { isPickingMonth = true } label: { Text(ChekinanaProductDate.monthTitle(displayedMonth))
-                        .font(.headline)
-                        .accessibilityIdentifier("chekinana.calendar.month") }
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isMonthYearWheelExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(ChekinanaProductDate.monthTitle(displayedMonth))
+                                .font(.headline)
+                            Image(
+                                systemName: isMonthYearWheelExpanded
+                                    ? "chevron.up" : "chevron.down"
+                            )
+                            .font(.caption.weight(.semibold))
+                        }
+                        .accessibilityIdentifier("chekinana.calendar.month")
+                    }
                     Spacer()
                     monthButton(systemImage: "chevron.right", offset: 1, id: "next")
                 }
@@ -15633,6 +21576,14 @@ private struct ChekinanaCalendarView: View {
                 .padding(.horizontal, 6)
                 .background(ChekinanaDesignSystem.accent)
                 .clipShape(RoundedRectangle(cornerRadius: ChekinanaDesignSystem.compactRadius))
+
+                if isMonthYearWheelExpanded {
+                    ChekinanaCalendarMonthYearWheels(
+                        displayedMonth: $displayedMonth,
+                        selectedDate: $selectedDate
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
 
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 7) {
                     ForEach(ChekinanaProductDate.weekdaySymbols, id: \.self) { weekday in
@@ -15650,7 +21601,11 @@ private struct ChekinanaCalendarView: View {
         .gesture(DragGesture(minimumDistance: 30).onEnded { value in
             guard abs(value.translation.width) > abs(value.translation.height) else { return }
             let offset = value.translation.width < 0 ? 1 : -1
-            if let next = ChekinanaProductDate.calendar.date(byAdding: .month, value: offset, to: displayedMonth) { displayedMonth = next; selectedDate = next }
+            if let next = ChekinanaProductDate.calendar.date(byAdding: .month, value: offset, to: displayedMonth) {
+                displayedMonth = next
+                selectedDate = next
+                isMonthYearWheelExpanded = false
+            }
         })
     }
 
@@ -15673,13 +21628,47 @@ private struct ChekinanaCalendarView: View {
 
     private func calendarDay(_ cell: ChekinanaCalendarCell) -> some View {
         let selected = ChekinanaProductDate.isSameDay(cell.date, selectedDate)
-        let chekiCount = chekis.filter {
+        let isToday = ChekinanaProductDate.isSameDay(
+            cell.date,
+            ChekinanaProductDate.fixtureAwareToday
+        )
+        let visualState = ChekinanaCalendarDayVisualState.resolve(
+            isSelected: selected,
+            isToday: isToday
+        )
+        let hasEvent = events.contains {
             ChekinanaProductDate.isSameDay($0.date, cell.date)
+        }
+        let showsEventIcon = ChekinanaCalendarDayContentPolicy.showsEventIcon(
+            hasEvent: hasEvent,
+            isSelected: selected
+        )
+        let primaryForeground: Color =
+            ChekinanaCalendarDayContentPolicy.usesSecondaryDateNumber(
+                isInDisplayedMonth: cell.isInDisplayedMonth
+            )
+            ? .secondary
+            : (selected ? .white : .primary)
+        let chekiCountForeground: Color =
+            ChekinanaCalendarDayContentPolicy.usesSecondaryChekiCount(
+                isInDisplayedMonth: cell.isInDisplayedMonth
+            )
+            ? .secondary
+            : (selected ? .white : ChekinanaProductTheme.accent)
+        let chekiCount = chekis.filter {
+            $0.imageRef?.nonEmpty != nil
+                && ChekinanaProductDate.isSameDay($0.date, cell.date)
                 && ChekinanaVisibilityPolicy.includesRecord(
                     idols: $0.idols,
                     hiddenIDs: hiddenIdols.hiddenIDs
                 )
-        }.count
+        }.count + ChekinanaChekiRecordStore.totalCount(chekiRecords.filter {
+            ChekinanaProductDate.isSameDay($0.date, cell.date)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        })
         return Button {
             let selection = ChekinanaCalendarSelectionPolicy.selecting(
                 cell.date,
@@ -15687,29 +21676,53 @@ private struct ChekinanaCalendarView: View {
             )
             selectedDate = selection.selectedDate
             displayedMonth = selection.displayedMonth
+            isMonthYearWheelExpanded = false
         } label: {
             VStack(spacing: 6) {
-                Text(ChekinanaProductDate.dayNumber(cell.date))
-                    .font(.body.weight(selected ? .bold : .regular))
-                    .accessibilityIdentifier(
-                        "chekinana.calendar.day-number.\(ChekinanaProductDate.key(cell.date))"
-                    )
+                Group {
+                    if showsEventIcon {
+                        Image(systemName: "music.note.house")
+                            .accessibilityIdentifier(
+                                "chekinana.calendar.day-event.\(ChekinanaProductDate.key(cell.date))"
+                            )
+                    } else {
+                        Text(ChekinanaProductDate.dayNumber(cell.date))
+                            .accessibilityIdentifier(
+                                "chekinana.calendar.day-number.\(ChekinanaProductDate.key(cell.date))"
+                            )
+                    }
+                }
+                .font(.body.weight(selected ? .bold : .regular))
+                .foregroundStyle(primaryForeground)
                 HStack(spacing: 3) {
                     if chekiCount > 0 {
                         Text(chekiCount.formatted())
                             .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(selected ? .white : ChekinanaProductTheme.accent)
+                            .foregroundStyle(chekiCountForeground)
                             .accessibilityIdentifier("chekinana.calendar.count.\(ChekinanaProductDate.key(cell.date))")
                     }
                 }
                 .frame(height: 10)
             }
-            .foregroundStyle(selected ? Color.white : (cell.isInDisplayedMonth ? Color.primary : Color.secondary.opacity(0.55)))
             .frame(
                 maxWidth: .infinity,
                 minHeight: ChekinanaAccessibilityMetrics.minimumTouchTarget
             )
-            .background(selected ? ChekinanaProductTheme.accent : .clear)
+            .background {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(ChekinanaProductTheme.accent.opacity(
+                        visualState.fillAccentOpacity
+                    ))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(
+                        ChekinanaProductTheme.accent.opacity(
+                            visualState.strokeAccentOpacity
+                        ),
+                        lineWidth: 2
+                    )
+            }
             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -15717,25 +21730,47 @@ private struct ChekinanaCalendarView: View {
         .chekinanaMinimumTouchTarget()
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityLabel(ChekinanaProductDate.accessibilityDate(cell.date))
-        .accessibilityValue(ChekinanaRecordKind.cheki.countLabel(chekiCount))
+        .accessibilityValue(
+            [
+                selected
+                    ? ChekinanaProductCopy.text("calendar.selected", "Selected")
+                    : nil,
+                isToday
+                    ? ChekinanaProductCopy.text("calendar.today", "Today")
+                    : nil,
+                ChekinanaRecordKind.cheki.countLabel(chekiCount),
+            ].compactMap { $0 }.joined(separator: ", ")
+        )
         .accessibilityIdentifier("chekinana.calendar.day.\(ChekinanaProductDate.key(cell.date))")
     }
 
     private var selectedDayCard: some View {
-        ChekinanaSectionCard {
-            VStack(alignment: .leading, spacing: 14) {
+        let displayedGroups = persistentlyOrderedSelectedGroups
+        let orderedGroupKeys = displayedGroups.map(\.combinationKey.id)
+        let selectedDateKey = ChekinanaProductDate.key(selectedDate)
+        return ChekinanaSectionCard {
+            VStack(alignment: .leading, spacing: ChekinanaCalendarSelectedDayLayout.sectionSpacing) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(ChekinanaProductDate.longTitle(selectedDate))
                         .font(.headline)
                         .accessibilityIdentifier("chekinana.calendar.selected-date")
                         .accessibilityValue(ChekinanaProductDate.key(selectedDate))
                     Spacer()
-                    Text(ChekinanaRecordKind.cheki.countLabel(selectedChekis.count))
+                    Text(
+                        ChekinanaRecordKind.cheki.countLabel(
+                            selectedChekis.count
+                                + ChekinanaChekiRecordStore.totalCount(
+                                    selectedChekiRecords
+                                )
+                        )
+                    )
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
 
-                if selectedEvents.isEmpty && selectedChekis.isEmpty && selectedShames.isEmpty && selectedDougas.isEmpty {
+                if selectedEvents.isEmpty && selectedChekis.isEmpty
+                    && selectedChekiRecords.isEmpty && selectedShames.isEmpty
+                    && selectedDougas.isEmpty {
                     HStack(spacing: 12) {
                         Image(systemName: "calendar")
                             .foregroundStyle(ChekinanaProductTheme.accent)
@@ -15746,13 +21781,20 @@ private struct ChekinanaCalendarView: View {
                     .frame(maxWidth: .infinity, minHeight: 74, alignment: .leading)
                     .chekinanaScreenMarker("chekinana.calendar.empty-day")
                 } else {
+                    VStack(
+                        alignment: .leading,
+                        spacing: ChekinanaCalendarSelectedDayLayout.recordSpacing
+                    ) {
                     ForEach(selectedEvents) { event in
                         HStack(spacing: 12) {
                             Image(systemName: "music.note.house")
                                 .foregroundStyle(ChekinanaProductTheme.accent)
                                 .frame(width: 30)
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(event.name).font(.subheadline.weight(.semibold))
+                                Text(event.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                                 Text(
                                     [event.city?.nonEmpty, event.resolvedLivehouse]
                                         .compactMap { $0 }
@@ -15774,80 +21816,109 @@ private struct ChekinanaCalendarView: View {
                         )
                     }
 
-                    ForEach(selectedGroups) { group in
-                        Button { selectedGroup = group } label: {
-                            GeometryReader { geometry in
-                                HStack(spacing: 12) {
-                                    if let idol = group.idol {
-                                        ChekinanaIdolAvatar(idol: idol, size: 46)
-                                    } else {
-                                        Image(systemName: "person.slash")
-                                            .frame(width: 46, height: 46)
-                                            .background(Color(uiColor: .tertiarySystemGroupedBackground))
-                                            .clipShape(Circle())
-                                    }
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(group.name)
-                                            .font(.subheadline.weight(.semibold))
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(1)
-                                        Text(
-                                            ChekinanaRecordKind.cheki.countLabel(
-                                                group.chekis.count
-                                            )
+                    ForEach(displayedGroups) { group in
+                        HStack(spacing: ChekinanaCalendarSelectedDayLayout.groupControlSpacing) {
+                            HStack(spacing: 12) {
+                                if group.isStandaloneMultiIdol {
+                                    ChekinanaCalendarIdolAvatarStrip(
+                                        idols: group.orderedIdols,
+                                        size: 46
+                                    )
+                                } else if let idol = group.idol {
+                                    ChekinanaIdolAvatar(
+                                        idol: idol,
+                                        size: 46
+                                    )
+                                } else {
+                                    Image(systemName: "person.slash")
+                                        .frame(
+                                            width: 46,
+                                            height: 46
                                         )
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer(minLength: 6)
-                                    let mediaChekis = group.chekis.filter {
-                                        $0.imageRef?.nonEmpty != nil
-                                    }
-                                    if !mediaChekis.isEmpty {
-                                        ChekinanaCalendarThumbnailStrip(chekis: mediaChekis)
-                                            .frame(maxWidth: geometry.size.width * 0.5, alignment: .trailing)
-                                    }
+                                        .background(Color(uiColor: .tertiarySystemGroupedBackground))
+                                        .clipShape(Circle())
                                 }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(group.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(group.countLabels.joined(separator: " · "))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 6)
                             }
-                            .frame(height: 62)
+                            .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
                             .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(
-                            "\(group.name), \(ChekinanaRecordKind.cheki.countLabel(group.chekis.count))"
-                        )
-                        .accessibilityIdentifier("chekinana.calendar.group.\(group.id)")
-                    }
-                    ForEach(selectedShames) { item in
-                        if item.imageRef?.nonEmpty == nil {
-                            Button { selectedNoMediaRecord = .shame(item) } label: {
-                                Label(
-                                    "\(ChekinanaRecordKind.shame.title) · \(idolNames(item.idols))",
-                                    systemImage: "photo"
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction {
+                                openCalendarGroupEditor(group)
+                            }
+                            .accessibilityLabel(
+                                "\(group.name), \(group.countLabels.joined(separator: ", "))"
+                            )
+                            .accessibilityIdentifier("chekinana.calendar.group.\(group.id)")
+
+                            if !group.chekis.isEmpty {
+                                ChekinanaCalendarThumbnailStrip(
+                                    chekis: group.chekis,
+                                    onSelect: { cheki in
+                                        openCalendarMedia(group, initialID: cheki.id)
+                                    }
                                 )
                             }
-                                .buttonStyle(.plain).accessibilityIdentifier("chekinana.calendar.shame.\(item.id.uuidString.lowercased())")
-                        } else {
-                            Label(
-                                "\(ChekinanaRecordKind.shame.title) · \(idolNames(item.idols))",
-                                systemImage: "photo"
-                            )
                         }
-                    }
-                    ForEach(selectedDougas) { item in
-                        if item.videoRef?.nonEmpty == nil {
-                            Button { selectedNoMediaRecord = .douga(item) } label: {
-                                Label(
-                                    "\(ChekinanaRecordKind.douga.title) · \(idolNames(item.idols))",
-                                    systemImage: "video"
+                        .contentShape(Rectangle())
+                        .overlay {
+                            ChekinanaCalendarGroupGestureSurface(
+                                dateKey: selectedDateKey,
+                                groupKey: group.combinationKey.id,
+                                orderedGroupKeys: orderedGroupKeys,
+                                onTap: { location, size in
+                                    handleCalendarGroupTap(
+                                        group,
+                                        location: location,
+                                        rowSize: size
+                                    )
+                                },
+                                onReorderEnded: { targetIndex in
+                                    commitGroupDrag(
+                                        groupKey: group.combinationKey.id,
+                                        targetIndex: targetIndex,
+                                        dateKey: selectedDateKey,
+                                        expectedGroupKeys: orderedGroupKeys
+                                    )
+                                },
+                                onDebugState: { state in
+                                    updateCalendarGroupGestureDebugState(
+                                        state,
+                                        groupKey: group.combinationKey.id
+                                    )
+                                }
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .allowsHitTesting(true)
+                            .accessibilityHidden(true)
+                        }
+#if DEBUG
+                        .overlay(alignment: .topLeading) {
+                            Text("")
+                                .frame(width: 1, height: 1)
+                                .allowsHitTesting(false)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityIdentifier(
+                                    "chekinana.calendar.debug.group-gesture.\(group.id)"
                                 )
-                            }
-                                .buttonStyle(.plain).accessibilityIdentifier("chekinana.calendar.douga.\(item.id.uuidString.lowercased())")
-                        } else {
-                            Label(
-                                "\(ChekinanaRecordKind.douga.title) · \(idolNames(item.idols))",
-                                systemImage: "video"
-                            )
+                                .accessibilityValue(
+                                    calendarGroupGestureDebugStates[
+                                        group.combinationKey.id
+                                    ] ?? "unlaid-out"
+                                )
                         }
+#endif
+                    }
                     }
                 }
             }
@@ -15855,38 +21926,130 @@ private struct ChekinanaCalendarView: View {
         .chekinanaScreenMarker("chekinana.calendar.selected-day")
     }
 
-    private func idolNames(_ values: [Idol]) -> String {
-        values.map(\.name).joined(separator: ", ").nonEmpty
-            ?? ChekinanaProductCopy.text("common.unassigned", "Unassigned")
+    private func openCalendarMedia(
+        _ group: ChekinanaCalendarIdolGroup,
+        initialID: UUID? = nil
+    ) {
+        guard !group.chekis.isEmpty else { return }
+        let selection = ChekinanaCalendarMediaSelection(
+            group: group,
+            initialID: initialID ?? group.chekis.first?.id
+        )
+        DispatchQueue.main.async {
+#if DEBUG
+            updateCalendarGroupGestureDebugState(
+                "present:\((initialID ?? group.chekis.first?.id)?.uuidString.lowercased() ?? "none")",
+                groupKey: group.combinationKey.id
+            )
+#endif
+            selectedMediaSelection = selection
+            isMediaViewerPresented = true
+        }
+    }
+
+    private func openCalendarGroupEditor(_ group: ChekinanaCalendarIdolGroup) {
+        selectedGroupEditor = .init(
+            date: selectedDate,
+            combinationKey: group.combinationKey
+        )
+    }
+
+    private func handleCalendarGroupTap(
+        _ group: ChekinanaCalendarIdolGroup,
+        location: CGPoint,
+        rowSize: CGSize
+    ) {
+        let visibleChekis = Array(group.chekis.prefix(5))
+        if let index = ChekinanaCalendarGroupTapPolicy.thumbnailIndex(
+            at: location,
+            rowSize: rowSize,
+            thumbnailCount: visibleChekis.count
+        ) {
+#if DEBUG
+            updateCalendarGroupGestureDebugState(
+                "route-media:\(visibleChekis[index].id.uuidString.lowercased())",
+                groupKey: group.combinationKey.id
+            )
+#endif
+            openCalendarMedia(group, initialID: visibleChekis[index].id)
+        } else {
+#if DEBUG
+            updateCalendarGroupGestureDebugState(
+                "route-editor",
+                groupKey: group.combinationKey.id
+            )
+#endif
+            openCalendarGroupEditor(group)
+        }
+    }
+
+    private func updateCalendarGroupGestureDebugState(
+        _ state: String,
+        groupKey: String
+    ) {
+#if DEBUG
+        calendarGroupGestureDebugStates[groupKey] = state
+#endif
+    }
+
+    private func commitGroupDrag(
+        groupKey: String,
+        targetIndex: Int,
+        dateKey: String,
+        expectedGroupKeys: [String]
+    ) {
+        guard dateKey == ChekinanaProductDate.key(selectedDate) else { return }
+        let currentGroupKeys = persistentlyOrderedSelectedGroups.map(
+            \.combinationKey.id
+        )
+        guard currentGroupKeys == expectedGroupKeys,
+              let sourceIndex = currentGroupKeys.firstIndex(of: groupKey),
+              currentGroupKeys.indices.contains(targetIndex),
+              sourceIndex != targetIndex else { return }
+        var reorderedGroupKeys = currentGroupKeys
+        let movedKey = reorderedGroupKeys.remove(at: sourceIndex)
+        reorderedGroupKeys.insert(movedKey, at: targetIndex)
+        do {
+            try ChekinanaCalendarGroupOrderStore.setOrder(
+                reorderedGroupKeys,
+                dateKey: dateKey,
+                in: modelContext
+            )
+        } catch {
+            reorderErrorMessage = error.localizedDescription
+        }
     }
 }
 
 private enum ChekinanaCalendarNoMediaRecord: Identifiable {
-    case cheki(Cheki)
+    case record(ChekiRecord)
     case shame(Shame)
     case douga(Douga)
-    var id: UUID { switch self { case .cheki(let value): value.id; case .shame(let value): value.id; case .douga(let value): value.id } }
+    var id: UUID { switch self { case .record(let value): value.id; case .shame(let value): value.id; case .douga(let value): value.id } }
     var listID: String { "\(kind.rawValue)-\(id.uuidString.lowercased())" }
-    var kind: ChekinanaRecordKind { switch self { case .cheki: .cheki; case .shame: .shame; case .douga: .douga } }
+    var kind: ChekinanaRecordKind { switch self { case .record: .cheki; case .shame: .shame; case .douga: .douga } }
     var typeName: String { kind.title }
-    var createdAt: Date? { switch self { case .cheki(let value): value.createdAt; case .shame, .douga: nil } }
-    var date: Date? { switch self { case .cheki(let value): value.date; case .shame(let value): value.date; case .douga(let value): value.date } }
-    var note: String { switch self { case .cheki(let value): value.note; case .shame(let value): value.note; case .douga(let value): value.note } }
-    var idolIDs: Set<UUID> { switch self { case .cheki(let value): Set(value.idols.map(\.id)); case .shame(let value): Set(value.idols.map(\.id)); case .douga(let value): Set(value.idols.map(\.id)) } }
+    var createdAt: Date? { nil }
+    var date: Date? { switch self { case .record(let value): value.date; case .shame(let value): value.date; case .douga(let value): value.date } }
+    var note: String { switch self { case .record(let value): value.note; case .shame(let value): value.note; case .douga(let value): value.note } }
+    var idolIDs: Set<UUID> { switch self { case .record(let value): Set(value.idolIDs); case .shame(let value): Set(value.idols.map(\.id)); case .douga(let value): Set(value.idols.map(\.id)) } }
 }
 
 private struct ChekinanaUndatedUnassignedRecordsView: View {
-    @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     @State private var selectedRecord: ChekinanaCalendarNoMediaRecord?
 
     private var records: [ChekinanaCalendarNoMediaRecord] {
-        let values = chekis.filter {
-            $0.imageRef?.nonEmpty == nil && $0.idols.isEmpty && $0.date == nil
-                && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
-        }.map(ChekinanaCalendarNoMediaRecord.cheki) + shames.filter {
+        let values = chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.isUndatedAndUnassigned($0)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }.map(ChekinanaCalendarNoMediaRecord.record) + shames.filter {
             $0.imageRef?.nonEmpty == nil && $0.idols.isEmpty && $0.date == nil
                 && ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs)
         }.map(ChekinanaCalendarNoMediaRecord.shame) + dougas.filter {
@@ -15992,44 +22155,42 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query private var idols: [Idol]
+    @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var mediaEventLinks: [MediaEventLink]
     @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
     let record: ChekinanaCalendarNoMediaRecord
     @State private var hasDate: Bool
     @State private var date: Date
+    @State private var eventID: UUID?
     @State private var note: String
     @State private var idolIDs: Set<UUID>
     @State private var choosingIdols = false
     @State private var errorMessage: String?
+    @State private var didLoadEvent = false
     init(record: ChekinanaCalendarNoMediaRecord) {
         self.record = record
         _hasDate = State(initialValue: record.date != nil)
         _date = State(initialValue: record.date ?? Date())
+        _eventID = State(initialValue: nil)
         _note = State(initialValue: record.note)
         _idolIDs = State(initialValue: record.idolIDs)
     }
     @ViewBuilder
     var body: some View {
         switch record {
-        case .cheki(let value):
-            ChekinanaChekiEditorView(cheki: value, allowsDelete: true)
+        case .record(let value):
+            ChekinanaChekiRecordEditor(record: value)
         case .shame, .douga:
             NavigationStack {
                 Form {
                     Section(ChekinanaProductCopy.text("common.idols", "Idols")) {
-                        ChekinanaIdolAvatarRow(
+                        ChekinanaIdolSelectionSummaryButton(
                             idols: visibleIdols.filter { idolIDs.contains($0.id) },
-                            size: 38,
-                            showsNames: true
-                        )
-                        Button(
-                            ChekinanaProductCopy.text(
-                                "common.change_idols",
-                                "Change Idols"
-                            )
+                            identifier: "chekinana.calendar.no-media.change-idols"
                         ) {
                             choosingIdols = true
                         }
-                        .frame(minHeight: 44)
                     }
                     Section(ChekinanaProductCopy.text("common.metadata", "Metadata")) {
                         Toggle(
@@ -16040,12 +22201,18 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
                             isOn: $hasDate
                         )
                         if hasDate {
-                            DatePicker(
+                            ChekinanaExpandableDateWheel(
                                 ChekinanaProductCopy.text("common.date", "Date"),
                                 selection: $date,
-                                displayedComponents: .date
+                                accessibilityIdentifier: "chekinana.calendar.no-media.date"
                             )
                         }
+                        ChekinanaChekiEventSelectionField(
+                            eventID: $eventID,
+                            recordDate: draftCanonicalDate,
+                            events: events,
+                            schedules: eventSchedules
+                        )
                         TextField(
                             ChekinanaProductCopy.text("common.note", "Note"),
                             text: $note,
@@ -16095,10 +22262,47 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
                     selectedIDs: $idolIDs
                 )
             }
+            .task(id: record.id) { loadEventIfNeeded() }
+            .onChange(of: hasDate) { _, _ in clearInvalidEventSelection() }
+            .onChange(of: date) { _, _ in clearInvalidEventSelection() }
         }
     }
     private var visibleIdols: [Idol] {
         ChekinanaVisibilityPolicy.visibleIdols(idols, hiddenIDs: hiddenIdols.hiddenIDs)
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    private func loadEventIfNeeded() {
+        guard !didLoadEvent else { return }
+        didLoadEvent = true
+        switch record {
+        case .record:
+            break
+        case .shame(let value):
+            eventID = ChekinanaMediaEventLinkStore.eventID(
+                mediaID: value.id,
+                kind: .shame,
+                links: mediaEventLinks
+            )
+        case .douga(let value):
+            eventID = ChekinanaMediaEventLinkStore.eventID(
+                mediaID: value.id,
+                kind: .douga,
+                links: mediaEventLinks
+            )
+        }
+    }
+
+    private func clearInvalidEventSelection() {
+        eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
     }
     private func save() {
         let normalized: Date?
@@ -16122,16 +22326,39 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
                 idolIDs: idolIDs,
                 in: modelContext
             )
-            switch record { case .cheki: return
-            case .shame(let value): value.idols = selectedIdols; value.date = normalized; value.note = note
-            case .douga(let value): value.idols = selectedIdols; value.date = normalized; value.note = note }
+            switch record {
+            case .record:
+                return
+            case .shame(let value):
+                value.idols = selectedIdols
+                value.date = normalized
+                value.note = note
+                try ChekinanaMediaEventLinkStore.set(
+                    mediaID: value.id,
+                    kind: .shame,
+                    eventID: eventID,
+                    in: modelContext,
+                    saveContext: { _ in }
+                )
+            case .douga(let value):
+                value.idols = selectedIdols
+                value.date = normalized
+                value.note = note
+                try ChekinanaMediaEventLinkStore.set(
+                    mediaID: value.id,
+                    kind: .douga,
+                    eventID: eventID,
+                    in: modelContext,
+                    saveContext: { _ in }
+                )
+            }
             try modelContext.save(); dismiss()
         } catch { modelContext.rollback(); errorMessage = error.localizedDescription }
     }
     private func delete() {
         do {
             switch record {
-            case .cheki:
+            case .record:
                 return
             case .shame(let value):
                 let target = try ChekinanaModelContextResolver.shame(
@@ -16146,6 +22373,16 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
                     )
                     return
                 }
+                try ChekinanaMediaEventLinkStore.delete(
+                    mediaID: target.id,
+                    kind: .shame,
+                    in: modelContext
+                )
+                try ChekinanaMediaShotTypeStore.delete(
+                    mediaID: target.id,
+                    kind: .shame,
+                    in: modelContext
+                )
                 modelContext.delete(target)
             case .douga(let value):
                 let target = try ChekinanaModelContextResolver.douga(
@@ -16160,6 +22397,16 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
                     )
                     return
                 }
+                try ChekinanaMediaEventLinkStore.delete(
+                    mediaID: target.id,
+                    kind: .douga,
+                    in: modelContext
+                )
+                try ChekinanaMediaShotTypeStore.delete(
+                    mediaID: target.id,
+                    kind: .douga,
+                    in: modelContext
+                )
                 modelContext.delete(target)
             }
             try modelContext.save()
@@ -16168,6 +22415,356 @@ private struct ChekinanaCalendarNoMediaRecordEditor: View {
             modelContext.rollback()
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+private struct ChekinanaChekiRecordEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query private var idols: [Idol]
+    @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
+    let record: ChekiRecord
+    private let initialSnapshot: ChekinanaChekiRecordSnapshot
+
+    @State private var idolIDs: Set<UUID>
+    @State private var hasDate: Bool
+    @State private var date: Date
+    @State private var eventID: UUID?
+    @State private var size: ChekiSize?
+    @State private var note: String
+    @State private var count: Int
+    @State private var choosingIdols = false
+    @State private var errorMessage: String?
+
+    init(record: ChekiRecord) {
+        self.record = record
+        initialSnapshot = ChekinanaChekiRecordSnapshot(record)
+        _idolIDs = State(initialValue: Set(record.idolIDs))
+        _hasDate = State(initialValue: record.date != nil)
+        _date = State(initialValue: record.date ?? Date())
+        _eventID = State(initialValue: record.eventID)
+        _size = State(initialValue: record.size)
+        _note = State(initialValue: record.note)
+        _count = State(initialValue: max(1, record.count))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                ChekinanaChekiRecordEditorFields(
+                    visibleIdols: visibleIdols,
+                    events: events,
+                    schedules: eventSchedules,
+                    identifierPrefix: "chekinana.record.editor",
+                    chooseIdols: { choosingIdols = true },
+                    idolIDs: $idolIDs,
+                    count: $count,
+                    hasDate: $hasDate,
+                    date: $date,
+                    eventID: $eventID,
+                    size: $size,
+                    note: $note
+                )
+                if let errorMessage {
+                    Section {
+                        ChekinanaInlineStatus(message: errorMessage, kind: .error)
+                    }
+                }
+            }
+            .chekinanaGroupedPageBackground()
+            .navigationTitle(
+                ChekinanaProductCopy.text("calendar.edit_simple_record", "Edit record")
+            )
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(
+                        ChekinanaProductCopy.text("common.save", "Save"),
+                        action: save
+                    )
+                    .accessibilityIdentifier("chekinana.record.editor.save")
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button(
+                        ChekinanaProductCopy.text("common.delete", "Delete"),
+                        role: .destructive,
+                        action: delete
+                    )
+                    .accessibilityIdentifier("chekinana.record.editor.delete")
+                }
+            }
+        }
+        .accessibilityIdentifier("chekinana.record.editor")
+        .sheet(isPresented: $choosingIdols) {
+            ChekinanaIdolAvatarCheckSelectionView(
+                idols: visibleIdols,
+                selectedIDs: $idolIDs,
+                identifierPrefix: "chekinana.record.editor.idol-selection"
+            )
+        }
+        .onChange(of: hasDate) { _, _ in clearInvalidEventSelection() }
+        .onChange(of: date) { _, _ in clearInvalidEventSelection() }
+    }
+
+    private var visibleIdols: [Idol] {
+        ChekinanaVisibilityPolicy.visibleIdols(
+            idols,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        )
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(from: date, displayedIn: .current)
+    }
+
+    private func clearInvalidEventSelection() {
+        eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
+    }
+
+    private func save() {
+        let selectedIDs = ChekinanaRequiredIdolSelectionPolicy.resolvedIDs(
+            selectedIDs: idolIDs,
+            visibleIDs: visibleIdols.map(\.id)
+        )
+        guard !selectedIDs.isEmpty else {
+            errorMessage = ChekinanaProductCopy.text(
+                "calendar.choose_idol_error",
+                "Choose at least one Idol."
+            )
+            return
+        }
+        let normalizedDate: Date?
+        if hasDate {
+            guard let canonical = ChekinanaDateOnly.canonicalDate(
+                from: date,
+                displayedIn: .current
+            ) else {
+                errorMessage = ChekinanaProductCopy.text(
+                    "error.normalize_date",
+                    "Unable to normalize the selected date."
+                )
+                return
+            }
+            normalizedDate = canonical
+        } else {
+            normalizedDate = nil
+        }
+        do {
+            let target = try ChekinanaModelContextResolver.chekiRecord(
+                id: record.id,
+                in: modelContext
+            )
+            let validEventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+                eventID,
+                recordDate: normalizedDate,
+                events: events
+            )
+            let relationships = try ChekinanaModelContextResolver.relationships(
+                idolIDs: Set(selectedIDs),
+                eventID: validEventID,
+                in: modelContext
+            )
+            _ = try ChekinanaChekiRecordStore.update(
+                target,
+                idols: relationships.idols,
+                event: relationships.event,
+                date: normalizedDate,
+                size: size,
+                note: note,
+                count: count,
+                expected: initialSnapshot,
+                in: modelContext
+            )
+            try modelContext.save()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func delete() {
+        do {
+            let target = try ChekinanaModelContextResolver.chekiRecord(
+                id: record.id,
+                in: modelContext
+            )
+            try ChekinanaChekiRecordStore.delete(
+                target,
+                expected: initialSnapshot,
+                in: modelContext
+            )
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+enum ChekinanaCalendarMonthYearWheelPolicy {
+    static let yearRange = 1...9_999
+    static let monthRange = 1...12
+
+    static func year(in date: Date) -> Int {
+        ChekinanaProductDate.calendar.component(.year, from: date)
+    }
+
+    static func month(in date: Date) -> Int {
+        ChekinanaProductDate.calendar.component(.month, from: date)
+    }
+
+    static func selection(
+        year: Int,
+        month: Int,
+        preservingDayFrom selectedDate: Date
+    ) -> (displayedMonth: Date, selectedDate: Date)? {
+        guard yearRange.contains(year), monthRange.contains(month) else {
+            return nil
+        }
+        let calendar = ChekinanaProductDate.calendar
+        var monthComponents = DateComponents()
+        monthComponents.calendar = calendar
+        monthComponents.timeZone = calendar.timeZone
+        monthComponents.year = year
+        monthComponents.month = month
+        monthComponents.day = 1
+        guard let displayedMonth = calendar.date(from: monthComponents),
+              let dayRange = calendar.range(
+                  of: .day,
+                  in: .month,
+                  for: displayedMonth
+              ) else {
+            return nil
+        }
+        let currentDay = calendar.component(.day, from: selectedDate)
+        var dateComponents = monthComponents
+        dateComponents.day = min(max(currentDay, 1), dayRange.count)
+        guard let selectedDate = calendar.date(from: dateComponents) else {
+            return nil
+        }
+        return (displayedMonth, selectedDate)
+    }
+
+    static func yearTitle(_ year: Int) -> String {
+        formatted(year: year, month: 1, template: "y")
+    }
+
+    static func monthTitle(_ month: Int) -> String {
+        formatted(year: 2_000, month: month, template: "MMMM")
+    }
+
+    private static func formatted(
+        year: Int,
+        month: Int,
+        template: String
+    ) -> String {
+        guard let date = ChekinanaProductDate.calendar.date(from: DateComponents(
+            calendar: ChekinanaProductDate.calendar,
+            timeZone: ChekinanaProductDate.calendar.timeZone,
+            year: year,
+            month: month,
+            day: 1
+        )) else {
+            return year.formatted()
+        }
+        let formatter = DateFormatter()
+        formatter.locale = ChekinanaLanguagePreference.displayLocale()
+        formatter.calendar = ChekinanaProductDate.calendar
+        formatter.timeZone = ChekinanaProductDate.calendar.timeZone
+        formatter.setLocalizedDateFormatFromTemplate(template)
+        return formatter.string(from: date)
+    }
+}
+
+private struct ChekinanaCalendarMonthYearWheels: View {
+    @Binding var displayedMonth: Date
+    @Binding var selectedDate: Date
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Picker(
+                ChekinanaProductCopy.text("calendar.year", "Year"),
+                selection: Binding(
+                    get: {
+                        ChekinanaCalendarMonthYearWheelPolicy.year(
+                            in: displayedMonth
+                        )
+                    },
+                    set: { apply(year: $0, month: currentMonth) }
+                )
+            ) {
+                ForEach(
+                    ChekinanaCalendarMonthYearWheelPolicy.yearRange,
+                    id: \.self
+                ) { year in
+                    Text(
+                        ChekinanaCalendarMonthYearWheelPolicy.yearTitle(year)
+                    )
+                    .tag(year)
+                }
+            }
+            .pickerStyle(.wheel)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .accessibilityIdentifier("chekinana.calendar.month-year.year-wheel")
+
+            Picker(
+                ChekinanaProductCopy.text("calendar.month", "Month"),
+                selection: Binding(
+                    get: { currentMonth },
+                    set: { apply(year: currentYear, month: $0) }
+                )
+            ) {
+                ForEach(
+                    ChekinanaCalendarMonthYearWheelPolicy.monthRange,
+                    id: \.self
+                ) { month in
+                    Text(
+                        ChekinanaCalendarMonthYearWheelPolicy.monthTitle(month)
+                    )
+                    .tag(month)
+                }
+            }
+            .pickerStyle(.wheel)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .accessibilityIdentifier("chekinana.calendar.month-year.month-wheel")
+        }
+        .frame(height: 154)
+        .accessibilityIdentifier("chekinana.calendar.month-year.wheels")
+    }
+
+    private var currentYear: Int {
+        ChekinanaCalendarMonthYearWheelPolicy.year(in: displayedMonth)
+    }
+
+    private var currentMonth: Int {
+        ChekinanaCalendarMonthYearWheelPolicy.month(in: displayedMonth)
+    }
+
+    private func apply(year: Int, month: Int) {
+        guard let next = ChekinanaCalendarMonthYearWheelPolicy.selection(
+            year: year,
+            month: month,
+            preservingDayFrom: selectedDate
+        ) else { return }
+        displayedMonth = next.displayedMonth
+        selectedDate = next.selectedDate
     }
 }
 
@@ -16189,16 +22786,14 @@ private struct ChekinanaMonthPicker: View {
         NavigationStack {
             Form {
                 Section {
-                    DatePicker(
+                    ChekinanaExpandableDateWheel(
                         ChekinanaProductCopy.text(
                             "calendar.select_date",
                             "Select date"
                         ),
                         selection: $draftDate,
-                        displayedComponents: .date
+                        accessibilityIdentifier: "chekinana.calendar.month-picker.date"
                     )
-                    .datePickerStyle(.graphical)
-                    .accessibilityIdentifier("chekinana.calendar.month-picker.date")
                 }
             }
             .chekinanaGroupedPageBackground()
@@ -16238,15 +22833,36 @@ struct ChekinanaCalendarRecordBatchPlan: Sendable {
     let manualStart: Int?
     let note: String
     let eventID: UUID?
+    let size: ChekiSize?
+
+    init(
+        kind: ChekinanaRecordKind,
+        idolIDs: [UUID],
+        date: Date,
+        quantity: Int,
+        manualStart: Int?,
+        note: String,
+        eventID: UUID?,
+        size: ChekiSize? = .mini
+    ) {
+        self.kind = kind
+        self.idolIDs = idolIDs
+        self.date = date
+        self.quantity = quantity
+        self.manualStart = manualStart
+        self.note = note
+        self.eventID = eventID
+        self.size = size
+    }
 }
 
 enum ChekinanaCalendarRecordQuantityPolicy {
     static func normalized(_ quantity: Int, for kind: ChekinanaRecordKind) -> Int {
-        kind == .cheki ? min(max(1, quantity), 100) : 1
+        kind == .cheki ? max(1, quantity) : 1
     }
 
     static func accepts(_ quantity: Int, for kind: ChekinanaRecordKind) -> Bool {
-        kind == .cheki && (1...100).contains(quantity)
+        kind == .cheki && quantity > 0
     }
 }
 
@@ -16287,50 +22903,34 @@ enum ChekinanaCalendarRecordBatchWriter {
         )
         let event = eventID.flatMap { id in allEvents.first { $0.id == id } }
 
-        var insertedIDs: [UUID] = []
-        insertedIDs.reserveCapacity(plan.quantity)
+        var affectedIDs: [UUID] = []
         do {
             try modelContext.transaction {
                 switch plan.kind {
                 case .cheki:
-                guard let group = ChekinanaChekiGroupKey(
-                    idolIDs: plan.idolIDs,
-                    date: plan.date
-                ) else {
-                    throw ChekinanaProductRecordCreationError.indexOverflow
+                guard plan.manualStart == nil else {
+                    throw ChekinanaProductRecordCreationError.invalidIndex
                 }
-                let liveSnapshots = try ChekinanaChekiIndexing.snapshots(
-                    forCanonicalDate: plan.date,
+                let record = try ChekinanaChekiRecordStore.upsert(
+                    idols: relationships,
+                    event: event,
+                    date: plan.date,
+                    size: plan.size,
+                    note: plan.note,
+                    adding: plan.quantity,
                     in: modelContext
                 )
-                let indices = try plannedIndices(
-                    group: group,
-                    quantity: plan.quantity,
-                    manualStart: plan.manualStart,
-                    existing: liveSnapshots
-                )
-                for idx in indices {
-                    let cheki = Cheki(
-                        date: plan.date,
-                        idx: idx,
-                        size: .mini,
-                        note: plan.note
-                    )
-                    modelContext.insert(cheki)
-                    guard cheki.modelContext === modelContext else {
-                        throw ChekinanaProductRecordCreationError.modelContextMismatch
-                    }
-                    cheki.idols = relationships
-                    cheki.event = event
-                    insertedIDs.append(cheki.id)
+                guard record.modelContext === modelContext else {
+                    throw ChekinanaProductRecordCreationError.modelContextMismatch
                 }
+                affectedIDs = [record.id]
                 case .shame:
                     throw ChekinanaMediaBackedCreationError.shameRequiresImage
                 case .douga:
                     throw ChekinanaMediaBackedCreationError.dougaRequiresVideo
                 }
             }
-            return insertedIDs
+            return affectedIDs
         } catch {
             modelContext.rollback()
             throw error
@@ -16399,10 +22999,11 @@ private struct ChekinanaCalendarRecordEditor: View {
     let initialDate: Date
     private let type = ChekinanaRecordKind.cheki
     @State private var date: Date
-    @State private var idolID: UUID?
+    @State private var idolIDs = Set<UUID>()
     @State private var quantity = 1
-    @State private var idxText = ""
+    @State private var size: ChekiSize? = .mini
     @State private var note = ""
+    @State private var choosingIdols = false
     @State private var error: String?
     @State private var saveProgress: ChekinanaCalendarRecordSaveProgress?
 
@@ -16424,41 +23025,33 @@ private struct ChekinanaCalendarRecordEditor: View {
                         Text(ChekinanaRecordKind.cheki.title)
                     }
                     .accessibilityIdentifier("chekinana.calendar.add_record.type")
-                    DatePicker(
+                    ChekinanaExpandableDateWheel(
                         ChekinanaProductCopy.text("common.date", "Date"),
                         selection: $date,
-                        displayedComponents: .date
+                        accessibilityIdentifier: "chekinana.calendar.add_record.date"
+                    )
+                    ChekinanaIdolSelectionSummaryButton(
+                        idols: visibleIdols.filter { idolIDs.contains($0.id) },
+                        identifier: "chekinana.calendar.add_record.change-idols"
+                    ) {
+                        choosingIdols = true
+                    }
+                    ChekinanaQuantityControl(
+                        value: $quantity,
+                        allowedRange: 1...ChekinanaQuantityInputPolicy.maximum,
+                        accessibilityIdentifier: "chekinana.calendar.add_record.quantity"
                     )
                     Picker(
-                        ChekinanaProductCopy.text("common.idol", "Idol"),
-                        selection: $idolID
+                        ChekinanaProductCopy.text("common.size", "Size"),
+                        selection: $size
                     ) {
-                        Text(
-                            ChekinanaProductCopy.text(
-                                "calendar.choose_idol",
-                                "Choose an Idol"
-                            )
-                        )
-                        .tag(UUID?.none)
-                        ForEach(visibleIdols) { Text($0.name).tag(Optional($0.id)) }
+                        Text(ChekinanaProductCopy.text("common.unset", "Unset"))
+                            .tag(ChekiSize?.none)
+                        ForEach(ChekiSize.allCases) { value in
+                            Text(value.rawValue).tag(Optional(value))
+                        }
                     }
-                    Stepper(
-                        ChekinanaProductCopy.format(
-                            "calendar.quantity_value",
-                            "Quantity: %lld",
-                            Int64(quantity)
-                        ),
-                        value: $quantity,
-                        in: 1...100
-                    )
-                    TextField(
-                        ChekinanaProductCopy.text(
-                            "calendar.starting_index",
-                            "Starting index (optional)"
-                        ),
-                        text: $idxText
-                    )
-                    .keyboardType(.numberPad)
+                    .accessibilityIdentifier("chekinana.calendar.add_record.size")
                     TextField(
                         ChekinanaProductCopy.text("common.note", "Note"),
                         text: $note,
@@ -16515,6 +23108,13 @@ private struct ChekinanaCalendarRecordEditor: View {
             }
             .interactiveDismissDisabled(isSaving)
             .accessibilityIdentifier("chekinana.calendar.add_record.editor")
+            .sheet(isPresented: $choosingIdols) {
+                ChekinanaIdolAvatarCheckSelectionView(
+                    idols: visibleIdols,
+                    selectedIDs: $idolIDs,
+                    identifierPrefix: "chekinana.calendar.add_record.idol-selection"
+                )
+            }
         }
     }
 
@@ -16532,10 +23132,14 @@ private struct ChekinanaCalendarRecordEditor: View {
     }
 
     private func frozenPlan() -> ChekinanaCalendarRecordBatchPlan? {
-        guard let selectedID = idolID else {
+        let selectedIDs = ChekinanaRequiredIdolSelectionPolicy.resolvedIDs(
+            selectedIDs: idolIDs,
+            visibleIDs: visibleIdols.map(\.id)
+        )
+        guard !selectedIDs.isEmpty else {
             error = ChekinanaProductCopy.text(
                 "calendar.choose_idol_error",
-                "Choose an Idol."
+                "Choose at least one Idol."
             )
             return nil
         }
@@ -16549,26 +23153,15 @@ private struct ChekinanaCalendarRecordEditor: View {
             )
             return nil
         }
-        let normalizedIdxText = idxText.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let manualStart: Int?
-        if type != .cheki || normalizedIdxText.isEmpty {
-            manualStart = nil
-        } else if let parsed = Int(normalizedIdxText), parsed > 0 {
-            manualStart = parsed
-        } else {
-            error = ChekinanaProductRecordCreationError.invalidIndex.localizedDescription
-            return nil
-        }
         return ChekinanaCalendarRecordBatchPlan(
             kind: type,
-            idolIDs: [selectedID],
+            idolIDs: selectedIDs,
             date: canonical,
             quantity: quantity,
-            manualStart: manualStart,
+            manualStart: nil,
             note: note,
-            eventID: nil
+            eventID: nil,
+            size: size
         )
     }
 
@@ -16576,28 +23169,6 @@ private struct ChekinanaCalendarRecordEditor: View {
     private func saveClaimed(_ plan: ChekinanaCalendarRecordBatchPlan) async {
         defer { saveProgress = nil }
         do {
-            if plan.kind == .cheki {
-                guard let group = ChekinanaChekiGroupKey(
-                    idolIDs: plan.idolIDs,
-                    date: plan.date
-                ) else {
-                    throw ChekinanaProductRecordCreationError.indexOverflow
-                }
-                let container = modelContext.container
-                let snapshotActor = await Task.detached(priority: .userInitiated) {
-                    ChekinanaChekiIndexSnapshotActor(modelContainer: container)
-                }.value
-                let snapshots = try await snapshotActor.snapshots(
-                    forCanonicalDate: plan.date
-                )
-                try Task.checkCancellation()
-                _ = try ChekinanaCalendarRecordBatchWriter.plannedIndices(
-                    group: group,
-                    quantity: plan.quantity,
-                    manualStart: plan.manualStart,
-                    existing: snapshots
-                )
-            }
             try Task.checkCancellation()
             saveProgress = .saving(completed: 0, total: plan.quantity)
             _ = try ChekinanaCalendarRecordBatchWriter.commit(
@@ -16612,23 +23183,139 @@ private struct ChekinanaCalendarRecordEditor: View {
     }
 }
 
+struct ChekinanaIdolCombinationKey: Hashable, Sendable {
+    let idolIDs: [UUID]
+
+    init(_ idolIDs: some Sequence<UUID>) {
+        self.idolIDs = Array(Set(idolIDs)).sorted {
+            $0.uuidString < $1.uuidString
+        }
+    }
+
+    var id: String {
+        idolIDs.map { $0.uuidString.lowercased() }
+            .joined(separator: "+")
+            .nonEmpty ?? "unassigned"
+    }
+}
+
 struct ChekinanaCalendarIdolGroup: Identifiable {
     let id: String
     let idol: Idol?
+    let orderedIdols: [Idol]
+    let isStandaloneMultiIdol: Bool
+    let combinationKey: ChekinanaIdolCombinationKey
     var chekis: [Cheki]
+    var records: [ChekiRecord] = []
+    var shames: [Shame] = []
+    var dougas: [Douga] = []
+
+    init(
+        id: String,
+        idol: Idol?,
+        orderedIdols: [Idol]? = nil,
+        isStandaloneMultiIdol: Bool = false,
+        chekis: [Cheki],
+        records: [ChekiRecord] = [],
+        shames: [Shame] = [],
+        dougas: [Douga] = [],
+        combinationKey: ChekinanaIdolCombinationKey? = nil
+    ) {
+        self.id = id
+        self.idol = idol
+        self.orderedIdols = orderedIdols ?? idol.map { [$0] } ?? []
+        self.isStandaloneMultiIdol = isStandaloneMultiIdol
+        self.combinationKey = combinationKey ?? ChekinanaIdolCombinationKey(
+            (orderedIdols ?? idol.map { [$0] } ?? []).map(\.id)
+        )
+        self.chekis = chekis
+        self.records = records
+        self.shames = shames
+        self.dougas = dougas
+    }
+
+    var count: Int {
+        chekiCount + shameCount + dougaCount
+    }
+
+    var chekiCount: Int {
+        chekis.count + ChekinanaChekiRecordStore.totalCount(records)
+    }
+
+    var shameCount: Int { shames.count }
+    var dougaCount: Int { dougas.count }
+
+    var countLabels: [String] {
+        [
+            chekiCount > 0
+                ? ChekinanaRecordKind.cheki.countLabel(chekiCount) : nil,
+            shameCount > 0
+                ? ChekinanaRecordKind.shame.countLabel(shameCount) : nil,
+            dougaCount > 0
+                ? ChekinanaRecordKind.douga.countLabel(dougaCount) : nil,
+        ].compactMap { $0 }
+    }
+
+    var allObjectIDs: [UUID] {
+        chekis.map(\.id) + records.map(\.id) + shames.map(\.id) + dougas.map(\.id)
+    }
 
     var name: String {
-        idol?.name ?? ChekinanaProductCopy.text("common.unassigned", "Unassigned")
+        orderedIdols.map(\.name).joined(
+            separator: ChekinanaProductCopy.text(
+                "assistant.list_separator",
+                ", "
+            )
+        ).nonEmpty ?? ChekinanaProductCopy.text(
+            "common.unassigned",
+            "Unassigned"
+        )
     }
 
     static func groups(for chekis: [Cheki]) -> [ChekinanaCalendarIdolGroup] {
+        groups(
+            for: chekis,
+            records: [],
+            relationshipIndex: ChekinanaChekiRecordRelationshipIndex(idols: [])
+        )
+    }
+
+    static func groups(
+        for chekis: [Cheki],
+        records: [ChekiRecord],
+        relationshipIndex: ChekinanaChekiRecordRelationshipIndex,
+        groupsByExactIdolCombination: Bool = false,
+        shames: [Shame] = [],
+        dougas: [Douga] = []
+    ) -> [ChekinanaCalendarIdolGroup] {
+        if groupsByExactIdolCombination {
+            return exactCombinationGroups(
+                chekis: chekis,
+                records: records,
+                shames: shames,
+                dougas: dougas,
+                relationshipIndex: relationshipIndex
+            )
+        }
         var result: [ChekinanaCalendarIdolGroup] = []
         for cheki in chekis {
-            if cheki.idols.isEmpty {
+            let orderedIdols = uniqueIdols(cheki.idols)
+            if orderedIdols.isEmpty {
                 append(cheki, idol: nil, to: &result)
             } else {
-                for idol in cheki.idols {
+                for idol in orderedIdols {
                     append(cheki, idol: idol, to: &result)
+                }
+            }
+        }
+        for record in records {
+            let originalIdolIDs = uniqueIDs(record.idolIDs)
+            let resolvedIdols = uniqueIdols(relationshipIndex.idols(for: record))
+            if originalIdolIDs.isEmpty || resolvedIdols.isEmpty {
+                append(record, idol: nil, to: &result)
+            } else {
+                for idol in resolvedIdols {
+                    append(record, idol: idol, to: &result)
                 }
             }
         }
@@ -16644,8 +23331,177 @@ struct ChekinanaCalendarIdolGroup: Identifiable {
             .sorted { lhs, rhs in
                 if lhs.id == "unassigned" { return false }
                 if rhs.id == "unassigned" { return true }
-                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+                let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+                if nameOrder != .orderedSame {
+                    return nameOrder == .orderedAscending
+                }
+                return lhs.id < rhs.id
             }
+    }
+
+    private static func exactCombinationGroups(
+        chekis: [Cheki],
+        records: [ChekiRecord],
+        shames: [Shame],
+        dougas: [Douga],
+        relationshipIndex: ChekinanaChekiRecordRelationshipIndex
+    ) -> [ChekinanaCalendarIdolGroup] {
+        var result: [ChekinanaCalendarIdolGroup] = []
+
+        for cheki in chekis {
+            appendExact(
+                cheki,
+                idolIDs: cheki.idols.map(\.id),
+                orderedIdols: uniqueIdols(cheki.idols),
+                to: &result
+            )
+        }
+        for record in records {
+            appendExact(
+                record,
+                idolIDs: record.idolIDs,
+                orderedIdols: uniqueIdols(relationshipIndex.idols(for: record)),
+                to: &result
+            )
+        }
+        for shame in shames {
+            appendExact(
+                shame,
+                idolIDs: shame.idols.map(\.id),
+                orderedIdols: uniqueIdols(shame.idols),
+                to: &result
+            )
+        }
+        for douga in dougas {
+            appendExact(
+                douga,
+                idolIDs: douga.idols.map(\.id),
+                orderedIdols: uniqueIdols(douga.idols),
+                to: &result
+            )
+        }
+
+        return result
+            .map { group in
+                var sorted = group
+                sorted.chekis.sort { lhs, rhs in
+                    if lhs.idx != rhs.idx {
+                        return (lhs.idx ?? Int.max) < (rhs.idx ?? Int.max)
+                    }
+                    if lhs.createdAt != rhs.createdAt {
+                        return lhs.createdAt < rhs.createdAt
+                    }
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return sorted
+            }
+            .sorted { lhs, rhs in
+                if lhs.combinationKey.id == "unassigned" { return false }
+                if rhs.combinationKey.id == "unassigned" { return true }
+                let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+                if nameOrder != .orderedSame {
+                    return nameOrder == .orderedAscending
+                }
+                return lhs.id < rhs.id
+            }
+    }
+
+    private static func exactGroupIndex(
+        idolIDs: some Sequence<UUID>,
+        orderedIdols: [Idol],
+        in groups: inout [ChekinanaCalendarIdolGroup]
+    ) -> Int {
+        let key = ChekinanaIdolCombinationKey(idolIDs)
+        if let index = groups.firstIndex(where: { $0.combinationKey == key }) {
+            return index
+        }
+        groups.append(.init(
+            id: "combination-\(key.id)",
+            idol: key.idolIDs.count == 1 ? orderedIdols.first : nil,
+            orderedIdols: orderedIdols,
+            isStandaloneMultiIdol: key.idolIDs.count > 1,
+            chekis: [],
+            combinationKey: key
+        ))
+        return groups.index(before: groups.endIndex)
+    }
+
+    private static func appendExact(
+        _ cheki: Cheki,
+        idolIDs: [UUID],
+        orderedIdols: [Idol],
+        to groups: inout [ChekinanaCalendarIdolGroup]
+    ) {
+        let index = exactGroupIndex(
+            idolIDs: idolIDs,
+            orderedIdols: orderedIdols,
+            in: &groups
+        )
+        guard !groups[index].chekis.contains(where: { $0.id == cheki.id }) else {
+            return
+        }
+        groups[index].chekis.append(cheki)
+    }
+
+    private static func appendExact(
+        _ record: ChekiRecord,
+        idolIDs: [UUID],
+        orderedIdols: [Idol],
+        to groups: inout [ChekinanaCalendarIdolGroup]
+    ) {
+        let index = exactGroupIndex(
+            idolIDs: idolIDs,
+            orderedIdols: orderedIdols,
+            in: &groups
+        )
+        guard !groups[index].records.contains(where: { $0.id == record.id }) else {
+            return
+        }
+        groups[index].records.append(record)
+    }
+
+    private static func appendExact(
+        _ shame: Shame,
+        idolIDs: [UUID],
+        orderedIdols: [Idol],
+        to groups: inout [ChekinanaCalendarIdolGroup]
+    ) {
+        let index = exactGroupIndex(
+            idolIDs: idolIDs,
+            orderedIdols: orderedIdols,
+            in: &groups
+        )
+        guard !groups[index].shames.contains(where: { $0.id == shame.id }) else {
+            return
+        }
+        groups[index].shames.append(shame)
+    }
+
+    private static func appendExact(
+        _ douga: Douga,
+        idolIDs: [UUID],
+        orderedIdols: [Idol],
+        to groups: inout [ChekinanaCalendarIdolGroup]
+    ) {
+        let index = exactGroupIndex(
+            idolIDs: idolIDs,
+            orderedIdols: orderedIdols,
+            in: &groups
+        )
+        guard !groups[index].dougas.contains(where: { $0.id == douga.id }) else {
+            return
+        }
+        groups[index].dougas.append(douga)
+    }
+
+    private static func uniqueIdols(_ idols: [Idol]) -> [Idol] {
+        var seen = Set<UUID>()
+        return idols.filter { seen.insert($0.id).inserted }
+    }
+
+    private static func uniqueIDs(_ ids: [UUID]) -> [UUID] {
+        var seen = Set<UUID>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     private static func append(
@@ -16662,24 +23518,179 @@ struct ChekinanaCalendarIdolGroup: Identifiable {
             groups.append(.init(id: key, idol: idol, chekis: [cheki]))
         }
     }
+
+    private static func append(
+        _ record: ChekiRecord,
+        idol: Idol?,
+        to groups: inout [ChekinanaCalendarIdolGroup]
+    ) {
+        let key = idol?.id.uuidString.lowercased() ?? "unassigned"
+        if let index = groups.firstIndex(where: { $0.id == key }) {
+            if !groups[index].records.contains(where: { $0.id == record.id }) {
+                groups[index].records.append(record)
+            }
+        } else {
+            groups.append(.init(
+                id: key,
+                idol: idol,
+                chekis: [],
+                records: [record]
+            ))
+        }
+    }
+}
+
+enum ChekinanaCalendarIdolGroupPrimaryRoute: Equatable {
+    case groupEditor([UUID])
+    case none
+}
+
+enum ChekinanaCalendarSelectedDayLayout {
+    static let sectionSpacing: CGFloat = 14
+    static let recordSpacing: CGFloat = 8
+    static let groupControlSpacing: CGFloat = 6
+    static let maximumIdolAvatarStripWidth: CGFloat = 116
+    static let thumbnailWidth: CGFloat = 38
+    static let thumbnailHeight: CGFloat = 50
+    static let thumbnailOverlap: CGFloat = -12
+
+    static func thumbnailStripWidth(count: Int) -> CGFloat {
+        guard count > 0 else { return 0 }
+        return thumbnailWidth * CGFloat(count)
+            + thumbnailOverlap * CGFloat(count - 1)
+    }
+
+    static func idolAvatarStripWidth(count: Int, avatarSize: CGFloat) -> CGFloat {
+        guard count > 0 else { return avatarSize }
+        let naturalStep = avatarSize * 0.72
+        let naturalWidth = avatarSize + CGFloat(count - 1) * naturalStep
+        return min(maximumIdolAvatarStripWidth, naturalWidth)
+    }
+}
+
+enum ChekinanaCalendarIdolGroupRouting {
+    static func primaryRoute(
+        for group: ChekinanaCalendarIdolGroup
+    ) -> ChekinanaCalendarIdolGroupPrimaryRoute {
+        let ids = group.allObjectIDs
+        return ids.isEmpty ? .none : .groupEditor(ids)
+    }
+}
+
+private struct ChekinanaCalendarRecordGroupSelection: Identifiable {
+    let recordIDs: [UUID]
+    var id: String {
+        recordIDs.map(\.uuidString).sorted().joined(separator: ",")
+    }
+}
+
+struct ChekinanaCalendarMediaSelection: Identifiable {
+    let group: ChekinanaCalendarIdolGroup
+    let initialID: UUID?
+
+    var mediaChekis: [Cheki] {
+        group.chekis.filter { $0.imageRef?.nonEmpty != nil }
+    }
+
+    var resolvedInitialID: UUID? {
+        ChekinanaChekiViewerRoutingPolicy.initialID(
+            requested: initialID,
+            available: mediaChekis.map(\.id)
+        )
+    }
+
+    var id: String {
+        group.id + "|" + (initialID?.uuidString.lowercased() ?? "first")
+    }
+}
+
+struct ChekinanaCalendarGroupEditorSelection: Identifiable {
+    let date: Date
+    let combinationKey: ChekinanaIdolCombinationKey
+
+    var id: String {
+        "\(ChekinanaProductDate.key(date))|\(combinationKey.id)"
+    }
+}
+
+private struct ChekinanaCalendarIdolAvatarStrip: View {
+    let idols: [Idol]
+    let size: CGFloat
+
+    var body: some View {
+        if idols.isEmpty {
+            Image(systemName: "person.slash")
+                .frame(width: size, height: size)
+                .background(Color(uiColor: .tertiarySystemGroupedBackground))
+                .clipShape(Circle())
+                .accessibilityHidden(true)
+        } else {
+            let width = ChekinanaCalendarSelectedDayLayout.idolAvatarStripWidth(
+                count: idols.count,
+                avatarSize: size
+            )
+            let layout = ChekinanaGalleryAvatarLayout.make(
+                availableWidth: width,
+                count: idols.count,
+                maximumDiameter: size
+            )
+            ZStack(alignment: .leading) {
+                ForEach(Array(idols.enumerated()), id: \.element.id) { index, idol in
+                    ChekinanaIdolAvatar(idol: idol, size: layout.diameter)
+                        .overlay {
+                            Circle().stroke(
+                                Color(uiColor: .systemBackground),
+                                lineWidth: 2
+                            )
+                        }
+                        .offset(x: layout.x(for: index))
+                }
+            }
+            .frame(width: width, height: size, alignment: .leading)
+            .accessibilityHidden(true)
+        }
+    }
 }
 
 private struct ChekinanaCalendarThumbnailStrip: View {
     let chekis: [Cheki]
+    let onSelect: (Cheki) -> Void
 
     var body: some View {
-        HStack(spacing: -12) {
-            ForEach(Array(chekis.prefix(5).reversed())) { cheki in
-                ChekinanaCalendarThumbnail(cheki: cheki, width: 38, height: 50)
+        HStack(spacing: ChekinanaCalendarSelectedDayLayout.thumbnailOverlap) {
+            ForEach(Array(chekis.prefix(5))) { cheki in
+                ChekinanaCalendarThumbnail(
+                    cheki: cheki,
+                    width: ChekinanaCalendarSelectedDayLayout.thumbnailWidth,
+                    height: ChekinanaCalendarSelectedDayLayout.thumbnailHeight
+                )
                     .overlay {
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .stroke(Color(uiColor: .systemBackground), lineWidth: 2)
                     }
+                .contentShape(Rectangle())
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { onSelect(cheki) }
+                .accessibilityLabel(
+                    ChekinanaProductCopy.format(
+                        "calendar.view_cheki",
+                        "View %@",
+                        ChekinanaRecordKind.cheki.title
+                    )
+                )
+                .accessibilityIdentifier(
+                    "chekinana.calendar.thumbnail.\(cheki.id.uuidString.lowercased())"
+                )
             }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(
+            width: ChekinanaCalendarSelectedDayLayout.thumbnailStripWidth(
+                count: min(chekis.count, 5)
+            ),
+            alignment: .trailing
+        )
         .clipped()
-        .accessibilityHidden(true)
     }
 }
 
@@ -16710,160 +23721,501 @@ private struct ChekinanaCalendarThumbnail: View {
     }
 }
 
-private struct ChekinanaCalendarGroupSummary: View {
-    @Environment(\.dismiss) private var dismiss
-    let group: ChekinanaCalendarIdolGroup
-    @State private var selectedChekiID: UUID
-    @State private var selectedNoMediaRecord: ChekinanaCalendarNoMediaRecord?
+private enum ChekinanaCalendarGroupEditorError: LocalizedError {
+    case invalidDate
+    case invalidIndex
+    case indexRequiresGroup
+    case indexCollision(Int)
+    case missingIdol
 
-    init(group: ChekinanaCalendarIdolGroup) {
-        self.group = group
-        _selectedChekiID = State(initialValue: group.chekis.first?.id ?? UUID())
+    var errorDescription: String? {
+        switch self {
+        case .invalidDate:
+            ChekinanaProductCopy.text(
+                "error.normalize_date",
+                "Unable to normalize the selected date."
+            )
+        case .invalidIndex:
+            ChekinanaProductCopy.text(
+                "error.invalid_index",
+                "Index must be empty or a positive integer."
+            )
+        case .indexRequiresGroup:
+            ChekinanaProductCopy.text(
+                "error.index_requires_group",
+                "A positive index requires both a date and at least one Idol."
+            )
+        case .indexCollision(let value):
+            ChekinanaProductCopy.format(
+                "error.index_collision_for_value",
+                "Index #%lld is already used in this Idol/date group.",
+                Int64(value)
+            )
+        case .missingIdol:
+            ChekinanaProductCopy.text(
+                "calendar.choose_idol_error",
+                "Choose at least one Idol."
+            )
+        }
     }
+}
 
-    private var selectedCheki: Cheki? {
-        group.chekis.first { $0.id == selectedChekiID } ?? group.chekis.first
+private struct ChekinanaCalendarRecordDraft: Identifiable {
+    let id: UUID
+    var idolIDs: Set<UUID>
+    var count: Int
+    var hasDate: Bool
+    var date: Date
+    var eventID: UUID?
+    var size: ChekiSize?
+    var note: String
+
+    init(_ record: ChekiRecord) {
+        id = record.id
+        idolIDs = Set(record.idolIDs)
+        count = max(1, record.count)
+        hasDate = record.date != nil
+        date = record.date.flatMap {
+            ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
+        } ?? Date()
+        eventID = record.eventID
+        size = record.size
+        note = record.note
+    }
+}
+
+private struct ChekinanaCalendarRecordIdolSelection: Identifiable {
+    let id: UUID
+}
+
+private struct ChekinanaCalendarGroupEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query private var idols: [Idol]
+    @Query(sort: \Event.date) private var events: [Event]
+    @Query private var eventSchedules: [EventSchedule]
+    @Query private var chekis: [Cheki]
+    @Query private var records: [ChekiRecord]
+    @Query private var shames: [Shame]
+    @Query private var dougas: [Douga]
+    @ObservedObject private var hiddenIdols = ChekinanaHiddenIdolStore.shared
+    let selection: ChekinanaCalendarGroupEditorSelection
+
+    @State private var editingMediaItem: ChekinanaGalleryItem?
+    @State private var recordDrafts: [ChekinanaCalendarRecordDraft] = []
+    @State private var idolSelectionRecord: ChekinanaCalendarRecordIdolSelection?
+    @State private var didLoadDrafts = false
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+
+    private var group: ChekinanaCalendarIdolGroup? {
+        let dayChekis = ChekinanaRecordOrdering.orderedChekis(chekis.filter {
+            $0.imageRef?.nonEmpty != nil
+                && ChekinanaProductDate.isSameDay($0.date, selection.date)
+                && ChekinanaVisibilityPolicy.includesRecord(
+                    idols: $0.idols,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        })
+        let dayRecords = records.filter {
+            ChekinanaProductDate.isSameDay($0.date, selection.date)
+                && ChekinanaChekiRecordReadPolicy.isVisible(
+                    $0,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        let dayShames = shames.filter {
+            ChekinanaProductDate.isSameDay($0.date, selection.date)
+                && ChekinanaVisibilityPolicy.includesRecord(
+                    idols: $0.idols,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        let dayDougas = dougas.filter {
+            ChekinanaProductDate.isSameDay($0.date, selection.date)
+                && ChekinanaVisibilityPolicy.includesRecord(
+                    idols: $0.idols,
+                    hiddenIDs: hiddenIdols.hiddenIDs
+                )
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        return ChekinanaCalendarIdolGroup.groups(
+            for: dayChekis,
+            records: dayRecords,
+            relationshipIndex: ChekinanaChekiRecordRelationshipIndex(
+                idols: idols,
+                events: events
+            ),
+            groupsByExactIdolCombination: true,
+            shames: dayShames,
+            dougas: dayDougas
+        ).first { $0.combinationKey == selection.combinationKey }
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    let mediaChekis = group.chekis.filter {
-                        $0.imageRef?.nonEmpty != nil
-                    }
-                    if !mediaChekis.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(alignment: .top, spacing: 12) {
-                                ForEach(mediaChekis) { cheki in
-                                    Button { selectedChekiID = cheki.id } label: {
-                                        ChekinanaGalleryCard(cheki: cheki)
-                                            .frame(width: 168)
-                                            .overlay {
-                                                RoundedRectangle(cornerRadius: 17, style: .continuous)
-                                                    .stroke(
-                                                        selectedChekiID == cheki.id
-                                                            ? ChekinanaProductTheme.accent
-                                                            : Color.clear,
-                                                        lineWidth: 3
-                                                    )
-                                            }
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(
-                                        ChekinanaProductCopy.format(
-                                            "calendar.view_cheki",
-                                            "View %@",
-                                            cheki.idx.map {
-                                                "\(ChekinanaRecordKind.cheki.title) #\($0)"
-                                            } ?? ChekinanaRecordKind.cheki.title
-                                        )
-                                    )
-                                    .accessibilityIdentifier("chekinana.calendar.group.cheki.\(cheki.id.uuidString.lowercased())")
-                                }
-                            }
-                            .padding(.horizontal, 2)
+                if didLoadDrafts {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if let group {
+                            mediaStripSection(
+                                title: ChekinanaRecordKind.cheki.title,
+                                items: group.chekis.map(ChekinanaGalleryItem.cheki),
+                                identifier: "cheki"
+                            )
+                            mediaStripSection(
+                                title: ChekinanaRecordKind.shame.title,
+                                items: group.shames.map(ChekinanaGalleryItem.shame),
+                                identifier: "shame"
+                            )
+                            mediaStripSection(
+                                title: ChekinanaRecordKind.douga.title,
+                                items: group.dougas.map(ChekinanaGalleryItem.douga),
+                                identifier: "douga"
+                            )
                         }
-                        .accessibilityIdentifier("chekinana.calendar.group.strip")
-                    }
-                    ForEach(group.chekis.filter { $0.imageRef?.nonEmpty == nil }) { cheki in
-                        Button { selectedChekiID = cheki.id } label: {
-                            HStack(spacing: 10) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(ChekinanaRecordKind.cheki.title)\(cheki.idx.map { " #\($0)" } ?? "")")
-                                        .font(.subheadline.weight(.semibold))
-                                    Text(
-                                        cheki.note.nonEmpty
-                                            ?? ChekinanaProductCopy.text(
-                                                "common.no_media",
-                                                "No media"
-                                            )
-                                    )
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .contentShape(Rectangle())
+                        ForEach($recordDrafts) { $draft in
+                            recordEditorSection($draft)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier(
-                            "chekinana.calendar.group.no-media.\(cheki.id.uuidString.lowercased())"
-                        )
-                    }
-
-                    if let cheki = selectedCheki {
-                        ChekinanaSectionCard {
-                            VStack(alignment: .leading, spacing: 12) {
-                                ChekinanaIdolAvatarRow(idols: cheki.idols, size: 36, showsNames: true)
-                                Divider()
-                                LabeledContent(
-                                    ChekinanaProductCopy.text("common.date", "Date"),
-                                    value: ChekinanaProductDate.displayString(cheki.date)
+                        if let errorMessage {
+                            ChekinanaSectionCard {
+                                ChekinanaInlineStatus(
+                                    message: errorMessage,
+                                    kind: .error
                                 )
-                                LabeledContent(
-                                    ChekinanaProductCopy.text("common.index", "Index"),
-                                    value: cheki.idx.map { "#\($0)" }
-                                        ?? ChekinanaProductCopy.text(
-                                            "common.no_index",
-                                            "No index"
-                                        )
-                                )
-                                if let event = cheki.event {
-                                    LabeledContent(
-                                        ChekinanaProductCopy.text("events.event", "Event"),
-                                        value: event.name
-                                    )
-                                }
-                                Text(
-                                    cheki.note.nonEmpty
-                                        ?? ChekinanaProductCopy.text(
-                                            "common.no_note",
-                                            "No note"
-                                        )
-                                )
-                                    .foregroundStyle(cheki.note.isEmpty ? .secondary : .primary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                if cheki.imageRef?.nonEmpty == nil {
-                                    Button(
-                                        ChekinanaProductCopy.text(
-                                            "calendar.edit_record_action",
-                                            "Edit record"
-                                        )
-                                    ) {
-                                        selectedNoMediaRecord = .cheki(cheki)
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    .accessibilityIdentifier(
-                                        "chekinana.calendar.group.edit.\(cheki.id.uuidString.lowercased())"
-                                    )
-                                }
                             }
                         }
                     }
+                    .padding(16)
+                } else {
+                    ContentUnavailableView(
+                        ChekinanaProductCopy.text(
+                            "calendar.no_records",
+                            "No records"
+                        ),
+                        systemImage: "photo.on.rectangle.angled"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 320)
                 }
-                .padding(18)
             }
             .background(ChekinanaProductTheme.pageBackground)
-            .navigationTitle(group.name)
+            .navigationTitle(
+                ChekinanaProductCopy.text(
+                    "calendar.edit_cheki_records",
+                    "Edit Cheki Records"
+                )
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(ChekinanaProductCopy.text("common.done", "Done")) {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(ChekinanaProductCopy.text("common.cancel", "Cancel")) {
                         dismiss()
                     }
-                        .accessibilityIdentifier("chekinana.calendar.group.done")
+                    .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(
+                        ChekinanaProductCopy.text("common.save", "Save"),
+                        action: saveAll
+                    )
+                    .disabled(isSaving || !didLoadDrafts)
+                    .accessibilityIdentifier("chekinana.calendar.group-editor.save")
                 }
             }
         }
-        .sheet(item: $selectedNoMediaRecord) { record in
-            ChekinanaCalendarNoMediaRecordEditor(record: record)
+        .sheet(item: $editingMediaItem) { item in
+            switch item {
+            case .cheki(let cheki):
+                ChekinanaChekiEditorView(
+                    cheki: cheki,
+                    allowsDelete: true
+                )
+            case .shame(let shame):
+                ChekinanaGalleryMetadataEditor(
+                    item: ChekinanaGalleryEditableMediaSnapshot(.shame(shame))
+                )
+            case .douga(let douga):
+                ChekinanaGalleryMetadataEditor(
+                    item: ChekinanaGalleryEditableMediaSnapshot(.douga(douga))
+                )
+            }
         }
-        .accessibilityIdentifier("chekinana.calendar.group-summary")
+        .sheet(item: $idolSelectionRecord) { selection in
+            if let selectionBinding = idolSelectionBinding(for: selection.id) {
+                ChekinanaIdolAvatarCheckSelectionView(
+                    idols: visibleIdols,
+                    selectedIDs: selectionBinding,
+                    identifierPrefix: "chekinana.calendar.group-editor.idol-selection"
+                )
+            }
+        }
+        .interactiveDismissDisabled(isSaving)
+        .task(id: selection.id) { loadDraftsIfNeeded() }
+        .accessibilityIdentifier("chekinana.calendar.group-editor")
+    }
+
+    private var visibleIdols: [Idol] {
+        ChekinanaVisibilityPolicy.visibleIdols(
+            idols,
+            hiddenIDs: hiddenIdols.hiddenIDs
+        )
+    }
+
+    @ViewBuilder
+    private func mediaStripSection(
+        title: String,
+        items: [ChekinanaGalleryItem],
+        identifier: String
+    ) -> some View {
+        if !items.isEmpty {
+            ChekinanaSectionCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(title)
+                        .font(.headline)
+                    ScrollView(.horizontal) {
+                        LazyHStack(spacing: 10) {
+                            ForEach(items) { item in
+                                Button {
+                                    editingMediaItem = item
+                                } label: {
+                                    ChekinanaCalendarGroupMediaThumbnail(item: item)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier(
+                                    "chekinana.calendar.group-editor.\(identifier)-media.\(item.modelID.uuidString.lowercased())"
+                                )
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .scrollIndicators(.hidden)
+                    .accessibilityIdentifier(
+                        "chekinana.calendar.group-editor.\(identifier)-media-strip"
+                    )
+                }
+            }
+        }
+    }
+
+    private func recordEditorSection(
+        _ draft: Binding<ChekinanaCalendarRecordDraft>
+    ) -> some View {
+        ChekinanaSectionCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(ChekinanaRecordKind.cheki.title)
+                    .font(.headline)
+                ChekinanaChekiRecordEditorFields(
+                    visibleIdols: visibleIdols,
+                    events: events,
+                    schedules: eventSchedules,
+                    identifierPrefix: "chekinana.calendar.group-editor.record.\(draft.wrappedValue.id.uuidString.lowercased())",
+                    chooseIdols: {
+                        idolSelectionRecord = .init(id: draft.wrappedValue.id)
+                    },
+                    idolIDs: draft.idolIDs,
+                    count: draft.count,
+                    hasDate: draft.hasDate,
+                    date: draft.date,
+                    eventID: draft.eventID,
+                    size: draft.size,
+                    note: draft.note
+                )
+                Button(
+                    ChekinanaProductCopy.text("common.delete", "Delete"),
+                    role: .destructive
+                ) {
+                    deleteRecord(id: draft.wrappedValue.id)
+                }
+                .accessibilityIdentifier(
+                    "chekinana.calendar.group-editor.record.\(draft.wrappedValue.id.uuidString.lowercased()).delete"
+                )
+            }
+        }
+    }
+
+    private func loadDraftsIfNeeded() {
+        guard !didLoadDrafts, let group else { return }
+        recordDrafts = group.records.map(ChekinanaCalendarRecordDraft.init)
+        didLoadDrafts = true
+    }
+
+    private func idolSelectionBinding(
+        for id: UUID
+    ) -> Binding<Set<UUID>>? {
+        guard let index = recordDrafts.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        return Binding(
+            get: { recordDrafts[index].idolIDs },
+            set: { recordDrafts[index].idolIDs = $0 }
+        )
+    }
+
+    private func saveAll() {
+        guard !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            let recordPlans = try plannedRecordMutations()
+
+            for plan in recordPlans {
+                let target = try ChekinanaModelContextResolver.chekiRecord(
+                    id: plan.draft.id,
+                    in: modelContext
+                )
+                if plan.draft.count == 0 {
+                    modelContext.delete(target)
+                    continue
+                }
+                let relationships = try ChekinanaModelContextResolver.relationships(
+                    idolIDs: plan.idolIDs,
+                    eventID: plan.eventID,
+                    in: modelContext
+                )
+                target.idolIDs = relationships.idols.map(\.id)
+                target.eventID = relationships.event?.id
+                target.date = plan.date
+                target.size = plan.draft.size
+                target.note = plan.draft.note
+                target.count = plan.draft.count
+            }
+
+            try modelContext.save()
+            dismiss()
+        } catch {
+            modelContext.rollback()
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private struct RecordMutationPlan {
+        let draft: ChekinanaCalendarRecordDraft
+        let idolIDs: Set<UUID>
+        let date: Date?
+        let eventID: UUID?
+    }
+
+    private func plannedRecordMutations() throws -> [RecordMutationPlan] {
+        try recordDrafts.map { draft in
+            let selectedIDs = ChekinanaRequiredIdolSelectionPolicy.resolvedIDs(
+                selectedIDs: draft.idolIDs,
+                visibleIDs: visibleIdols.map(\.id)
+            )
+            guard !selectedIDs.isEmpty else {
+                throw ChekinanaCalendarGroupEditorError.missingIdol
+            }
+            let date = try normalizedDate(
+                hasDate: draft.hasDate,
+                displayedDate: draft.date
+            )
+            return .init(
+                draft: draft,
+                idolIDs: Set(selectedIDs),
+                date: date,
+                eventID: ChekinanaChekiEventSelectionPolicy.validatedEventID(
+                    draft.eventID,
+                    recordDate: date,
+                    events: events
+                )
+            )
+        }
+    }
+
+    private func normalizedDate(
+        hasDate: Bool,
+        displayedDate: Date
+    ) throws -> Date? {
+        guard hasDate else { return nil }
+        guard let date = ChekinanaDateOnly.canonicalDate(
+            from: displayedDate,
+            displayedIn: .current
+        ) else {
+            throw ChekinanaCalendarGroupEditorError.invalidDate
+        }
+        return date
+    }
+
+    private func deleteRecord(id: UUID) {
+        do {
+            let target = try ChekinanaModelContextResolver.chekiRecord(
+                id: id,
+                in: modelContext
+            )
+            try ChekinanaChekiRecordStore.delete(
+                target,
+                expected: nil,
+                in: modelContext
+            )
+            recordDrafts.removeAll { $0.id == id }
+        } catch {
+            modelContext.rollback()
+            errorMessage = error.localizedDescription
+        }
+    }
+
+}
+
+private struct ChekinanaCalendarGroupMediaThumbnail: View {
+    let item: ChekinanaGalleryItem
+    @State private var image: ChekinanaRenderedImage?
+
+    private var imageReference: String? {
+        switch item {
+        case .cheki(let cheki):
+            cheki.imageRef
+        case .shame(let shame):
+            shame.imageRef
+        case .douga(let douga):
+            ChekinanaGalleryMediaStore.thumbnailReference(id: douga.id)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color(uiColor: .tertiarySystemGroupedBackground)
+            if let image {
+                Image(decorative: image.cgImage, scale: 1)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(3)
+            } else {
+                Image(systemName: item.kind == .douga ? "video" : "photo")
+                    .font(.title2)
+                    .foregroundStyle(.tertiary)
+            }
+            if item.kind == .douga {
+                Image(systemName: "play.circle.fill")
+                    .font(.title)
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.55))
+            }
+        }
+        .frame(width: 104, height: 136)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(ChekinanaProductTheme.border, lineWidth: 0.5)
+        }
+        .task(id: imageReference) {
+            image = await ChekinanaThumbnailCache.shared.thumbnailImage(
+                forManagedImageRef: imageReference,
+                key: "calendar-group-editor-\(item.id)",
+                maxDimension: 480
+            )
+        }
+    }
+}
+
+private struct ChekinanaCalendarGroupSummary: View {
+    let selection: ChekinanaCalendarMediaSelection
+
+    var body: some View {
+        ChekinanaChekiImageViewer(
+            chekis: selection.mediaChekis,
+            initialID: selection.resolvedInitialID,
+            appearance: .calendar,
+            title: selection.group.name
+        )
+        .chekinanaScreenMarker("chekinana.calendar.group-summary")
         .chekinanaScreenMarker("chekinana.calendar.cheki-summary")
     }
 }
@@ -16915,32 +24267,61 @@ enum ChekinanaLocalDataClearer {
         saveContext: SaveContext = { try $0.save() },
         removeFile: RemoveFile = { try FileManager.default.removeItem(at: $0) }
     ) throws -> ChekinanaLocalDataClearResult {
-        let chekis: [Cheki]
-        let shames: [Shame]
-        let dougas: [Douga]
-        let events: [Event]
-        let eventImages: [EventImage]
-        let idols: [Idol]
+        var chekis: [Cheki] = []
+        var chekiRecords: [ChekiRecord] = []
+        var shames: [Shame] = []
+        var dougas: [Douga] = []
+        var events: [Event] = []
+        var travelSegments: [TravelSegment] = []
+        var eventSchedules: [EventSchedule] = []
+        var eventImages: [EventImage] = []
+        var mediaEventLinks: [MediaEventLink] = []
+        var mediaShotTypes: [MediaShotType] = []
+        var calendarGroupOrders: [CalendarGroupOrder] = []
+        var idols: [Idol] = []
+        var patternStates: [IdolPatternState] = []
         var eventDeletionRefs: [String] = []
         do {
-            chekis = try modelContext.fetch(FetchDescriptor<Cheki>())
-            shames = try modelContext.fetch(FetchDescriptor<Shame>())
-            dougas = try modelContext.fetch(FetchDescriptor<Douga>())
-            events = try modelContext.fetch(FetchDescriptor<Event>())
-            eventImages = try modelContext.fetch(FetchDescriptor<EventImage>())
-            idols = try modelContext.fetch(FetchDescriptor<Idol>())
-            eventDeletionRefs = eventImages.map(\.imageRef) + events.compactMap(\.avatarImageRef)
-            ChekinanaEventMediaJournal.queueDeletion(
-                eventDeletionRefs,
-                defaults: defaults
-            )
-            chekis.forEach(modelContext.delete)
-            shames.forEach(modelContext.delete)
-            dougas.forEach(modelContext.delete)
-            eventImages.forEach(modelContext.delete)
-            events.forEach(modelContext.delete)
-            idols.forEach(modelContext.delete)
-            try saveContext(modelContext)
+            try ChekinanaChekiRecordStore.withMutationLock {
+                chekis = try modelContext.fetch(FetchDescriptor<Cheki>())
+                chekiRecords = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
+                shames = try modelContext.fetch(FetchDescriptor<Shame>())
+                dougas = try modelContext.fetch(FetchDescriptor<Douga>())
+                events = try modelContext.fetch(FetchDescriptor<Event>())
+                travelSegments = try modelContext.fetch(
+                    FetchDescriptor<TravelSegment>()
+                )
+                eventSchedules = try modelContext.fetch(FetchDescriptor<EventSchedule>())
+                eventImages = try modelContext.fetch(FetchDescriptor<EventImage>())
+                mediaEventLinks = try modelContext.fetch(FetchDescriptor<MediaEventLink>())
+                mediaShotTypes = try modelContext.fetch(FetchDescriptor<MediaShotType>())
+                calendarGroupOrders = try modelContext.fetch(
+                    FetchDescriptor<CalendarGroupOrder>()
+                )
+                idols = try modelContext.fetch(FetchDescriptor<Idol>())
+                patternStates = try modelContext.fetch(FetchDescriptor<IdolPatternState>())
+                eventDeletionRefs = eventImages.map(\.imageRef)
+                    + events.compactMap(\.avatarImageRef)
+                    + travelSegments.compactMap(\.operatorIconRef)
+                ChekinanaEventMediaJournal.queueDeletion(
+                    eventDeletionRefs,
+                    defaults: defaults
+                )
+                chekis.forEach(modelContext.delete)
+                chekiRecords.forEach(modelContext.delete)
+                shames.forEach(modelContext.delete)
+                dougas.forEach(modelContext.delete)
+                eventImages.forEach(modelContext.delete)
+                eventSchedules.forEach(modelContext.delete)
+                mediaEventLinks.forEach(modelContext.delete)
+                mediaShotTypes.forEach(modelContext.delete)
+                calendarGroupOrders.forEach(modelContext.delete)
+                events.forEach(modelContext.delete)
+                travelSegments.forEach(modelContext.delete)
+                patternStates.forEach(modelContext.delete)
+                idols.forEach(modelContext.delete)
+                try saveContext(modelContext)
+            }
         } catch {
             modelContext.rollback()
             ChekinanaEventMediaJournal.cancelDeletion(
@@ -16950,10 +24331,6 @@ enum ChekinanaLocalDataClearer {
             throw ChekinanaLocalDataClearError.database(error.localizedDescription)
         }
 
-        // This flag is deliberately written only after the database commit.
-        // It remains enabled for a partial file-cleanup result so a restart
-        // cannot silently repopulate an otherwise empty library.
-        ChekinanaPresetSeedPolicy.suppress(defaults: defaults)
         ChekinanaHiddenIdolPersistence.save([], defaults: defaults)
         if defaults === UserDefaults.standard {
             ChekinanaHiddenIdolStore.shared.clear()
@@ -16970,7 +24347,8 @@ enum ChekinanaLocalDataClearer {
                 defaults: defaults
             )
             let result = ChekinanaLocalDataClearResult(
-                chekiCount: chekis.count,
+                chekiCount: chekis.count
+                    + ChekinanaChekiRecordStore.totalCount(chekiRecords),
                 shameCount: shames.count,
                 dougaCount: dougas.count,
                 eventCount: events.count,
@@ -16994,7 +24372,8 @@ enum ChekinanaLocalDataClearer {
                 defaults: defaults
             )
             let result = ChekinanaLocalDataClearResult(
-                chekiCount: chekis.count,
+                chekiCount: chekis.count
+                    + ChekinanaChekiRecordStore.totalCount(chekiRecords),
                 shameCount: shames.count,
                 dougaCount: dougas.count,
                 eventCount: events.count,
@@ -17033,7 +24412,8 @@ enum ChekinanaLocalDataClearer {
         )
 
         let result = ChekinanaLocalDataClearResult(
-            chekiCount: chekis.count,
+            chekiCount: chekis.count
+                + ChekinanaChekiRecordStore.totalCount(chekiRecords),
             shameCount: shames.count,
             dougaCount: dougas.count,
             eventCount: events.count,
@@ -17054,6 +24434,7 @@ private struct ChekinanaSettingsView: View {
     @Query private var idols: [Idol]
     @Query private var events: [Event]
     @Query private var chekis: [Cheki]
+    @Query private var chekiRecords: [ChekiRecord]
     @Query private var shames: [Shame]
     @Query private var dougas: [Douga]
     @State private var isClearConfirmationPresented = false
@@ -17129,7 +24510,7 @@ private struct ChekinanaSettingsView: View {
                         ),
                         selection: $languageStore.language
                     ) {
-                        ForEach(ChekinanaAppLanguage.allCases) { language in
+                        ForEach(ChekinanaAppLanguage.settingsVisibleCases) { language in
                             Text(language.title)
                                 .tag(language)
                                 .accessibilityIdentifier(
@@ -17145,7 +24526,12 @@ private struct ChekinanaSettingsView: View {
                     settingsRow(ChekinanaProductCopy.text("common.idols", "Idols"), value: visibleIdols.count.formatted(), image: "person.2")
                     settingsRow(
                         ChekinanaRecordKind.cheki.title,
-                        value: ChekinanaRecordKind.cheki.countLabel(visibleChekis.count),
+                        value: ChekinanaRecordKind.cheki.countLabel(
+                            visibleChekis.count
+                                + ChekinanaChekiRecordStore.totalCount(
+                                    visibleChekiRecords
+                                )
+                        ),
                         image: "photo.stack"
                     )
                     settingsRow(ChekinanaRecordKind.shame.title, value: visibleShames.count.formatted(), image: "photo")
@@ -17314,6 +24700,15 @@ private struct ChekinanaSettingsView: View {
         chekis.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }
     }
 
+    private var visibleChekiRecords: [ChekiRecord] {
+        chekiRecords.filter {
+            ChekinanaChekiRecordReadPolicy.isVisible(
+                $0,
+                hiddenIDs: hiddenIdols.hiddenIDs
+            )
+        }
+    }
+
     private var visibleShames: [Shame] {
         shames.filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIdols.hiddenIDs) }
     }
@@ -17378,7 +24773,9 @@ enum ChekinanaProductDate {
 
     static var fixtureAwareToday: Date {
 #if DEBUG
-        if ProcessInfo.processInfo.environment["CHEKINANA_PRODUCT_UI_FIXTURE"] == "data" {
+        if ["data", "mixed-media", "calendar-groups"].contains(
+            ProcessInfo.processInfo.environment["CHEKINANA_PRODUCT_UI_FIXTURE"]
+        ) {
             return date(year: 2026, month: 8, day: 2)
         }
 #endif
@@ -17503,7 +24900,7 @@ extension String {
 enum ChekinanaProductUITestFixture {
     static func seedIfRequested(in container: ModelContainer) {
         guard let fixture = ProcessInfo.processInfo.environment["CHEKINANA_PRODUCT_UI_FIXTURE"],
-              fixture == "data" || fixture == "mixed-media" else {
+              ["data", "mixed-media", "calendar-groups"].contains(fixture) else {
             return
         }
         let context = ModelContext(container)
@@ -17527,8 +24924,11 @@ enum ChekinanaProductUITestFixture {
             for: idol3.id,
             color: UIColor(red: 0.22, green: 0.62, blue: 0.72, alpha: 1)
         )
-        idol2.patterns = [ChekinanaPresetIdolSeeder.prototypeVectors[0]]
-        idol3.patterns = Array(ChekinanaPresetIdolSeeder.prototypeVectors.prefix(2))
+        idol2.patterns = [ChekinanaPatternDebugFixture.unitVector(0)]
+        idol3.patterns = [
+            ChekinanaPatternDebugFixture.unitVector(0),
+            ChekinanaPatternDebugFixture.unitVector(1),
+        ]
         [idol1, idol2, idol3].forEach(context.insert)
 
         let event1 = Event(name: "Moonlight Summer Live", date: ChekinanaProductDate.date(year: 2026, month: 8, day: 2), city: "Shanghai", livehouse: "MAO Livehouse")
@@ -17563,7 +24963,7 @@ enum ChekinanaProductUITestFixture {
             cheki.idols = spec.1
             cheki.event = spec.2
         }
-        if fixture == "mixed-media" {
+        if fixture == "mixed-media" || fixture == "calendar-groups" {
             let shameID = UUID()
             if let data = makeFixtureJPEGData(
                 color: UIColor(red: 0.83, green: 0.38, blue: 0.48, alpha: 1)
@@ -17613,6 +25013,100 @@ enum ChekinanaProductUITestFixture {
             context.insert(douga)
             guard douga.modelContext === context else { return }
             douga.idols = [idol2]
+        }
+        if fixture == "calendar-groups" {
+            let date = ChekinanaProductDate.date(year: 2026, month: 8, day: 2)
+            for (index, idols, color) in [
+                (10, [idol2, idol1], UIColor(red: 0.35, green: 0.48, blue: 0.86, alpha: 1)),
+                (11, [idol1, idol2], UIColor(red: 0.75, green: 0.31, blue: 0.68, alpha: 1)),
+            ] {
+                let cheki = Cheki(
+                    date: date,
+                    idx: index,
+                    userAppears: true,
+                    size: index == 10 ? .mini : .wide,
+                    note: "Grouped media \(index)"
+                )
+                cheki.imageRef = makeFixtureImage(for: cheki.id, color: color)
+                context.insert(cheki)
+                guard cheki.modelContext === context else { return }
+                cheki.idols = idols
+                cheki.event = event1
+            }
+
+            let firstRecord = ChekiRecord(
+                idols: [idol2, idol1],
+                event: event1,
+                date: date,
+                size: .mini,
+                note: "First physical record",
+                count: 2
+            )
+            let secondRecord = ChekiRecord(
+                idols: [idol1, idol2],
+                date: date,
+                size: .wide,
+                note: "Second physical record",
+                count: 3
+            )
+            context.insert(firstRecord)
+            context.insert(secondRecord)
+
+            let shameID = UUID()
+            let shameReference = makeFixtureJPEGData(
+                color: UIColor(red: 0.95, green: 0.48, blue: 0.56, alpha: 1)
+            ).flatMap {
+                try? ChekinanaGalleryMediaStore.saveImage(
+                    $0,
+                    id: shameID,
+                    filenameExtension: "jpg"
+                )
+            }
+            let shame = Shame(
+                id: shameID,
+                imageRef: shameReference,
+                idols: [idol2, idol1],
+                date: date,
+                note: "Grouped Shame"
+            )
+            context.insert(shame)
+
+            let dougaID = UUID()
+            let dougaReference = "douga-\(dougaID.uuidString.lowercased()).mp4"
+            if let directory = try? ChekiImageRefResolver.chekiImagesDirectory() {
+                try? Data("chekinana-calendar-group-video".utf8).write(
+                    to: directory.appendingPathComponent(dougaReference),
+                    options: .atomic
+                )
+            }
+            if let thumbnail = makeFixtureJPEGData(
+                color: UIColor(red: 0.25, green: 0.62, blue: 0.78, alpha: 1)
+            ) {
+                let thumbnailURL = ChekinanaGalleryMediaStore.thumbnailURL(id: dougaID)
+                try? FileManager.default.createDirectory(
+                    at: thumbnailURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try? thumbnail.write(to: thumbnailURL, options: .atomic)
+            }
+            let douga = Douga(
+                id: dougaID,
+                videoRef: dougaReference,
+                idols: [idol1, idol2],
+                date: date,
+                note: "Grouped Douga"
+            )
+            context.insert(douga)
+            context.insert(MediaEventLink(
+                mediaID: shame.id,
+                kind: .shame,
+                eventID: event1.id
+            ))
+            context.insert(MediaEventLink(
+                mediaID: douga.id,
+                kind: .douga,
+                eventID: event1.id
+            ))
         }
         try? context.save()
     }
@@ -17703,7 +25197,15 @@ enum ChekinanaProductUITestFixture {
 #Preview {
     ChekinanaProductShell()
         .modelContainer(
-            for: [Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self],
+            for: [
+                Idol.self,
+                Event.self,
+                EventSchedule.self,
+                EventImage.self,
+                Cheki.self,
+                Shame.self,
+                Douga.self,
+            ],
             inMemory: true
         )
 }

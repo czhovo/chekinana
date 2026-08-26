@@ -1,6 +1,6 @@
 import { CHEKI_DATE_PROMPT } from "./cheki-date-prompt.js";
 
-const DEFAULT_MODEL = "qwen3.7-plus";
+const DEFAULT_MODEL = "qwen3.7-flash";
 const DEFAULT_IMAGE_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_QWEN_TIMEOUT_MS = 90_000;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
@@ -528,14 +528,38 @@ export async function annotateChekiDateResponse(
     && requestedQwenTimeout > 0
     ? requestedQwenTimeout
     : DEFAULT_QWEN_TIMEOUT_MS;
-  const annotation = await callQwen(
-    imageResult.bytes,
-    mediaType,
-    configuration,
-    options.fetchImpl || fetch,
-    qwenTimeoutMs,
-    request.signal,
-  );
+  const modelStageGate = options.modelStageGate;
+  let releaseModelStage = null;
+  if (modelStageGate !== undefined) {
+    if (!modelStageGate || typeof modelStageGate.acquire !== "function") {
+      return unavailable("internal_error");
+    }
+    try {
+      releaseModelStage = await modelStageGate.acquire(
+        imageResult.bytes.byteLength,
+        request.signal,
+      );
+    } catch {
+      return unavailable("qwen_unavailable");
+    }
+    if (typeof releaseModelStage !== "function") {
+      return unavailable("internal_error");
+    }
+  }
+
+  let annotation;
+  try {
+    annotation = await callQwen(
+      imageResult.bytes,
+      mediaType,
+      configuration,
+      options.fetchImpl || fetch,
+      qwenTimeoutMs,
+      request.signal,
+    );
+  } finally {
+    releaseModelStage?.();
+  }
   if (annotation.status !== "detected"
     || options.bboxCoordinates !== "pixels") {
     return annotation;

@@ -6,6 +6,14 @@ This Worker provides a fixed API domain:
 https://api.chekinana.top
 ```
 
+This source tree does **not** implement `GET /api/v1/schedule`. Production
+Travel schedule queries are owned by a separately deployed Worker on the more
+specific Cloudflare route `api.chekinana.top/api/v1/schedule*`. Before deploying
+this Worker's wildcard `api.chekinana.top/*` route, verify that the more
+specific Schedule route still points to that Worker. Without it, the iOS Travel
+client cannot query schedules; this Scanner/Assistant Worker must not be treated
+as a fallback Schedule implementation.
+
 Production Scanner requests never contain a RunPod Pod ID or Scanner/backend
 token. The Worker routes them through one `ScannerRuntime` Durable Object,
 which keeps the current Pod ID private. Pod identity is used only to select the
@@ -476,7 +484,7 @@ The Worker reads at most 16 MiB from a cloned status-200 JPEG, PNG, or WebP
 result. Partial and other non-200 responses are returned unchanged without a
 model call. The original response stream remains the client response. The
 Worker sends one image Data URL and the fixed handwritten-date prompt to
-`qwen3.7-plus`, with thinking disabled and `max_tokens` set to 1024. There is
+`qwen3.7-flash`, with thinking disabled and `max_tokens` set to 1024. There is
 no automatic retry. The image read has a 10-second deadline, and the single
 Qwen request and response have one 90-second deadline. Images, Data URLs, model
 output, Scanner tokens, task IDs, result IDs, cookies, and Pod details are
@@ -485,6 +493,15 @@ neither logged nor stored by this feature.
 The bbox is temporary UI metadata only. The Worker neither draws it onto the
 image nor stores a modified image; the client receives the exact upstream image
 body in every annotation outcome.
+
+An authenticated internal Scanner date-annotation batch still accepts at most
+64 results and starts at most 16 logical workers in each ordered wave. After a
+worker reads the actual image bytes, the Base64/JSON/Qwen model stage enters a
+shared gate limited to six outstanding model requests and a conservative 24 MiB
+transient-memory budget charged at eight times the actual image byte length. A
+full 16-worker wave can retain at most 48 MiB of raw images, so raw images plus
+the gated model-stage estimate stay at or below 72 MiB of the 128 MiB isolate
+limit, leaving 56 MiB for runtime and other request state.
 
 Required Worker secrets:
 
@@ -502,8 +519,7 @@ Date annotation has no dedicated frequency limiter or rate-limiter binding.
 After Scanner-token authentication, every exact opted-in result request may
 make the existing single Qwen call. Production must continue to provide the two
 Qwen secrets above; their values remain untracked. The independent
-`NL_RATE_LIMITER` and `EVENT_WEIBO_RATE_LIMITER` bindings and policies are
-unchanged.
+`NL_RATE_LIMITER` binding and policy are unchanged.
 
 ## Event candidate from a public Weibo URL or pasted text
 
@@ -551,13 +567,14 @@ URLs. Explicit ticket-price lines such as `普通:75` or multiple labelled tiers
 are selected deterministically from that same bounded source, passed to the
 model as `sourcePriceText`, and overlaid unchanged on the validated response;
 merchandise and benefit prices are excluded. DeepSeek extracts `name`, `date`,
-`city`, `livehouse`, `address`, `price`,
+`openTime`, `startTime`, `city`, `livehouse`, `address`, `price`,
 `weiboURL`, and `ticketURL`. It never receives client authorization, cookies,
 scanner tokens, an avatar field, an image URL field, or a note field. `note`
 remains entirely user-authored and is not part of this API response.
 
-A successful response contains exactly nine candidate strings plus the stable
-`imageUrls: string[]` field:
+A successful response contains exactly nine candidate strings, the two nullable
+time fields `openTime` and `startTime`, plus the stable `imageUrls: string[]`
+field:
 
 ```json
 {
@@ -566,6 +583,8 @@ A successful response contains exactly nine candidate strings plus the stable
   "candidate": {
     "name": "示例公演",
     "date": "2026-08-02",
+    "openTime": "14:15",
+    "startTime": "15:00",
     "city": "合肥",
     "livehouse": "示例Livehouse",
     "address": "合肥市蜀山区示例路88号",
@@ -581,20 +600,30 @@ A successful response contains exactly nine candidate strings plus the stable
 }
 ```
 
-Missing or ambiguous fields remain empty strings. The response is a candidate,
-not a persistence instruction: the client must display every field for editing
-and save only after explicit user confirmation.
+Missing or ambiguous string fields remain empty strings. `openTime` and
+`startTime` are always present as either a canonical 24-hour `HH:mm` string or
+`null`. DeepSeek handles OPEN/START interpretation from the bounded source text;
+the Worker does not extract times from the source with local patterns or replace
+the model's result from the source. The prompt requires case-insensitive
+OPEN/START labels, ordinary or full-width colons, arbitrary or absent whitespace,
+explicit values only, independent extraction, and no inference from dates,
+publication times, unrelated times, or the other field. The Worker then performs
+only generic model-output normalization and range validation: one-digit hours are
+zero-padded, hours outside 0–23 or minutes outside 0–59 become `null`, and a
+missing model time key becomes `null`. The response is a candidate, not a
+persistence instruction: the client must display every field for editing and save
+only after explicit user confirmation.
 
 The model may infer a missing year from one unambiguous month/day only with the
 documented source context: URL input prefers a reasonable year based on the
 Weibo publication time, while pasted text may cautiously use the current
 Shanghai date. Insufficient evidence or multiple performance dates produces an
 empty date. The server then enforces the exact model schema and returns the
-exact nine-string-plus-image-array public schema, field byte limits, real
-`YYYY-MM-DD` calendar dates, concise city values, venue-name-only `livehouse`,
-separate address and price text, and HTTPS ticket URLs on the fixed provider
-allowlist. `weiboURL` is always overlaid from the validated request source (or
-empty for text input).
+exact nine-string-plus-two-nullable-times-plus-image-array public schema, field
+byte limits, real `YYYY-MM-DD` calendar dates, concise city values,
+venue-name-only `livehouse`, separate address and price text, and HTTPS ticket
+URLs on the fixed provider allowlist. `weiboURL` is always overlaid from the
+validated request source (or empty for text input).
 For URL input, `avatar_url` is selected only from the Weibo status author's
 avatar metadata, normalized to an allowlisted HTTPS Weibo/Sina image URL, and
 never guessed by the model. `imageUrls` is selected independently from explicit
@@ -618,8 +647,7 @@ All failures use a fixed typed body:
 
 The route may return `400 invalid_request`, `405 method_not_allowed`,
 `422 invalid_weibo_url`, `422 status_unavailable`,
-`422 invalid_model_output`, `429 rate_limited`,
-`503 rate_limit_unavailable`, `503 service_unavailable`,
+`422 invalid_model_output`, `503 service_unavailable`,
 `503 model_unavailable`, `502 weibo_upstream_unavailable`,
 `502 invalid_upstream_response`, `504 upstream_timeout`,
 `504 model_timeout`, or `500 internal_error`. Responses use
@@ -635,8 +663,7 @@ deterministic provider allowlist and trusted shorteners are inspected for only
 one manual hop.
 
 After basic method, content-type, and declared content-length validation, the
-dedicated rate limiter runs before any request body is read. The body is then
-read as a stream under a 2-second deadline; crossing 32 KiB of UTF-8 bytes
+body is read as a stream under a 2-second deadline; crossing 32 KiB of UTF-8 bytes
 immediately cancels the reader and returns `400 invalid_request`. Visitor
 cookies retain RFC-style `Max-Age` precedence over `Expires`, are evicted before
 header generation when expired, and remain request-local.
@@ -645,20 +672,14 @@ The Worker bundles the pinned `he` package so HTML5 named, numeric, legacy
 semicolon-less, and entity-boundary behavior matches Python's
 `HTMLParser` plus `html.unescape` without a runtime network lookup.
 
-Production requires a separate rate-limiter binding named
-`EVENT_WEIBO_RATE_LIMITER`, configured for 5 calls per 60 seconds. The current
-`namespace_id = "1002"` must be confirmed as unique in the target Cloudflare
-account before deployment. Missing or unavailable binding state fails closed.
 The request-body, Weibo, and DeepSeek stages have independent 2-second,
 20-second, and 12-second limits. A separate 36-second hard cap starts before the
-dedicated rate-limiter decision and covers every awaited route stage. If that
-decision stalls, the route returns `504 upstream_timeout` without reading the
-body or calling Weibo or DeepSeek. If the cap expires later, the active request
-or response reader is aborted and cancelled where the runtime exposes that
-capability. The Weibo allowance is cumulative across the anonymous visitor,
-status, optional long-text, and optional ticket-shortener chain. Every stage
-allowance remains subject to the 36-second whole-route cap, including limiter,
-parsing, and serialization time. This replaces the former single 15-second
+request body is read and covers every awaited route stage. If the cap expires,
+the active request or response reader is aborted and cancelled where the runtime
+exposes that capability. The Weibo allowance is cumulative across the anonymous
+visitor, status, optional long-text, and optional ticket-shortener chain. Every stage
+allowance remains subject to the 36-second whole-route cap, including parsing
+and serialization time. This replaces the former single 15-second
 budget without treating a longer timeout as a performance fix.
 
 The required `visitor_generate`, `visitor_incarnate`, and `status` operations
@@ -685,7 +706,7 @@ global deadline expires while a Weibo operation is active. Its entire value is
 one fixed allowlisted stage class: `event_weibo_timeout:visitor_generate`,
 `event_weibo_timeout:visitor_incarnate`, `event_weibo_timeout:status`,
 `event_weibo_timeout:long_text`, or
-`event_weibo_timeout:ticket_shortener`. Model, limiter, and request-body timeouts
+`event_weibo_timeout:ticket_shortener`. Model and request-body timeouts
 never emit this diagnostic. It never contains a URL, host, query, user/status
 identifier, cookie, body, credential, or upstream/model content.
 

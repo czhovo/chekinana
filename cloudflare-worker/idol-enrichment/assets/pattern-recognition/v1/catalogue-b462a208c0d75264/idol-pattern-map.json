@@ -1,0 +1,295 @@
+{
+  "format": "idol_pattern_map_v1",
+  "version": "pattern-6541-v1",
+  "catalogue": {
+    "url": "https://idol.chekinana.top/idols.json",
+    "recordCount": 2232,
+    "snapshotSha256": "b462a208c0d752648a10ce881c966d981553500f5da1c4532ddc59558d7e006c",
+    "idField": "id",
+    "clientSourceIdField": "sourceId"
+  },
+  "prototypeBankUrl": "https://idol.chekinana.top/assets/pattern-recognition/v1/prototypes.json",
+  "idolPatternIDs": {
+    "idol_000511": [
+      "Nakona_Lumina_P1"
+    ],
+    "idol_000513": [
+      "巫歌Yokiko_Lumina_P1"
+    ],
+    "idol_000812": [
+      "PON_niku_P1"
+    ],
+    "idol_000975": [
+      "朽木Chiaki_SLMT_P1"
+    ],
+    "idol_000976": [
+      "氏闇来世Shiyami_SLMT_P1"
+    ],
+    "idol_000977": [
+      "水鳥糸Ito_SLMT_P1"
+    ],
+    "idol_000978": [
+      "白玖瞳Hitomi_SLMT_P1"
+    ],
+    "idol_001006": [
+      "天照芥RIRIKA-STARAX1S_P1"
+    ],
+    "idol_001008": [
+      "小柴Chai-STARAX1S_P1"
+    ],
+    "idol_001010": [
+      "無名Hana-STARAX1S_P1"
+    ],
+    "idol_001013": [
+      "須川Kieru-STARAX1S_P1"
+    ],
+    "idol_001014": [
+      "团子Maruru-StarCandy_P1"
+    ],
+    "idol_001017": [
+      "麦麦Melody-StarCandy_P1"
+    ],
+    "idol_001040": [
+      "兔兔Poppy-StarHoney_P1"
+    ],
+    "idol_001041": [
+      "小唯Yui-StarHoney_P1"
+    ],
+    "idol_001042": [
+      "恋恋Renren-StarHoney_P1"
+    ],
+    "idol_001043": [
+      "梦梦Yumeri-StarHoney_P1"
+    ],
+    "idol_001044": [
+      "理理Riri-StarHoney_P1"
+    ],
+    "idol_001045": [
+      "白泠Mio-StarHoney_P1"
+    ],
+    "idol_001046": [
+      "小岛Shima-StarLight_P1"
+    ],
+    "idol_001047": [
+      "小遥Haruka-StarLight_P1"
+    ],
+    "idol_001048": [
+      "眠眠Nemuru-StarLight_P1"
+    ],
+    "idol_001049": [
+      "砂羽Sawawa-StarLight_P1"
+    ],
+    "idol_001050": [
+      "童话Douwa-StarLight_P2"
+    ],
+    "idol_001066": [
+      "小弥Mikari-StarRise_P1"
+    ],
+    "idol_001068": [
+      "泠Midori-StarRise_P1"
+    ],
+    "idol_001072": [
+      "小芯Kokoro-StarShips_P1"
+    ],
+    "idol_001073": [
+      "楠楠Minari-StarShips_P1"
+    ],
+    "idol_001075": [
+      "真夏Mana-StarShips_P1"
+    ],
+    "idol_001077": [
+      "夜夜Yoruko-StarWinK_P1"
+    ],
+    "idol_001078": [
+      "奈奈Nana-StarWinK_P1"
+    ],
+    "idol_001079": [
+      "小芋Koimo-StarWinK_P1"
+    ],
+    "idol_001080": [
+      "晨仔Asahi-StarWinK_P1"
+    ],
+    "idol_001081": [
+      "海城Shiyo-StarWinK_P1"
+    ],
+    "idol_001082": [
+      "熹熹Remiki-StarWinK_P1"
+    ],
+    "idol_001083": [
+      "羽悠Yuu-StarWinK_P1",
+      "羽悠Yuu-StarWinK_P2"
+    ],
+    "idol_001084": [
+      "饼饼Mochi-StarWinK_P1"
+    ],
+    "idol_001325": [
+      "Aoyi_XII_P1"
+    ],
+    "idol_001326": [
+      "Mina_XII_P1",
+      "Mina_XII_P2"
+    ],
+    "idol_001342": [
+      "凛凛Rin-午前4時_P1"
+    ],
+    "idol_001343": [
+      "单曲Kioku-午前4時_P1"
+    ],
+    "idol_001346": [
+      "悠悠Yuu-午前4時_P1"
+    ],
+    "idol_001347": [
+      "無名NanaRi-午前4時_P1"
+    ],
+    "idol_001348": [
+      "茶子Tyako-午前4時_P1"
+    ],
+    "idol_001452": [
+      "TOTO-山海誓约_P1"
+    ],
+    "idol_001453": [
+      "南秋Minami-山海誓约_P1"
+    ],
+    "idol_001454": [
+      "火山火山-山海誓约_P1"
+    ],
+    "idol_001456": [
+      "金水金水-山海誓约_P1"
+    ],
+    "idol_001494": [
+      "杳杳Yuri-异色星Harmonia_P1"
+    ],
+    "idol_001500": [
+      "优子Yuuko-弥漫星雲_P1"
+    ],
+    "idol_001563": [
+      "加澜_aika_P1"
+    ],
+    "idol_001564": [
+      "法儿_fuwari_P1"
+    ],
+    "idol_001565": [
+      "玉子_tamako__P1"
+    ],
+    "idol_001566": [
+      "阿漓_himeri_P1"
+    ],
+    "idol_001567": [
+      "阿白_omochi_P2"
+    ],
+    "idol_001726": [
+      "南依Kanany_極夜_P1"
+    ],
+    "idol_001727": [
+      "暮雨Kureame_極夜_P1"
+    ],
+    "idol_001728": [
+      "魚炳Sakaa_極夜_P1"
+    ],
+    "idol_001752": [
+      "七七-YUMEHANABI_P1"
+    ],
+    "idol_001753": [
+      "夏沫-YUMEHANABI_P1"
+    ],
+    "idol_001754": [
+      "宅宅子-YUMEHANABI_P1"
+    ],
+    "idol_001757": [
+      "糖糖-YUMEHANABI_P1"
+    ],
+    "idol_001758": [
+      "莉莉丝-YUMEHANABI_P1"
+    ],
+    "idol_001759": [
+      "饦饦-YUMEHANABI_P1"
+    ],
+    "idol_001789": [
+      "箱箱Hako_永昼_P1"
+    ],
+    "idol_001790": [
+      "蛋酱Tamako_永昼_P1"
+    ],
+    "idol_001791": [
+      "雨沢Neko_永昼_P1"
+    ],
+    "idol_001913": [
+      "KUMI-TOXIC_P1"
+    ],
+    "idol_001914": [
+      "REI-TOXIC_P1"
+    ],
+    "idol_001915": [
+      "RIKO-TOXIC_P1"
+    ],
+    "idol_001916": [
+      "SOBA-TOXIC_P1"
+    ],
+    "idol_001958": [
+      "砂糖心跳-木兰_P1"
+    ],
+    "idol_001973": [
+      "切切chieko_神的爱恋诗_P1"
+    ],
+    "idol_001976": [
+      "无情小猪_XwX_P1"
+    ],
+    "idol_001994": [
+      "圆圆Madoka_BlankPoker_P1"
+    ],
+    "idol_001995": [
+      "幽琪Yura_BlankPoker_P1"
+    ],
+    "idol_001997": [
+      "星儿Hoshimi_BlankPoker_P1"
+    ],
+    "idol_001998": [
+      "杏子Kyoko_BlankPoker_P1"
+    ],
+    "idol_001999": [
+      "熊喵啾啾_BlankPoker_P1"
+    ],
+    "idol_002001": [
+      "苗苗Yumena_BlankPoker_P1"
+    ],
+    "idol_002003": [
+      "凝坠空色轨迹的Mizu_P1"
+    ],
+    "idol_002004": [
+      "描绘空色轨迹的Kotomi_P1"
+    ],
+    "idol_002005": [
+      "梦游空色轨迹的Ririsu_P1"
+    ],
+    "idol_002006": [
+      "点缀空色轨迹的Seiko_P1"
+    ],
+    "idol_002008": [
+      "祈愿空色轨迹的Eriko_P1"
+    ],
+    "idol_002009": [
+      "触碰空色轨迹的Aina_P1"
+    ],
+    "idol_002210": [
+      "YUMETORI-小容_P1"
+    ],
+    "idol_002211": [
+      "YUMETORI-小绫_P1"
+    ],
+    "idol_002214": [
+      "YUMETORI-眠_P1"
+    ],
+    "idol_002215": [
+      "YUMETORI-诺里_P1"
+    ],
+    "idol_002216": [
+      "YUMETORI-鱼鱼_P1"
+    ],
+    "idol_002369": [
+      "照耀空色轨迹的miya_P1"
+    ]
+  },
+  "unmappedPatternIds": [
+    "理砂Risa_極夜_P1"
+  ]
+}

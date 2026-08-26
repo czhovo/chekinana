@@ -11,15 +11,19 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
     var imageUrls: [String]
     var weiboURL: String
     var ticketURL: String
+    var openTime: String?
+    var startTime: String?
     // Local-only compatibility field. Model output is never copied into Event.note.
     var note: String
 
-    static let keys: Set<String> = [
+    private static let modernRequiredKeys: Set<String> = [
         "name", "date", "city", "livehouse", "address", "price", "avatar_url",
-        "imageUrls", "weiboURL", "ticketURL",
+        "weiboURL", "ticketURL",
     ]
-
-    private static let priorKeys = keys.subtracting(["imageUrls"])
+    private static let modernOptionalKeys: Set<String> = [
+        "imageUrls", "openTime", "startTime",
+    ]
+    static let keys = modernRequiredKeys.union(modernOptionalKeys)
 
     init(
         name: String,
@@ -32,6 +36,8 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
         imageUrls: [String] = [],
         weiboURL: String,
         ticketURL: String,
+        openTime: String? = nil,
+        startTime: String? = nil,
         note: String = ""
     ) {
         self.name = name
@@ -44,6 +50,8 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
         self.imageUrls = imageUrls
         self.weiboURL = weiboURL
         self.ticketURL = ticketURL
+        self.openTime = ChekinanaEventTime.normalized(openTime)
+        self.startTime = ChekinanaEventTime.normalized(startTime)
         self.note = note
     }
 
@@ -52,9 +60,12 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
         let legacyKeys = Set([
             "name", "date", "city", "livehouse", "weiboURL", "ticketURL", "note",
         ])
-        guard responseKeys == Self.keys
-                || responseKeys == Self.priorKeys
-                || responseKeys == legacyKeys else {
+        let isModern = Self.modernRequiredKeys.isSubset(of: responseKeys)
+            && responseKeys.isSubset(of: Self.keys)
+        let legacyAllowedKeys = legacyKeys.union(["openTime", "startTime"])
+        let isLegacy = legacyKeys.isSubset(of: responseKeys)
+            && responseKeys.isSubset(of: legacyAllowedKeys)
+        guard isModern || isLegacy else {
             throw ChekinanaEventCandidateClientError.invalidResponse
         }
         func requiredString(_ key: String) throws -> String {
@@ -71,7 +82,10 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
             }
             return values.compactMap { $0 as? String }
         }
-        let isModern = responseKeys == Self.keys || responseKeys == Self.priorKeys
+        func nullableTime(_ key: String) -> String? {
+            guard let value = strictDictionary[key], !(value is NSNull) else { return nil }
+            return ChekinanaEventTime.normalized(value as? String)
+        }
         self.init(
             name: try requiredString("name"),
             date: try requiredString("date"),
@@ -80,12 +94,16 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
             address: isModern ? try requiredString("address") : "",
             price: isModern ? try requiredString("price") : "",
             avatarURL: isModern ? try requiredString("avatar_url") : "",
-            imageUrls: responseKeys == Self.keys ? try requiredStringArray("imageUrls") : [],
+            imageUrls: responseKeys.contains("imageUrls")
+                ? try requiredStringArray("imageUrls")
+                : [],
             weiboURL: try requiredString("weiboURL"),
             ticketURL: try requiredString("ticketURL"),
+            openTime: nullableTime("openTime"),
+            startTime: nullableTime("startTime"),
             note: ""
         )
-        if responseKeys == legacyKeys {
+        if isLegacy {
             // Validate the legacy wire shape without ever importing model prose
             // into the user's editable Event.note.
             _ = try requiredString("note")
@@ -131,6 +149,8 @@ enum ChekinanaEventCandidateBlocker: Equatable, Sendable, Identifiable {
 }
 
 enum ChekinanaEventCandidateValidator {
+    static let priceMaximumUTF8ByteCount = 2_000
+
     private static let trustedTicketDomains: Set<String> = [
         "showstart.com", "damai.cn", "piaoxingqiu.com", "maoyan.com",
         "247tickets.com", "gewara.com", "motntickets.com", "cityline.com",
@@ -154,7 +174,10 @@ enum ChekinanaEventCandidateValidator {
         if !ticketURL.isEmpty, !isTrustedTicketURL(ticketURL) {
             blockers.append(.invalidTicketURL)
         }
-        if livehouseLooksLikeDetailedAddress(fields.livehouse) {
+        if livehouseLooksLikeDetailedAddress(
+            fields.livehouse,
+            separateAddress: fields.address
+        ) {
             blockers.append(.livehouseLooksLikeAddress)
         }
         for (field, value, limit) in [
@@ -162,7 +185,11 @@ enum ChekinanaEventCandidateValidator {
             (ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), fields.city, 100),
             (ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), fields.livehouse, 300),
             (ChekinanaL10n.text("assistant.event.field.address", fallback: "Address"), fields.address, 1_000),
-            (ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), fields.price, 500),
+            (
+                ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"),
+                fields.price,
+                priceMaximumUTF8ByteCount
+            ),
             (ChekinanaL10n.text("assistant.event.field.avatar", fallback: "Avatar URL"), fields.avatarURL, 2_048),
             (ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo URL"), fields.weiboURL, 2_048),
             (ChekinanaL10n.text("assistant.event.field.ticket", fallback: "Ticket URL"), fields.ticketURL, 2_048),
@@ -251,11 +278,18 @@ enum ChekinanaEventCandidateValidator {
         return ChekinanaDateOnly.string(date) == value
     }
 
-    static func livehouseLooksLikeDetailedAddress(_ rawValue: String) -> Bool {
+    static func livehouseLooksLikeDetailedAddress(
+        _ rawValue: String,
+        separateAddress: String = ""
+    ) -> Bool {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return false }
+        let address = separateAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !address.isEmpty, value == address || value.contains(address) {
+            return true
+        }
         let patterns = [
-            #"(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*号(?!馆|店|厅)"#,
+            #"(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*号(?!馆|店|厅|沙滩)"#,
             #"(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*(?:弄|栋|幢|室|层|单元)"#,
             #"(?:路|街|道|巷|弄).{0,12}[0-9]+"#,
             #"(?:省|市|区|县).*(?:路|街|道|巷|弄)"#,

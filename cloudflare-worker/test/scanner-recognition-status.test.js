@@ -147,12 +147,15 @@ test("handles six artifacts in one authenticated request with one limiter decisi
   assert.equal(JSON.stringify(payload).includes("data:image"), false);
 });
 
-test("handles nine sub-2MB artifacts with one limiter decision and an eight-call concurrency window", async () => {
+test("starts seventeen artifacts as 16+1 logical-worker waves", async () => {
   let limiterCalls = 0;
   let artifactCalls = 0;
+  let firstWaveArtifactCalls = 0;
+  let secondWaveArtifactCalls = 0;
+  let activeArtifactCalls = 0;
+  let maximumActiveArtifactCalls = 0;
   let qwenCalls = 0;
-  let activeQwenCalls = 0;
-  let maximumActiveQwenCalls = 0;
+  let firstWaveReleased = false;
   let releaseFirstWave;
   const firstWaveGate = new Promise((resolve) => {
     releaseFirstWave = resolve;
@@ -168,14 +171,87 @@ test("handles nine sub-2MB artifacts with one limiter decision and an eight-call
   };
 
   const response = await handleRequest(
-    internalRequest(internalPayload(9)),
+    internalRequest(internalPayload(17)),
     env,
     async (value) => {
       const url = new URL(value instanceof Request ? value.url : value);
       if (url.hostname === "127.0.0.1") {
         artifactCalls += 1;
+        if (firstWaveReleased) {
+          secondWaveArtifactCalls += 1;
+        } else {
+          firstWaveArtifactCalls += 1;
+        }
+        activeArtifactCalls += 1;
+        maximumActiveArtifactCalls = Math.max(
+          maximumActiveArtifactCalls,
+          activeArtifactCalls,
+        );
+        if (artifactCalls === 16) {
+          firstWaveReleased = true;
+          releaseFirstWave();
+        }
+        await firstWaveGate;
+        activeArtifactCalls -= 1;
         const artifactId = Number(url.pathname.split("/").at(-1));
-        const bytes = pngBytes(1_200, 1_908, 1_900_000, artifactId);
+        return new Response(pngHeader(1_200, 1_908, artifactId), {
+          headers: {
+            "content-type": "image/png",
+            "content-length": "30",
+          },
+        });
+      }
+
+      qwenCalls += 1;
+      return qwenResponse({ reasoning: "none", Date: null });
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(limiterCalls, 1);
+  assert.equal(artifactCalls, 17);
+  assert.equal(qwenCalls, 17);
+  assert.equal(firstWaveArtifactCalls, 16);
+  assert.equal(secondWaveArtifactCalls, 1);
+  assert.equal(maximumActiveArtifactCalls, 16);
+  assert.equal(activeArtifactCalls, 0);
+  const payload = await response.json();
+  assert.equal(payload.status, "done");
+  assert.equal(payload.results.length, 17);
+});
+
+test("bounds sixteen maximum-size images to one materialized Qwen stage and releases the gate", async () => {
+  const imageLength = 3 * 1024 * 1024;
+  let observedGate = null;
+  let qwenCalls = 0;
+  let activeQwenCalls = 0;
+  let maximumActiveQwenCalls = 0;
+  let markFirstQwenStarted;
+  const firstQwenStarted = new Promise((resolve) => {
+    markFirstQwenStarted = resolve;
+  });
+  let releaseQwen;
+  const qwenGate = new Promise((resolve) => {
+    releaseQwen = resolve;
+  });
+  const env = {
+    ...LOCAL_ENV,
+    CHEKI_DATE_RATE_LIMITER: {
+      limit: async () => ({ success: true }),
+    },
+    __TEST_CHEKI_DATE_MODEL_GATE_OBSERVER: (gate) => {
+      observedGate = gate;
+    },
+  };
+
+  const responsePromise = handleRequest(
+    internalRequest(internalPayload(16)),
+    env,
+    async (value) => {
+      const url = new URL(value instanceof Request ? value.url : value);
+      if (url.hostname === "127.0.0.1") {
+        const artifactId = Number(url.pathname.split("/").at(-1));
+        const bytes = pngBytes(1_200, 1_908, imageLength, artifactId);
         return new Response(bytes, {
           headers: {
             "content-type": "image/png",
@@ -190,21 +266,101 @@ test("handles nine sub-2MB artifacts with one limiter decision and an eight-call
         maximumActiveQwenCalls,
         activeQwenCalls,
       );
-      if (qwenCalls === 8) releaseFirstWave();
-      await firstWaveGate;
+      markFirstQwenStarted();
+      await qwenGate;
       activeQwenCalls -= 1;
       return qwenResponse({ reasoning: "none", Date: null });
     },
   );
 
+  await firstQwenStarted;
+  assert.ok(observedGate);
+  assert.deepEqual(observedGate.snapshot(), {
+    activeCount: 1,
+    usedEstimatedBytes: 24 * 1024 * 1024,
+    queuedCount: 15,
+  });
+  assert.equal(qwenCalls, 1);
+  releaseQwen();
+
+  const response = await responsePromise;
   assert.equal(response.status, 200);
-  assert.equal(limiterCalls, 1);
-  assert.equal(artifactCalls, 9);
-  assert.equal(qwenCalls, 9);
-  assert.equal(maximumActiveQwenCalls, 8);
-  const payload = await response.json();
-  assert.equal(payload.status, "done");
-  assert.equal(payload.results.length, 9);
+  assert.equal(qwenCalls, 16);
+  assert.equal(maximumActiveQwenCalls, 1);
+  assert.equal(activeQwenCalls, 0);
+  assert.deepEqual(observedGate.snapshot(), {
+    activeCount: 0,
+    usedEstimatedBytes: 0,
+    queuedCount: 0,
+  });
+});
+
+test("settles every worker and releases the model gate after one artifact or Qwen failure", async (t) => {
+  for (const failure of ["artifact", "qwen"]) {
+    await t.test(failure, async () => {
+      let observedGate = null;
+      let artifactCalls = 0;
+      let qwenCalls = 0;
+      const env = {
+        ...LOCAL_ENV,
+        CHEKI_DATE_RATE_LIMITER: {
+          limit: async () => ({ success: true }),
+        },
+        __TEST_CHEKI_DATE_MODEL_GATE_OBSERVER: (gate) => {
+          observedGate = gate;
+        },
+      };
+      let timeout;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${failure} failure left workers pending`)),
+          2_000,
+        );
+      });
+      try {
+        const response = await Promise.race([
+          handleRequest(
+            internalRequest(internalPayload(16)),
+            env,
+            async (value) => {
+              const url = new URL(value instanceof Request ? value.url : value);
+              if (url.hostname === "127.0.0.1") {
+                artifactCalls += 1;
+                if (failure === "artifact" && artifactCalls === 1) {
+                  throw new Error("test-only artifact failure");
+                }
+                return new Response(pngHeader(1_200, 1_908, artifactCalls), {
+                  headers: {
+                    "content-type": "image/png",
+                    "content-length": "30",
+                  },
+                });
+              }
+
+              qwenCalls += 1;
+              if (failure === "qwen" && qwenCalls === 1) {
+                return new Response("test-only model failure", { status: 500 });
+              }
+              return qwenResponse({ reasoning: "none", Date: null });
+            },
+          ),
+          timeoutPromise,
+        ]);
+
+        assert.equal(response.status, 502);
+        assert.equal(artifactCalls, 16);
+        assert.equal(qwenCalls, failure === "artifact" ? 15 : 16);
+        assert.ok(observedGate);
+        assert.deepEqual(observedGate.snapshot(), {
+          activeCount: 0,
+          usedEstimatedBytes: 0,
+          queuedCount: 0,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    });
+  }
 });
 
 test("repeated done status reads are pure proxy operations and never call Qwen", async () => {

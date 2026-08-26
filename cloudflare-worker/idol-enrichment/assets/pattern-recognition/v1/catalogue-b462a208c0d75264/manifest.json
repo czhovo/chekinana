@@ -1,0 +1,36 @@
+{
+  "format": "chekinana-pattern-recognition-manifest-v1",
+  "version": "pattern-6541-v1",
+  "embeddingDimension": 256,
+  "patternCount": 95,
+  "encoderCheckpointSHA256": "fe5bcb95f15836ab8d664398ee7acede0fb700ce3ac85ffa0d60adf356a2fb01",
+  "prototypesUrl": "https://idol.chekinana.top/assets/pattern-recognition/v1/prototypes.json",
+  "idolPatternMapUrl": "https://idol.chekinana.top/assets/pattern-recognition/v1/catalogue-b462a208c0d75264/idol-pattern-map.json",
+  "baseUrl": "https://idol.chekinana.top/assets/pattern-recognition/v1/catalogue-b462a208c0d75264",
+  "encoder": {
+    "architecture": "DINOv2 ViT-S/14 dual-view metric encoder",
+    "embeddingDimension": 256,
+    "checkpointSha256": "fe5bcb95f15836ab8d664398ee7acede0fb700ce3ac85ffa0d60adf356a2fb01"
+  },
+  "prototypeBank": {
+    "path": "/assets/pattern-recognition/v1/prototypes.json",
+    "url": "https://idol.chekinana.top/assets/pattern-recognition/v1/prototypes.json",
+    "sha256": "907066c4e29b059d8a4530cfe4066b75e3a496733f705c268872b40569137ea1",
+    "format": "pattern_prototype_bank_v1",
+    "patternCount": 95,
+    "embeddingDimension": 256,
+    "similarity": "cosine",
+    "manifestFingerprintSha256": "8ad9899bf68f6e07b3fb587c27c8dab852219aa0c8479e98f3948ea59e02fa97"
+  },
+  "idolPatternMap": {
+    "path": "/assets/pattern-recognition/v1/catalogue-b462a208c0d75264/idol-pattern-map.json",
+    "url": "https://idol.chekinana.top/assets/pattern-recognition/v1/catalogue-b462a208c0d75264/idol-pattern-map.json",
+    "sha256": "9c84cb20597e6ceea43f7d7fc391255689b8f6f097ef0347dc46667c6cd08565",
+    "format": "idol_pattern_map_v1",
+    "mappedSourceIdCount": 92,
+    "mappedPatternCount": 94,
+    "unmappedPatternIds": [
+      "理砂Risa_極夜_P1"
+    ]
+  }
+}

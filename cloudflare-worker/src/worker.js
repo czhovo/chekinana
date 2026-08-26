@@ -56,11 +56,91 @@ const INTERNAL_DATE_ENDPOINT = "/api/internal/scanner/date-annotations";
 const INTERNAL_DATE_BODY_MAX_BYTES = 16 * 1024;
 const INTERNAL_DATE_BODY_TIMEOUT_MS = 5_000;
 const INTERNAL_DATE_MAX_RESULTS = 64;
-const INTERNAL_DATE_CONCURRENCY = 8;
+const INTERNAL_DATE_CONCURRENCY = 16;
 const INTERNAL_DATE_MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+// A 16-worker wave can retain at most 48 MiB of raw images. While one image is
+// sent to Qwen, an 8x-byte charge conservatively covers Base64 fragments/join,
+// worst-case two-byte JS storage for the Data URL and JSON copy, request-body
+// encoding, and small response overhead. The 24 MiB gate therefore keeps raw
+// plus estimated model-stage memory at or below 72 MiB in a 128 MiB isolate,
+// leaving 56 MiB for the runtime and other request state. The separate count
+// limit matches Cloudflare's six simultaneously open outbound connections.
+const INTERNAL_DATE_MODEL_STAGE_BYTES_PER_IMAGE_BYTE = 8;
+const INTERNAL_DATE_MODEL_STAGE_MAX_ESTIMATED_BYTES = 24 * 1024 * 1024;
+const INTERNAL_DATE_MODEL_STAGE_MAX_CONNECTIONS = 6;
 const DATE_STATUS_ERROR = "date_annotation_unavailable";
 const INTERNAL_DATE_REQUEST_ERROR = "scanner_date_request_invalid";
 const TASK_ID_PATTERN = /^[a-f0-9]{32}$/u;
+
+function createInternalDateModelStageGate() {
+  let activeCount = 0;
+  let usedEstimatedBytes = 0;
+  const queue = [];
+
+  const drain = () => {
+    while (queue.length > 0
+      && activeCount < INTERNAL_DATE_MODEL_STAGE_MAX_CONNECTIONS) {
+      const entry = queue[0];
+      if (usedEstimatedBytes + entry.estimatedBytes
+        > INTERNAL_DATE_MODEL_STAGE_MAX_ESTIMATED_BYTES) break;
+      queue.shift();
+      entry.signal?.removeEventListener("abort", entry.abort);
+      activeCount += 1;
+      usedEstimatedBytes += entry.estimatedBytes;
+      let released = false;
+      entry.resolve(() => {
+        if (released) return;
+        released = true;
+        activeCount -= 1;
+        usedEstimatedBytes -= entry.estimatedBytes;
+        drain();
+      });
+    }
+  };
+
+  return {
+    acquire(imageBytes, signal) {
+      if (!Number.isInteger(imageBytes) || imageBytes <= 0) {
+        return Promise.reject(new TypeError("invalid model-stage image size"));
+      }
+      const estimatedBytes = imageBytes
+        * INTERNAL_DATE_MODEL_STAGE_BYTES_PER_IMAGE_BYTE;
+      if (!Number.isSafeInteger(estimatedBytes)
+        || estimatedBytes > INTERNAL_DATE_MODEL_STAGE_MAX_ESTIMATED_BYTES) {
+        return Promise.reject(new RangeError("model-stage image exceeds budget"));
+      }
+      if (signal?.aborted) {
+        return Promise.reject(new Error("model-stage wait aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        const entry = {
+          estimatedBytes,
+          signal,
+          resolve,
+          reject,
+          abort: null,
+        };
+        entry.abort = () => {
+          const index = queue.indexOf(entry);
+          if (index < 0) return;
+          queue.splice(index, 1);
+          reject(new Error("model-stage wait aborted"));
+          drain();
+        };
+        signal?.addEventListener("abort", entry.abort, { once: true });
+        queue.push(entry);
+        drain();
+      });
+    },
+    snapshot() {
+      return {
+        activeCount,
+        usedEstimatedBytes,
+        queuedCount: queue.length,
+      };
+    },
+  };
+}
 
 function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -528,6 +608,10 @@ async function handleInternalDateRequest(
   if (rateLimit !== "allowed") return internalDateFailure();
 
   const annotations = [];
+  const modelStageGate = createInternalDateModelStageGate();
+  if (typeof env?.__TEST_CHEKI_DATE_MODEL_GATE_OBSERVER === "function") {
+    env.__TEST_CHEKI_DATE_MODEL_GATE_OBSERVER(modelStageGate);
+  }
   for (
     let offset = 0;
     offset < payload.results.length;
@@ -564,6 +648,7 @@ async function handleInternalDateRequest(
             consumeResponseBody: true,
             maxImageBytes: INTERNAL_DATE_MAX_IMAGE_BYTES,
             byteBudget,
+            modelStageGate,
           },
         );
         return { id: result.id, annotation };

@@ -2175,12 +2175,17 @@ struct ContentView: View {
             ))
             return
         }
+        let validEventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            draft.eventID,
+            recordDate: normalizedDate,
+            events: (try? modelContext.fetch(FetchDescriptor<Event>())) ?? []
+        )
         guard confirmationLedger.updateTemporaryCheki(
             id: draft.id,
             idolIDs: Array(draft.idolIDs),
             date: normalizedDate,
-            eventID: draft.eventID,
-            userAppears: draft.userAppears,
+            eventID: validEventID,
+            userAppears: draft.userAppears ?? false,
             size: draft.size,
             isFavorite: draft.isFavorite,
             hasPostedToSNS: draft.hasPostedToSNS,
@@ -3320,10 +3325,30 @@ private struct EventCandidateEditorView: View {
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("chekinana.event.candidate.date-undetermined")
             }
+            candidateField(
+                "OPEN",
+                text: optionalFieldBinding(\.openTime),
+                identifier: "open-time",
+                prompt: "HH:mm"
+            )
+            candidateField(
+                "START",
+                text: optionalFieldBinding(\.startTime),
+                identifier: "start-time",
+                prompt: "HH:mm"
+            )
             candidateField(ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), text: $fields.city, identifier: "city")
             candidateField(ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), text: $fields.livehouse, identifier: "livehouse")
             candidateField(ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), text: $fields.price, identifier: "price")
-            candidateField(ChekinanaL10n.text("assistant.event.field.weibo_required", fallback: "Weibo URL *"), text: $fields.weiboURL, identifier: "weibo-url")
+            candidateField(
+                ChekinanaL10n.text(
+                    "assistant.event.field.weibo_required",
+                    fallback: "Weibo URL *"
+                ),
+                text: $fields.weiboURL,
+                identifier: "weibo-url",
+                offersDirectPaste: true
+            )
             candidateField(ChekinanaL10n.text("assistant.event.field.ticket", fallback: "Ticket URL"), text: $fields.ticketURL, identifier: "ticket-url")
 
             if !blockers.isEmpty {
@@ -3388,20 +3413,57 @@ private struct EventCandidateEditorView: View {
         _ label: String,
         text: Binding<String>,
         identifier: String,
-        prompt: String = ChekinanaL10n.text("assistant.optional", fallback: "Optional")
+        prompt: String = ChekinanaL10n.text("assistant.optional", fallback: "Optional"),
+        offersDirectPaste: Bool = false
     ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        let pasteTitle = ChekinanaL10n.text(
+            "product.events.paste_weibo",
+            fallback: "Paste Weibo URL"
+        )
+        let visiblePrompt = offersDirectPaste ? pasteTitle : prompt
+        return VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.footnote.weight(.medium))
-            TextField(prompt, text: text, axis: .vertical)
-                .lineLimit(1...3)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .disabled(isDisabled)
-                .focused($isFieldFocused)
-                .accessibilityIdentifier("chekinana.event.candidate.\(identifier)")
+            TextField(
+                "",
+                text: text,
+                prompt: Text(visiblePrompt).foregroundStyle(
+                    offersDirectPaste ? Color.blue : Color.secondary
+                ),
+                axis: .vertical
+            )
+            .lineLimit(1...3)
+            .textFieldStyle(.roundedBorder)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .disabled(isDisabled)
+            .focused($isFieldFocused)
+            .accessibilityHidden(offersDirectPaste && text.wrappedValue.isEmpty)
+            .accessibilityIdentifier("chekinana.event.candidate.\(identifier)")
+            .overlay(alignment: .leading) {
+                if offersDirectPaste, text.wrappedValue.isEmpty {
+                    ChekinanaDirectStringPasteControl(
+                        title: pasteTitle,
+                        accessibilityIdentifier: "chekinana.event.candidate.\(identifier).paste"
+                    ) { pasted in
+                        text.wrappedValue = pasted
+                        isFieldFocused = true
+                    }
+                    .disabled(isDisabled)
+                }
+            }
         }
+    }
+
+    private func optionalFieldBinding(
+        _ keyPath: WritableKeyPath<ChekinanaEventCandidateFields, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { fields[keyPath: keyPath] ?? "" },
+            set: { value in
+                fields[keyPath: keyPath] = value.isEmpty ? nil : value
+            }
+        )
     }
 }
 
@@ -3425,6 +3487,13 @@ private struct EventCardView: View {
             value(ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), emptyFallback(event.city))
             value(ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), emptyFallback(event.livehouse))
             value(ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), emptyFallback(event.price))
+            if let schedule = ChekinanaEventTime.summary(
+                openTime: event.openTime,
+                startTime: event.startTime
+            ) {
+                Text(schedule)
+                    .font(.subheadline.monospacedDigit())
+            }
             value(ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo"), emptyFallback(event.weiboURL))
             value(ChekinanaL10n.text("assistant.event.field.ticket_short", fallback: "Tickets"), emptyFallback(event.ticketURL))
             value(ChekinanaL10n.text("assistant.note", fallback: "Note"), emptyFallback(event.note))
@@ -3710,7 +3779,7 @@ private struct TemporaryChekiEditorView: View {
                 Section(ChekinanaL10n.text("assistant.temporary.event", fallback: "Event (optional; does not affect index)")) {
                     Picker(ChekinanaL10n.text("assistant.event.title", fallback: "Event"), selection: $draft.eventID) {
                         Text(ChekinanaL10n.text("assistant.none", fallback: "None")).tag(UUID?.none)
-                        ForEach(events.sorted(by: { $0.name < $1.name })) { event in
+                        ForEach(selectableEvents.sorted(by: { $0.name < $1.name })) { event in
                             Text(event.name).tag(Optional(event.id))
                         }
                     }
@@ -3738,6 +3807,12 @@ private struct TemporaryChekiEditorView: View {
                     }
                 }
             }
+            .onChange(of: draft.hasDate) { _, _ in
+                clearInvalidEventSelection()
+            }
+            .onChange(of: draft.date) { _, _ in
+                clearInvalidEventSelection()
+            }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle(ChekinanaL10n.text("assistant.temporary.edit_title", fallback: "Edit Temporary Cheki"))
             .navigationBarTitleDisplayMode(.inline)
@@ -3756,6 +3831,29 @@ private struct TemporaryChekiEditorView: View {
                 }
             }
         }
+    }
+
+    private var draftCanonicalDate: Date? {
+        guard draft.hasDate else { return nil }
+        return ChekinanaDateOnly.canonicalDate(
+            from: draft.date,
+            displayedIn: .current
+        )
+    }
+
+    private var selectableEvents: [Event] {
+        ChekinanaChekiEventSelectionPolicy.eligibleEvents(
+            events,
+            for: draftCanonicalDate
+        )
+    }
+
+    private func clearInvalidEventSelection() {
+        draft.eventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
+            draft.eventID,
+            recordDate: draftCanonicalDate,
+            events: events
+        )
     }
 }
 
@@ -4346,19 +4444,31 @@ private struct ChekinanaChekiImagePreview: View {
                 ZStack {
                     if let renderedImage,
                        case .loaded = loadState {
-                        Image(decorative: renderedImage.cgImage, scale: 1, orientation: .up)
-                            .resizable()
-                            .scaledToFit()
-                            .accessibilityHidden(true)
-
-                        if let annotation = source.transientDateAnnotation {
-                            ChekinanaChekiDateOverlay(
-                                annotation: annotation,
-                                imageSize: CGSize(
-                                    width: renderedImage.cgImage.width,
-                                    height: renderedImage.cgImage.height
+                        let imageSize = CGSize(
+                            width: renderedImage.cgImage.width,
+                            height: renderedImage.cgImage.height
+                        )
+                        ChekinanaZoomableImageViewport(
+                            imageSize: imageSize,
+                            resetID: source.loadID
+                        ) {
+                            ZStack {
+                                Image(
+                                    decorative: renderedImage.cgImage,
+                                    scale: 1,
+                                    orientation: .up
                                 )
-                            )
+                                .resizable()
+                                .scaledToFit()
+                                .accessibilityHidden(true)
+
+                                if let annotation = source.transientDateAnnotation {
+                                    ChekinanaChekiDateOverlay(
+                                        annotation: annotation,
+                                        imageSize: imageSize
+                                    )
+                                }
+                            }
                         }
 
                         VStack {
@@ -4773,7 +4883,14 @@ private extension Color {
 #Preview {
     ContentView()
         .modelContainer(
-            for: [Idol.self, Event.self, Cheki.self, Shame.self, Douga.self],
+            for: [
+                Idol.self,
+                Event.self,
+                EventSchedule.self,
+                Cheki.self,
+                Shame.self,
+                Douga.self,
+            ],
             inMemory: true
         )
 }

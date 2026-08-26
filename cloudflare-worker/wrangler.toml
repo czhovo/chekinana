@@ -9,7 +9,7 @@ routes = [
 [vars]
 NL_LLM_MODEL = "deepseek-v4-flash"
 NL_LLM_ENDPOINT = "https://api.deepseek.com/chat/completions"
-CHEKI_DATE_QWEN_MODEL = "qwen3.7-plus"
+CHEKI_DATE_QWEN_MODEL = "qwen3.7-flash"
 SCANNER_ACTIVE_TASK_CHECK_CONCURRENCY = "4"
 SCANNER_TIMING_LOGS = "true"
 
@@ -27,12 +27,4 @@ namespace_id = "1001"
 
   [ratelimits.simple]
   limit = 20
-  period = 60
-
-[[ratelimits]]
-name = "EVENT_WEIBO_RATE_LIMITER"
-namespace_id = "1002"
-
-  [ratelimits.simple]
-  limit = 5
   period = 60

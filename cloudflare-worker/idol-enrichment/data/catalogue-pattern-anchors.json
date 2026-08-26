@@ -1,0 +1,671 @@
+{
+  "format": "chekinana-pattern-catalogue-anchors-v1",
+  "encoderVersion": "pattern-6541-v1",
+  "anchors": [
+    {
+      "index": 0,
+      "patternId": "Aoyi_XII_P1",
+      "catalogueId": "idol_001325",
+      "idolName": "Aoyi",
+      "groupName": "凌晨12点"
+    },
+    {
+      "index": 1,
+      "patternId": "KUMI-TOXIC_P1",
+      "catalogueId": "idol_001913",
+      "idolName": "KUMI",
+      "groupName": "电波TOXIC"
+    },
+    {
+      "index": 2,
+      "patternId": "Mina_XII_P1",
+      "catalogueId": "idol_001326",
+      "idolName": "Mina",
+      "groupName": "凌晨12点"
+    },
+    {
+      "index": 3,
+      "patternId": "Mina_XII_P2",
+      "catalogueId": "idol_001326",
+      "idolName": "Mina",
+      "groupName": "凌晨12点"
+    },
+    {
+      "index": 4,
+      "patternId": "Nakona_Lumina_P1",
+      "catalogueId": "idol_000511",
+      "idolName": "Nakona",
+      "groupName": "Lumina"
+    },
+    {
+      "index": 5,
+      "patternId": "PON_niku_P1",
+      "catalogueId": "idol_000812",
+      "idolName": "niku",
+      "groupName": "PON！"
+    },
+    {
+      "index": 6,
+      "patternId": "REI-TOXIC_P1",
+      "catalogueId": "idol_001914",
+      "idolName": "REI",
+      "groupName": "电波TOXIC"
+    },
+    {
+      "index": 7,
+      "patternId": "RIKO-TOXIC_P1",
+      "catalogueId": "idol_001915",
+      "idolName": "RIKO",
+      "groupName": "电波TOXIC"
+    },
+    {
+      "index": 8,
+      "patternId": "SOBA-TOXIC_P1",
+      "catalogueId": "idol_001916",
+      "idolName": "SOBA",
+      "groupName": "电波TOXIC"
+    },
+    {
+      "index": 9,
+      "patternId": "TOTO-山海誓约_P1",
+      "catalogueId": "idol_001452",
+      "idolName": "TOTO",
+      "groupName": "山海誓约"
+    },
+    {
+      "index": 10,
+      "patternId": "YUMETORI-小容_P1",
+      "catalogueId": "idol_002210",
+      "idolName": "小容",
+      "groupName": "采梦YUMETORI"
+    },
+    {
+      "index": 11,
+      "patternId": "YUMETORI-小绫_P1",
+      "catalogueId": "idol_002211",
+      "idolName": "小绫",
+      "groupName": "采梦YUMETORI"
+    },
+    {
+      "index": 12,
+      "patternId": "YUMETORI-眠_P1",
+      "catalogueId": "idol_002214",
+      "idolName": "眠",
+      "groupName": "采梦YUMETORI"
+    },
+    {
+      "index": 13,
+      "patternId": "YUMETORI-诺里_P1",
+      "catalogueId": "idol_002215",
+      "idolName": "诺里",
+      "groupName": "采梦YUMETORI"
+    },
+    {
+      "index": 14,
+      "patternId": "YUMETORI-鱼鱼_P1",
+      "catalogueId": "idol_002216",
+      "idolName": "鱼鱼",
+      "groupName": "采梦YUMETORI"
+    },
+    {
+      "index": 15,
+      "patternId": "七七-YUMEHANABI_P1",
+      "catalogueId": "idol_001752",
+      "idolName": "七七",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 16,
+      "patternId": "优子Yuuko-弥漫星雲_P1",
+      "catalogueId": "idol_001500",
+      "idolName": "优子Yuuko",
+      "groupName": "弥漫星雲"
+    },
+    {
+      "index": 17,
+      "patternId": "兔兔Poppy-StarHoney_P1",
+      "catalogueId": "idol_001040",
+      "idolName": "兔兔Poppy",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 18,
+      "patternId": "凛凛Rin-午前4時_P1",
+      "catalogueId": "idol_001342",
+      "idolName": "凛凛Rin",
+      "groupName": "午前4時"
+    },
+    {
+      "index": 19,
+      "patternId": "凝坠空色轨迹的Mizu_P1",
+      "catalogueId": "idol_002003",
+      "idolName": "Mizu",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 20,
+      "patternId": "切切chieko_神的爱恋诗_P1",
+      "catalogueId": "idol_001973",
+      "idolName": "切切chieko",
+      "groupName": "神的爱恋诗"
+    },
+    {
+      "index": 21,
+      "patternId": "加澜_aika_P1",
+      "catalogueId": "idol_001563",
+      "idolName": "加澜_aika",
+      "groupName": "恋音契约"
+    },
+    {
+      "index": 22,
+      "patternId": "单曲Kioku-午前4時_P1",
+      "catalogueId": "idol_001343",
+      "idolName": "单曲Kioku",
+      "groupName": "午前4時"
+    },
+    {
+      "index": 23,
+      "patternId": "南依Kanany_極夜_P1",
+      "catalogueId": "idol_001726",
+      "idolName": "南依Kanany",
+      "groupName": "极夜NightFell"
+    },
+    {
+      "index": 24,
+      "patternId": "南秋Minami-山海誓约_P1",
+      "catalogueId": "idol_001453",
+      "idolName": "南秋Minami",
+      "groupName": "山海誓约"
+    },
+    {
+      "index": 25,
+      "patternId": "团子Maruru-StarCandy_P1",
+      "catalogueId": "idol_001014",
+      "idolName": "团子Maruru",
+      "groupName": "StarCandy"
+    },
+    {
+      "index": 26,
+      "patternId": "圆圆Madoka_BlankPoker_P1",
+      "catalogueId": "idol_001994",
+      "idolName": "圆圆Madoka",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 27,
+      "patternId": "夏沫-YUMEHANABI_P1",
+      "catalogueId": "idol_001753",
+      "idolName": "夏沫",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 28,
+      "patternId": "夜夜Yoruko-StarWinK_P1",
+      "catalogueId": "idol_001077",
+      "idolName": "夜夜Yoruko",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 29,
+      "patternId": "天照芥RIRIKA-STARAX1S_P1",
+      "catalogueId": "idol_001006",
+      "idolName": "天照芥RIRIKA",
+      "groupName": "StarAxis"
+    },
+    {
+      "index": 30,
+      "patternId": "奈奈Nana-StarWinK_P1",
+      "catalogueId": "idol_001078",
+      "idolName": "奈奈Nana",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 31,
+      "patternId": "宅宅子-YUMEHANABI_P1",
+      "catalogueId": "idol_001754",
+      "idolName": "宅宅子",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 32,
+      "patternId": "小唯Yui-StarHoney_P1",
+      "catalogueId": "idol_001041",
+      "idolName": "小唯Yui",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 33,
+      "patternId": "小岛Shima-StarLight_P1",
+      "catalogueId": "idol_001046",
+      "idolName": "小岛Shima",
+      "groupName": "StarLight"
+    },
+    {
+      "index": 34,
+      "patternId": "小弥Mikari-StarRise_P1",
+      "catalogueId": "idol_001066",
+      "idolName": "小弥Mikari",
+      "groupName": "StarRise"
+    },
+    {
+      "index": 35,
+      "patternId": "小柴Chai-STARAX1S_P1",
+      "catalogueId": "idol_001008",
+      "idolName": "小柴Chai",
+      "groupName": "StarAxis"
+    },
+    {
+      "index": 36,
+      "patternId": "小芋Koimo-StarWinK_P1",
+      "catalogueId": "idol_001079",
+      "idolName": "小芋Koimo",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 37,
+      "patternId": "小芯Kokoro-StarShips_P1",
+      "catalogueId": "idol_001072",
+      "idolName": "小芯Kokoro",
+      "groupName": "StarShips"
+    },
+    {
+      "index": 38,
+      "patternId": "小遥Haruka-StarLight_P1",
+      "catalogueId": "idol_001047",
+      "idolName": "小遥Haruka",
+      "groupName": "StarLight"
+    },
+    {
+      "index": 39,
+      "patternId": "巫歌Yokiko_Lumina_P1",
+      "catalogueId": "idol_000513",
+      "idolName": "巫歌Yokiko",
+      "groupName": "Lumina"
+    },
+    {
+      "index": 40,
+      "patternId": "幽琪Yura_BlankPoker_P1",
+      "catalogueId": "idol_001995",
+      "idolName": "幽琪Yura",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 41,
+      "patternId": "恋恋Renren-StarHoney_P1",
+      "catalogueId": "idol_001042",
+      "idolName": "恋恋Renren",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 42,
+      "patternId": "悠悠Yuu-午前4時_P1",
+      "catalogueId": "idol_001346",
+      "idolName": "悠悠Yuu",
+      "groupName": "午前4時"
+    },
+    {
+      "index": 43,
+      "patternId": "描绘空色轨迹的Kotomi_P1",
+      "catalogueId": "idol_002004",
+      "idolName": "Kotomi",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 44,
+      "patternId": "无情小猪_XwX_P1",
+      "catalogueId": "idol_001976",
+      "idolName": "无情小猪_XwX",
+      "groupName": "神的爱恋诗"
+    },
+    {
+      "index": 45,
+      "patternId": "星儿Hoshimi_BlankPoker_P1",
+      "catalogueId": "idol_001997",
+      "idolName": "星儿Hoshimi",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 46,
+      "patternId": "晨仔Asahi-StarWinK_P1",
+      "catalogueId": "idol_001080",
+      "idolName": "晨仔Asahi",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 47,
+      "patternId": "暮雨Kureame_極夜_P1",
+      "catalogueId": "idol_001727",
+      "idolName": "暮雨Kureame",
+      "groupName": "极夜NightFell"
+    },
+    {
+      "index": 48,
+      "patternId": "朽木Chiaki_SLMT_P1",
+      "catalogueId": "idol_000975",
+      "idolName": "朽木チアキChiaki",
+      "groupName": "solamente"
+    },
+    {
+      "index": 49,
+      "patternId": "杏子Kyoko_BlankPoker_P1",
+      "catalogueId": "idol_001998",
+      "idolName": "杏子Kyoko",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 50,
+      "patternId": "杳杳Yuri-异色星Harmonia_P1",
+      "catalogueId": "idol_001494",
+      "idolName": "杳杳Yuri",
+      "groupName": "异色星Harmonia"
+    },
+    {
+      "index": 51,
+      "patternId": "梦梦Yumeri-StarHoney_P1",
+      "catalogueId": "idol_001043",
+      "idolName": "梦梦Yumeri",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 52,
+      "patternId": "梦游空色轨迹的Ririsu_P1",
+      "catalogueId": "idol_002005",
+      "idolName": "Ririsu",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 53,
+      "patternId": "楠楠Minari-StarShips_P1",
+      "catalogueId": "idol_001073",
+      "idolName": "楠楠Minari",
+      "groupName": "StarShips"
+    },
+    {
+      "index": 54,
+      "patternId": "氏闇来世Shiyami_SLMT_P1",
+      "catalogueId": "idol_000976",
+      "idolName": "氏闇来世Shiyami",
+      "groupName": "solamente"
+    },
+    {
+      "index": 55,
+      "patternId": "水鳥糸Ito_SLMT_P1",
+      "catalogueId": "idol_000977",
+      "idolName": "水鳥糸Ito",
+      "groupName": "solamente"
+    },
+    {
+      "index": 56,
+      "patternId": "法儿_fuwari_P1",
+      "catalogueId": "idol_001564",
+      "idolName": "法儿_fuwari",
+      "groupName": "恋音契约"
+    },
+    {
+      "index": 57,
+      "patternId": "泠Midori-StarRise_P1",
+      "catalogueId": "idol_001068",
+      "idolName": "泠Midori",
+      "groupName": "StarRise"
+    },
+    {
+      "index": 58,
+      "patternId": "海城Shiyo-StarWinK_P1",
+      "catalogueId": "idol_001081",
+      "idolName": "海城Shiyo",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 59,
+      "patternId": "火山火山-山海誓约_P1",
+      "catalogueId": "idol_001454",
+      "idolName": "火山",
+      "groupName": "山海誓约"
+    },
+    {
+      "index": 60,
+      "patternId": "点缀空色轨迹的Seiko_P1",
+      "catalogueId": "idol_002006",
+      "idolName": "Seiko",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 61,
+      "patternId": "無名Hana-STARAX1S_P1",
+      "catalogueId": "idol_001010",
+      "idolName": "無名Hana",
+      "groupName": "StarAxis"
+    },
+    {
+      "index": 62,
+      "patternId": "無名NanaRi-午前4時_P1",
+      "catalogueId": "idol_001347",
+      "idolName": "無名NanaRi",
+      "groupName": "午前4時"
+    },
+    {
+      "index": 63,
+      "patternId": "照耀空色轨迹的miya_P1",
+      "catalogueId": "idol_002369",
+      "idolName": "miya",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 64,
+      "patternId": "熊喵啾啾_BlankPoker_P1",
+      "catalogueId": "idol_001999",
+      "idolName": "熊喵啾啾",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 65,
+      "patternId": "熹熹Remiki-StarWinK_P1",
+      "catalogueId": "idol_001082",
+      "idolName": "熹熹Remiki",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 66,
+      "patternId": "玉子_tamako__P1",
+      "catalogueId": "idol_001565",
+      "idolName": "玉子_tamako_",
+      "groupName": "恋音契约"
+    },
+    {
+      "index": 67,
+      "patternId": "理理Riri-StarHoney_P1",
+      "catalogueId": "idol_001044",
+      "idolName": "理理Riri",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 68,
+      "patternId": "理砂Risa_極夜_P1",
+      "catalogueId": null,
+      "idolName": null,
+      "groupName": null
+    },
+    {
+      "index": 69,
+      "patternId": "白泠Mio-StarHoney_P1",
+      "catalogueId": "idol_001045",
+      "idolName": "白泠Mio",
+      "groupName": "StarHoney"
+    },
+    {
+      "index": 70,
+      "patternId": "白玖瞳Hitomi_SLMT_P1",
+      "catalogueId": "idol_000978",
+      "idolName": "白玖瞳Hitomi",
+      "groupName": "solamente"
+    },
+    {
+      "index": 71,
+      "patternId": "真夏Mana-StarShips_P1",
+      "catalogueId": "idol_001075",
+      "idolName": "真夏Mana",
+      "groupName": "StarShips"
+    },
+    {
+      "index": 72,
+      "patternId": "眠眠Nemuru-StarLight_P1",
+      "catalogueId": "idol_001048",
+      "idolName": "眠眠Nemuru",
+      "groupName": "StarLight"
+    },
+    {
+      "index": 73,
+      "patternId": "砂糖心跳-木兰_P1",
+      "catalogueId": "idol_001958",
+      "idolName": "木兰",
+      "groupName": "砂糖心跳DokiDoki"
+    },
+    {
+      "index": 74,
+      "patternId": "砂羽Sawawa-StarLight_P1",
+      "catalogueId": "idol_001049",
+      "idolName": "砂羽Sawawa",
+      "groupName": "StarLight"
+    },
+    {
+      "index": 75,
+      "patternId": "祈愿空色轨迹的Eriko_P1",
+      "catalogueId": "idol_002008",
+      "idolName": "Eriko",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 76,
+      "patternId": "童话Douwa-StarLight_P2",
+      "catalogueId": "idol_001050",
+      "idolName": "童话Douwa",
+      "groupName": "StarLight"
+    },
+    {
+      "index": 77,
+      "patternId": "箱箱Hako_永昼_P1",
+      "catalogueId": "idol_001789",
+      "idolName": "箱箱Hako",
+      "groupName": "永昼Eternal"
+    },
+    {
+      "index": 78,
+      "patternId": "糖糖-YUMEHANABI_P1",
+      "catalogueId": "idol_001757",
+      "idolName": "糖糖",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 79,
+      "patternId": "羽悠Yuu-StarWinK_P1",
+      "catalogueId": "idol_001083",
+      "idolName": "羽悠Yuu",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 80,
+      "patternId": "羽悠Yuu-StarWinK_P2",
+      "catalogueId": "idol_001083",
+      "idolName": "羽悠Yuu",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 81,
+      "patternId": "苗苗Yumena_BlankPoker_P1",
+      "catalogueId": "idol_002001",
+      "idolName": "苗苗Yumena",
+      "groupName": "空白扑克BlankPoker"
+    },
+    {
+      "index": 82,
+      "patternId": "茶子Tyako-午前4時_P1",
+      "catalogueId": "idol_001348",
+      "idolName": "茶子Tyako",
+      "groupName": "午前4時"
+    },
+    {
+      "index": 83,
+      "patternId": "莉莉丝-YUMEHANABI_P1",
+      "catalogueId": "idol_001758",
+      "idolName": "莉莉丝",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 84,
+      "patternId": "蛋酱Tamako_永昼_P1",
+      "catalogueId": "idol_001790",
+      "idolName": "蛋酱Tamako",
+      "groupName": "永昼Eternal"
+    },
+    {
+      "index": 85,
+      "patternId": "触碰空色轨迹的Aina_P1",
+      "catalogueId": "idol_002009",
+      "idolName": "Aina",
+      "groupName": "空色轨迹"
+    },
+    {
+      "index": 86,
+      "patternId": "金水金水-山海誓约_P1",
+      "catalogueId": "idol_001456",
+      "idolName": "金水",
+      "groupName": "山海誓约"
+    },
+    {
+      "index": 87,
+      "patternId": "阿漓_himeri_P1",
+      "catalogueId": "idol_001566",
+      "idolName": "阿漓_himeri",
+      "groupName": "恋音契约"
+    },
+    {
+      "index": 88,
+      "patternId": "阿白_omochi_P2",
+      "catalogueId": "idol_001567",
+      "idolName": "阿白_Omochi",
+      "groupName": "恋音契约"
+    },
+    {
+      "index": 89,
+      "patternId": "雨沢Neko_永昼_P1",
+      "catalogueId": "idol_001791",
+      "idolName": "雨沢Neko",
+      "groupName": "永昼Eternal"
+    },
+    {
+      "index": 90,
+      "patternId": "須川Kieru-STARAX1S_P1",
+      "catalogueId": "idol_001013",
+      "idolName": "須川Kieru",
+      "groupName": "StarAxis"
+    },
+    {
+      "index": 91,
+      "patternId": "饦饦-YUMEHANABI_P1",
+      "catalogueId": "idol_001759",
+      "idolName": "饦饦",
+      "groupName": "梦花火YUMEHANABI"
+    },
+    {
+      "index": 92,
+      "patternId": "饼饼Mochi-StarWinK_P1",
+      "catalogueId": "idol_001084",
+      "idolName": "饼饼Mochi",
+      "groupName": "StarWinK"
+    },
+    {
+      "index": 93,
+      "patternId": "魚炳Sakaa_極夜_P1",
+      "catalogueId": "idol_001728",
+      "idolName": "魚炳Sakaa",
+      "groupName": "极夜NightFell"
+    },
+    {
+      "index": 94,
+      "patternId": "麦麦Melody-StarCandy_P1",
+      "catalogueId": "idol_001017",
+      "idolName": "麦麦Melody",
+      "groupName": "StarCandy"
+    }
+  ]
+}

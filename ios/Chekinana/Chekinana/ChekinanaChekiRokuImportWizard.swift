@@ -1,6 +1,6 @@
 import SwiftData
 import SwiftUI
-import UIKit
+import UniformTypeIdentifiers
 
 /// Deliberately local-only ChekiRoku import UI.  It never calls the idol catalogue.
 struct ChekinanaChekiRokuImportWizard: View {
@@ -427,8 +427,7 @@ struct ChekinanaChekiRokuImportWizard: View {
                         idolName: namesByID[value.idolID]!,
                         day: value.day,
                         type: .cheki,
-                        memoRuns: value.memoRuns,
-                        nextIndex: value.nextIndex
+                        memoRuns: value.memoRuns
                     )
                     },
                     sourceRecords: records,
@@ -532,7 +531,7 @@ private struct ChekiRokuStepHeader: View {
 }
 
 enum ChekiRokuImportUIError: LocalizedError {
-    case invalidName, invalidAvatar, unresolvedMember(Int), missingIdol(Int), missingDestinationIdol, unmappedRecord, indexOverflow
+    case invalidName, invalidAvatar, unresolvedMember(Int), missingIdol(Int), missingDestinationIdol, unmappedRecord
     case commitInProgress
 
     var errorDescription: String? {
@@ -553,8 +552,6 @@ enum ChekiRokuImportUIError: LocalizedError {
             ChekinanaL10n.text("import.error.destination_idol", fallback: "A mapped Idol is unavailable in this import context. No records were imported.")
         case .unmappedRecord:
             ChekinanaL10n.text("import.error.unmapped_record", fallback: "A source record has no resolved Idol mapping.")
-        case .indexOverflow:
-            ChekinanaL10n.text("import.error.objects", fallback: "A Cheki index is too large to import safely. No records were imported.")
         case .commitInProgress:
             ChekinanaL10n.text(
                 "import.error.commit_in_progress",
@@ -726,7 +723,6 @@ struct ChekiRokuPlanItem: Sendable {
     let day: Date?
     let type: ChekiRokuType
     let memoRuns: [ChekiRokuRecordImportPlanner.MemoRun]
-    let nextIndex: Int
     let count: Int
 
     init(
@@ -734,15 +730,13 @@ struct ChekiRokuPlanItem: Sendable {
         idolName: String,
         day: Date?,
         type: ChekiRokuType,
-        memoRuns: [ChekiRokuRecordImportPlanner.MemoRun],
-        nextIndex: Int
+        memoRuns: [ChekiRokuRecordImportPlanner.MemoRun]
     ) {
         self.idolID = idolID
         self.idolName = idolName
         self.day = day
         self.type = type
         self.memoRuns = memoRuns
-        self.nextIndex = nextIndex
         self.count = memoRuns.reduce(0) { $0 + $1.count }
     }
 }
@@ -784,9 +778,21 @@ private struct ChekiRokuRecordPlan {
 
 /// Pure, background-safe Step 2 planner shared by the wizard and focused tests.
 struct ChekiRokuRecordImportPlanner {
-    struct Existing: Sendable { let idolID: UUID; let day: Date?; let category: Int; let index: Int? }
+    struct Existing: Sendable {
+        let idolID: UUID
+        let day: Date?
+        let category: Int
+        let count: Int
+
+        init(idolID: UUID, day: Date?, category: Int, count: Int = 1) {
+            self.idolID = idolID
+            self.day = day
+            self.category = category
+            self.count = max(1, count)
+        }
+    }
     struct MemoRun: Sendable, Equatable { let memo: String; let count: Int }
-    struct Item: Sendable { let idolID: UUID; let day: Date?; let category: Int; let memoRuns: [MemoRun]; let nextIndex: Int; var count: Int { memoRuns.reduce(0) { $0 + $1.count } } }
+    struct Item: Sendable { let idolID: UUID; let day: Date?; let category: Int; let memoRuns: [MemoRun]; var count: Int { memoRuns.reduce(0) { $0 + $1.count } } }
     private struct Key: Hashable { let idolID: UUID; let day: Date?; let category: Int }
     static func make(records: [ChekinanaChekiRokuImport.SourceRecord], memberMap: [Int: UUID], existing: [Existing]) throws -> [Item] {
         var rows: [Key: [ChekinanaChekiRokuImport.SourceRecord]] = [:]
@@ -801,18 +807,18 @@ struct ChekiRokuRecordImportPlanner {
             )
             rows[key, default: []].append(record)
         }
-        var existingByKey: [Key: (count: Int, maxIndex: Int)] = [:]
+        var existingByKey: [Key: Int] = [:]
         for value in existing {
             guard value.category == 1 else { continue }
             let key = Key(idolID: value.idolID, day: value.day.flatMap(ChekinanaDateOnly.canonicalized), category: value.category)
-            var bucket = existingByKey[key, default: (0, 0)]
-            bucket.count += 1; bucket.maxIndex = max(bucket.maxIndex, value.index ?? 0)
-            existingByKey[key] = bucket
+            existingByKey[key] = try ChekinanaChekiRecordStore.checkedCountSum(
+                existingByKey[key] ?? 0,
+                value.count
+            )
         }
         var items: [Item] = []
         for key in rows.keys.sorted(by: { "\($0.idolID)-\($0.day?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude)-\($0.category)" < "\($1.idolID)-\($1.day?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude)-\($1.category)" }) {
-            let bucket = existingByKey[key] ?? (0, 0)
-            let skip = bucket.count
+            let skip = existingByKey[key] ?? 0
             var ignored = skip; var memoRuns: [MemoRun] = []
             for row in rows[key] ?? [] {
                 let skipped = min(ignored, row.count)
@@ -820,18 +826,37 @@ struct ChekiRokuRecordImportPlanner {
                 let remaining = row.count - skipped
                 guard remaining > 0 else { continue }
                 if let last = memoRuns.last, last.memo == row.memo {
-                    memoRuns[memoRuns.count - 1] = MemoRun(memo: last.memo, count: last.count + remaining)
+                    memoRuns[memoRuns.count - 1] = MemoRun(
+                        memo: last.memo,
+                        count: try ChekinanaChekiRecordStore.checkedCountSum(
+                            last.count,
+                            remaining
+                        )
+                    )
                 } else {
                     memoRuns.append(MemoRun(memo: row.memo, count: remaining))
                 }
             }
             if !memoRuns.isEmpty {
-                let next: Int
-                let result = bucket.maxIndex.addingReportingOverflow(1)
-                guard !result.overflow else { throw ChekiRokuImportUIError.indexOverflow }
-                next = result.partialValue
-                items.append(Item(idolID: key.idolID, day: key.day, category: key.category, memoRuns: memoRuns, nextIndex: next))
+                _ = try memoRuns.reduce(0) { partialResult, run in
+                    try ChekinanaChekiRecordStore.checkedCountSum(
+                        partialResult,
+                        run.count
+                    )
+                }
+                items.append(Item(
+                    idolID: key.idolID,
+                    day: key.day,
+                    category: key.category,
+                    memoRuns: memoRuns
+                ))
             }
+        }
+        _ = try items.reduce(0) { partialResult, item in
+            try ChekinanaChekiRecordStore.checkedCountSum(
+                partialResult,
+                item.count
+            )
         }
         return items
     }
@@ -877,11 +902,24 @@ actor ChekiRokuRecordImportActor {
 
     private func liveExistingRecords() throws -> [ChekiRokuRecordImportPlanner.Existing] {
         let chekis = try modelContext.fetch(FetchDescriptor<Cheki>())
-        return chekis.compactMap { value -> ChekiRokuRecordImportPlanner.Existing? in
+        let mediaRecords = chekis.compactMap { value -> ChekiRokuRecordImportPlanner.Existing? in
             guard value.idols.count == 1,
                   let idolID = value.idols.first?.id else { return nil }
-            return .init(idolID: idolID, day: value.date, category: 1, index: value.idx)
+            return .init(idolID: idolID, day: value.date, category: 1)
         }
+        let simpleRecords = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
+            .compactMap { value -> ChekiRokuRecordImportPlanner.Existing? in
+                guard let idolID = ChekinanaChekiRecordReadPolicy.singleIdolID(
+                    value
+                ) else { return nil }
+                return .init(
+                    idolID: idolID,
+                    day: value.date,
+                    category: 1,
+                    count: value.count
+                )
+            }
+        return mediaRecords + simpleRecords
     }
 
     func save(
@@ -897,7 +935,9 @@ actor ChekiRokuRecordImportActor {
         }
         activeCommitID = commitID
         defer { activeCommitID = nil }
-        modelContext.autosaveEnabled = false
+        return try ChekinanaChekiRecordStore.withMutationLock {
+            modelContext.autosaveEnabled = false
+            do {
         let chekiRecords = records.filter { $0.category == 1 }
         let requiredIDs = Set(chekiRecords.compactMap { memberMap[$0.memberID] })
         let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
@@ -915,10 +955,28 @@ actor ChekiRokuRecordImportActor {
         let destinationIdols = matchesByID.mapValues { $0[0] }
         let fetchedEvents = try modelContext.fetch(FetchDescriptor<Event>())
         let eventsByID = Dictionary(uniqueKeysWithValues: fetchedEvents.map { ($0.id, $0) })
+        let existingSimpleRecords = try modelContext.fetch(
+            FetchDescriptor<ChekiRecord>()
+        ).sorted { $0.id.uuidString < $1.id.uuidString }
+        var recordsByIdentity: [ChekinanaChekiRecordIdentity: ChekiRecord] = [:]
+        for record in existingSimpleRecords {
+            let identity = ChekinanaChekiRecordIdentity(record)
+            record.date = identity.canonicalDate
+            if let retained = recordsByIdentity[identity] {
+                retained.count = try ChekinanaChekiRecordStore.checkedCountSum(
+                    retained.count,
+                    max(1, record.count)
+                )
+                modelContext.delete(record)
+            } else {
+                record.count = max(1, record.count)
+                recordsByIdentity[identity] = record
+            }
+        }
 
-        // Preview is advisory. Re-fetch and rebuild the deficit/idx plan in this
+        // Preview is advisory. Re-fetch and rebuild the live deficit plan in this
         // exact committing context immediately before any insert so a record
-        // added after preview cannot be duplicated or reuse an occupied index.
+        // added after preview cannot be duplicated.
         let liveExisting = try liveExistingRecords()
         let liveItems = try ChekiRokuRecordImportPlanner.make(
             records: chekiRecords,
@@ -934,16 +992,19 @@ actor ChekiRokuRecordImportActor {
                 idolName: idolNames[item.idolID]!,
                 day: item.day,
                 type: .cheki,
-                memoRuns: item.memoRuns,
-                nextIndex: item.nextIndex
+                memoRuns: item.memoRuns
             )
         }
-        let total = items.reduce(0) { $0 + $1.count }
+        let total = try items.reduce(0) { partialResult, item in
+            try ChekinanaChekiRecordStore.checkedCountSum(
+                partialResult,
+                item.count
+            )
+        }
 
         var inserted = 0
         var lastPublished = -64
         var publishedIdolID: UUID?
-        do {
             for item in items {
                 try Task.checkCancellation()
                 guard let idol = destinationIdols[item.idolID] else {
@@ -958,38 +1019,46 @@ actor ChekiRokuRecordImportActor {
                     lastPublished = inserted
                 }
 
-                var itemOffset = 0
                 for run in item.memoRuns {
-                    for _ in 0..<run.count {
-                        try Task.checkCancellation()
-                        if inserted - lastPublished >= 64 {
-                            publishProgress(
-                                .init(commitID: commitID, completed: inserted, total: total, idolName: item.idolName),
-                                to: progress
-                            )
-                            lastPublished = inserted
-                        }
-
-                        // New @Model instances begin in a temporary context. Insert
-                        // first, then attach only objects fetched by this actor.
-                        let (idx, overflow) = item.nextIndex.addingReportingOverflow(itemOffset)
-                        guard !overflow else { throw ChekiRokuImportUIError.indexOverflow }
-                        let record = Cheki(
+                    try Task.checkCancellation()
+                    let event = ChekinanaChekiEventAutoAssociation.uniqueEventID(
+                        for: item.day,
+                        events: fetchedEvents.map { ($0.id, $0.date) }
+                    ).flatMap { eventsByID[$0] }
+                    let identity = ChekinanaChekiRecordIdentity(
+                        idolIDs: [idol.id],
+                        date: item.day,
+                        eventID: event?.id,
+                        sizeRawValue: ChekiSize.mini.rawValue,
+                        note: run.memo
+                    )
+                    if let record = recordsByIdentity[identity] {
+                        record.count = try ChekinanaChekiRecordStore.checkedCountSum(
+                            record.count,
+                            run.count
+                        )
+                    } else {
+                        let record = ChekiRecord(
+                            idols: [idol],
+                            event: event,
                             date: item.day,
-                            idx: idx,
                             size: .mini,
-                            note: run.memo
+                            note: run.memo,
+                            count: run.count
                         )
                         modelContext.insert(record)
-                        record.idols = [idol]
-                        if let eventID = ChekinanaChekiEventAutoAssociation.uniqueEventID(
-                            for: item.day,
-                            events: fetchedEvents.map { ($0.id, $0.date) }
-                        ) {
-                            record.event = eventsByID[eventID]
-                        }
-                        inserted += 1
-                        itemOffset += 1
+                        recordsByIdentity[identity] = record
+                    }
+                    inserted = try ChekinanaChekiRecordStore.checkedCountSum(
+                        inserted,
+                        run.count
+                    )
+                    if inserted - lastPublished >= 64 {
+                        publishProgress(
+                            .init(commitID: commitID, completed: inserted, total: total, idolName: item.idolName),
+                            to: progress
+                        )
+                        lastPublished = inserted
                     }
                 }
             }
@@ -1000,6 +1069,7 @@ actor ChekiRokuRecordImportActor {
         } catch {
             modelContext.rollback()
             throw error
+        }
         }
     }
 
@@ -1015,8 +1085,8 @@ actor ChekiRokuRecordImportActor {
 }
 private extension String { var nilIfEmpty: String? { let value=trimmingCharacters(in:.whitespacesAndNewlines); return value.isEmpty ? nil : value } }
 
-/// A full-page, local-only import entry. Reading is explicitly user initiated so
-/// iOS does not request pasteboard access merely by opening the page.
+/// A full-page, local-only import entry. The selected Files document is copied
+/// into app-owned temporary storage before the existing archive parser runs.
 struct ChekinanaChekiRokuClipboardImportView: View {
     let onClose: () -> Void
     @State private var archive: ChekinanaChekiRokuImport.Archive?
@@ -1026,6 +1096,7 @@ struct ChekinanaChekiRokuClipboardImportView: View {
     @State private var wizardBusy = false
     @State private var readGeneration = 0
     @State private var readTask: Task<Void, Never>?
+    @State private var isFileImporterPresented = false
 
     var body: some View {
         NavigationStack {
@@ -1037,17 +1108,20 @@ struct ChekinanaChekiRokuClipboardImportView: View {
                     }, isExternallyBusy: $wizardBusy)
                 } else {
                     VStack(spacing: 20) {
-                        Image(systemName: "doc.on.clipboard")
+                        Image(systemName: "folder")
                             .font(.system(size: 48))
                             .foregroundStyle(Color.accentColor)
                         Text(ChekinanaL10n.text("import.title", fallback: "Import from ChekiRoku")).font(.title2.weight(.semibold))
-                        Text(ChekinanaL10n.text("import.intro", fallback: "Copy one .chekiroku backup in Files, then read it here. Your clipboard is never changed."))
+                        Text(ChekinanaL10n.text("import.intro", fallback: "Browse Files and select one .chekiroku backup."))
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 28)
                         if !stage.isEmpty { ProgressView(stage).padding(.top, 4) }
                         if let error { Text(error).font(.footnote).multilineTextAlignment(.center).foregroundStyle(.red).padding(.horizontal, 24) }
-                        Button(ChekinanaL10n.text("import.action.read", fallback: "Read ChekiRoku from Clipboard")) { readClipboard() }
+                        Button(ChekinanaL10n.text("import.action.read", fallback: "Choose ChekiRoku File")) {
+                            error = nil
+                            isFileImporterPresented = true
+                        }
                             .buttonStyle(.borderedProminent)
                             .disabled(isReading)
                             .accessibilityIdentifier("chekinana.import.read")
@@ -1068,17 +1142,31 @@ struct ChekinanaChekiRokuClipboardImportView: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("chekinana.import.page")
         }
+        .fileImporter(
+            isPresented: $isFileImporterPresented,
+            allowedContentTypes: [.item]
+        ) { result in
+            switch result {
+            case .success(let selectedURL):
+                readSelectedFile(selectedURL)
+            case .failure(let selectionError):
+                guard !Self.isUserCancellation(selectionError) else { return }
+                error = selectionError.localizedDescription
+            }
+        }
         .onAppear { installUITestFixtureIfRequested() }
         .onDisappear { readGeneration += 1; readTask?.cancel(); if let archive, !wizardBusy { ChekinanaChekiRokuImport.cleanup(archive) } }
     }
 
-    private func readClipboard() {
+    private func readSelectedFile(_ selectedURL: URL) {
         guard !isReading else { return }
-        isReading = true; error = nil; stage = ChekinanaL10n.text("import.stage.reading", fallback: "Reading clipboard"); readGeneration += 1
+        isReading = true; error = nil; stage = ChekinanaL10n.text("import.stage.reading", fallback: "Reading selected file"); readGeneration += 1
         let generation = readGeneration
         readTask = Task { @MainActor in
             do {
-                let temporaryURL = try await ChekinanaChekiRokuClipboardReader.copySingleArchiveFromPasteboard()
+                let temporaryURL = try await Task.detached(priority: .userInitiated) {
+                    try ChekinanaChekiRokuSelectedFileReader.copyToTemporaryStorage(selectedURL)
+                }.value
                 defer { try? FileManager.default.removeItem(at: temporaryURL) }
                 guard !Task.isCancelled, generation == readGeneration else { return }
                 stage = ChekinanaL10n.text("import.stage.parsing", fallback: "Parsing archive")
@@ -1088,6 +1176,14 @@ struct ChekinanaChekiRokuClipboardImportView: View {
                 case .success(let parsed):
                     stage = ChekinanaL10n.text("import.stage.matching", fallback: "Matching Idols")
                     await Task.yield()
+                    guard ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
+                        isCancelled: Task.isCancelled,
+                        generation: generation,
+                        currentGeneration: readGeneration
+                    ) else {
+                        ChekinanaChekiRokuImport.cleanup(parsed)
+                        return
+                    }
                     archive = parsed
                     stage = ""
                 case .failure(let parseError): throw parseError
@@ -1099,6 +1195,13 @@ struct ChekinanaChekiRokuClipboardImportView: View {
             if generation == readGeneration { isReading = false; readTask = nil }
         }
     }
+
+    private static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError
+    }
+
     private func close() { readGeneration += 1; readTask?.cancel(); onClose() }
 
     private func installUITestFixtureIfRequested() {
@@ -1143,167 +1246,64 @@ struct ChekinanaChekiRokuClipboardImportView: View {
     }
 }
 
-private enum ChekinanaChekiRokuClipboardReader {
-    private static let supportedTypes = ["com.chekiroku.backup", "public.zip-archive", "public.data", "public.file-url"]
-    private static let plainTextTypes = ["public.utf8-plain-text", "public.plain-text"]
+enum ChekinanaChekiRokuImportPublicationPolicy {
+    static func shouldPublish(
+        isCancelled: Bool,
+        generation: Int,
+        currentGeneration: Int
+    ) -> Bool {
+        !isCancelled && generation == currentGeneration
+    }
+}
 
-    @MainActor static func copySingleArchiveFromPasteboard() async throws -> URL {
-        let providers = UIPasteboard.general.itemProviders
-        guard providers.count == 1, let provider = providers.first else {
-            throw ChekinanaChekiRokuClipboardError.ambiguousClipboard
+enum ChekinanaChekiRokuSelectedFileReader {
+    static let maximumArchiveSize = 32 * 1_024 * 1_024
+
+    static func copyToTemporaryStorage(_ source: URL) throws -> URL {
+        guard source.pathExtension.caseInsensitiveCompare("chekiroku") == .orderedSame else {
+            throw ChekinanaChekiRokuSelectedFileError.invalidFile
         }
-        let destination = try temporaryArchiveURL()
-        do {
-            if let type = supportedTypes.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) {
-                do {
-                    try await copyFileRepresentation(provider, type: type, to: destination)
-                    return destination
-                } catch {
-                    try? FileManager.default.removeItem(at: destination)
-                    guard plainTextTypes.contains(where: { provider.hasItemConformingToTypeIdentifier($0) }) else { throw error }
-                }
-            }
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        let values = try source.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize >= 2,
+              fileSize <= maximumArchiveSize else {
+            throw ChekinanaChekiRokuSelectedFileError.invalidFile
+        }
 
-            guard let textType = plainTextTypes.first(where: { provider.hasItemConformingToTypeIdentifier($0) }) else {
-                throw ChekinanaChekiRokuClipboardError.unsupportedClipboard
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChekinanaChekiRokuFileImport", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("chekiroku")
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+            let handle = try FileHandle(forReadingFrom: destination)
+            defer { try? handle.close() }
+            let prefix = try handle.read(upToCount: 2) ?? Data()
+            guard prefix.elementsEqual([0x50, 0x4B]) else {
+                throw ChekinanaChekiRokuSelectedFileError.notZIP
             }
-            try await copyPlainTextFilePath(provider, type: textType, to: destination)
             return destination
         } catch {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
     }
-
-    private static func temporaryArchiveURL() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ChekinanaChekiRokuClipboard", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("chekiroku")
-    }
-
-    @MainActor private static func copyFileRepresentation(_ provider: NSItemProvider, type: String, to destination: URL) async throws {
-        do {
-            try await copyLoadedFileRepresentation(provider, type: type, inPlace: true, to: destination)
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            try await copyLoadedFileRepresentation(provider, type: type, inPlace: false, to: destination)
-        }
-    }
-
-    @MainActor private static func copyLoadedFileRepresentation(_ provider: NSItemProvider, type: String, inPlace: Bool, to destination: URL) async throws {
-        let box = ChekinanaItemProviderBox(provider)
-        let gate = ChekinanaClipboardCompletionGate()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let timeout = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(20))
-                if !Task.isCancelled, gate.claimTimeout() { continuation.resume(throwing: ChekinanaChekiRokuClipboardError.timedOut) }
-            }
-            let completion: @Sendable (URL?, Error?) -> Void = { url, error in
-                guard gate.claimCopy() else { return }
-                timeout.cancel()
-                guard let url else {
-                    if gate.finish() { continuation.resume(throwing: error ?? ChekinanaChekiRokuClipboardError.unreadable) }
-                    return
-                }
-                copy(url, to: destination, gate: gate, continuation: continuation)
-            }
-            if inPlace {
-                box.provider.loadInPlaceFileRepresentation(forTypeIdentifier: type) { url, _, error in
-                    completion(url, error)
-                }
-            } else {
-                box.provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
-                    completion(url, error)
-                }
-            }
-        }
-    }
-
-    /// Finder and the macOS shared pasteboard can expose a copied file only as
-    /// text. Accept only an existing local `.chekiroku` file path, never the
-    /// backup contents as ordinary plain text.
-    @MainActor private static func copyPlainTextFilePath(_ provider: NSItemProvider, type: String, to destination: URL) async throws {
-        let box = ChekinanaItemProviderBox(provider)
-        let gate = ChekinanaClipboardCompletionGate()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let timeout = Task { @MainActor in
-                try? await Task.sleep(for: .seconds(20))
-                if !Task.isCancelled, gate.claimTimeout() { continuation.resume(throwing: ChekinanaChekiRokuClipboardError.timedOut) }
-            }
-            box.provider.loadDataRepresentation(forTypeIdentifier: type) { data, error in
-                guard gate.claimCopy() else { return }
-                timeout.cancel()
-                do {
-                    guard let data, let text = String(data: data, encoding: .utf8), let source = archiveFileURL(from: text) else {
-                        throw ChekinanaChekiRokuClipboardError.unsupportedClipboard
-                    }
-                    try copyArchiveFile(source, to: destination)
-                    if gate.finish() { continuation.resume() }
-                } catch {
-                    if gate.finish() { continuation.resume(throwing: error) }
-                }
-            }
-        }
-    }
-
-    private static func archiveFileURL(from plainText: String) -> URL? {
-        let candidate = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let url: URL?
-        if let fileURL = URL(string: candidate), fileURL.isFileURL {
-            url = fileURL
-        } else if candidate.hasPrefix("/") {
-            url = URL(fileURLWithPath: candidate)
-        } else {
-            url = nil
-        }
-        guard let url,
-              url.pathExtension.caseInsensitiveCompare("chekiroku") == .orderedSame,
-              FileManager.default.fileExists(atPath: url.path) else {
-            return nil
-        }
-        return url
-    }
-
-    private static func copy(_ source: URL, to destination: URL, gate: ChekinanaClipboardCompletionGate, continuation: CheckedContinuation<Void, Error>) {
-        do {
-            try copyArchiveFile(source, to: destination)
-            if gate.finish() { continuation.resume() }
-        } catch { if gate.finish() { continuation.resume(throwing: error) } }
-    }
-
-    private static func copyArchiveFile(_ source: URL, to destination: URL) throws {
-        let scoped = source.startAccessingSecurityScopedResource()
-        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-        let values = try source.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-        guard values.isRegularFile == true, (values.fileSize ?? 0) <= 32 * 1_024 * 1_024 else {
-            throw ChekinanaChekiRokuClipboardError.notZIP
-        }
-        try FileManager.default.copyItem(at: source, to: destination)
-        let prefix = try Data(contentsOf: destination, options: [.mappedIfSafe]).prefix(2)
-        guard prefix.elementsEqual([0x50, 0x4B]) else {
-            try? FileManager.default.removeItem(at: destination)
-            throw ChekinanaChekiRokuClipboardError.notZIP
-        }
-    }
 }
 
-private final class ChekinanaItemProviderBox: @unchecked Sendable { let provider: NSItemProvider; init(_ provider: NSItemProvider) { self.provider = provider } }
-private final class ChekinanaClipboardCompletionGate: @unchecked Sendable {
-    private let lock = NSLock(); private var state = 0
-    func claimCopy() -> Bool { lock.lock(); defer { lock.unlock() }; guard state == 0 else { return false }; state = 1; return true }
-    func claimTimeout() -> Bool { lock.lock(); defer { lock.unlock() }; guard state == 0 else { return false }; state = 2; return true }
-    func finish() -> Bool { lock.lock(); defer { lock.unlock() }; guard state == 1 else { return false }; state = 2; return true }
-}
+enum ChekinanaChekiRokuSelectedFileError: LocalizedError, Equatable {
+    case invalidFile, notZIP
 
-private enum ChekinanaChekiRokuClipboardError: LocalizedError {
-    case ambiguousClipboard, unsupportedClipboard, notZIP, unreadable, timedOut
     var errorDescription: String? {
         switch self {
-        case .ambiguousClipboard: return ChekinanaL10n.text("import.error.clipboard_ambiguous", fallback: "Copy exactly one ChekiRoku backup before importing.")
-        case .unsupportedClipboard: return ChekinanaL10n.text("import.error.clipboard_unsupported", fallback: "The clipboard does not contain a ChekiRoku backup file. Plain text is not supported.")
-        case .notZIP: return ChekinanaL10n.text("import.error.not_zip", fallback: "The copied file is not a valid ZIP-based ChekiRoku backup.")
-        case .unreadable: return ChekinanaL10n.text("import.error.unreadable", fallback: "The copied ChekiRoku backup could not be read.")
-        case .timedOut: return ChekinanaL10n.text("import.error.timeout", fallback: "Reading the copied ChekiRoku backup timed out. Try copying the file again.")
+        case .invalidFile:
+            return ChekinanaL10n.text("import.error.file", fallback: "Import file is too large or invalid.")
+        case .notZIP:
+            return ChekinanaL10n.text("import.error.not_zip", fallback: "The selected file is not a valid ZIP-based ChekiRoku backup.")
         }
     }
 }

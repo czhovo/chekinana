@@ -1,0 +1,6 @@
+# These assets have published SHA-256 byte contracts. Keep their source bytes
+# unchanged and suppress text whitespace diagnostics for their intentional
+# CRLF/mixed-line-ending snapshots.
+assets/pattern-recognition/v1/prototypes.json -text -diff
+data/idols.json -text -diff
+public/idols.json -text -diff

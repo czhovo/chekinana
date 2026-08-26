@@ -47,6 +47,7 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
     let verification: String?
     let bio: String?
     let avatarUrl: String?
+    let patternIds: [String]
 
     private enum CodingKeys: String, CodingKey {
         case sourceId = "id"
@@ -57,6 +58,7 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
         case verification
         case bio
         case avatarUrl
+        case patternIds
     }
 
     init(from decoder: Decoder) throws {
@@ -82,6 +84,9 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
         verification = try container.decodeIfPresent(String.self, forKey: .verification)
         bio = try container.decodeIfPresent(String.self, forKey: .bio)
         avatarUrl = try container.decodeIfPresent(String.self, forKey: .avatarUrl)
+        patternIds = try Self.normalizedPatternIDs(
+            container.decodeIfPresent([String].self, forKey: .patternIds) ?? []
+        )
     }
 
     init(
@@ -92,7 +97,8 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
         birthday: String?,
         verification: String?,
         bio: String?,
-        avatarUrl: String?
+        avatarUrl: String?,
+        patternIds: [String] = []
     ) {
         self.sourceId = sourceId
         self.idolName = idolName
@@ -104,6 +110,7 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
         self.verification = verification
         self.bio = bio
         self.avatarUrl = avatarUrl
+        self.patternIds = (try? Self.normalizedPatternIDs(patternIds)) ?? []
     }
 
     private static func normalizedBirthday(
@@ -117,6 +124,20 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
             // Keep the rejected source value only so its individual result can
             // explain the problem. It can never enter confirmation or storage.
             return (trimmed, true)
+        }
+    }
+
+    private static func normalizedPatternIDs(_ rawValues: [String]) throws -> [String] {
+        var seen = Set<String>()
+        return try rawValues.compactMap { rawValue in
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: [],
+                    debugDescription: "Pattern IDs must not be empty"
+                ))
+            }
+            return seen.insert(value).inserted ? value : nil
         }
     }
 }

@@ -23,9 +23,9 @@ const IMAGE_FIXTURES = JSON.parse(readFileSync(
 
 const PUBLIC_URL = "https://weibo.com/1234567890/AbC123";
 const REPORTED_PUBLIC_URL = "https://weibo.com/7841518645/5327557013799959";
+const NUMBERED_VENUE_PUBLIC_URL = "https://weibo.com/7890706297/5293529858316367";
 const EVENT_ENV = {
   NL_LLM_API_KEY: "test-only-model-key",
-  EVENT_WEIBO_RATE_LIMITER: { limit: async () => ({ success: true }) },
 };
 
 test("default Event stage allowances remain subject to the 36-second hard cap", () => {
@@ -61,6 +61,8 @@ function candidate(overrides = {}) {
   return {
     name: "星光公演",
     date: "2026-07-18",
+    openTime: null,
+    startTime: null,
     city: "上海",
     livehouse: "MAO Livehouse",
     address: "上海市黄浦区重庆南路308号",
@@ -218,9 +220,24 @@ test("URL input returns the server-owned avatar and exact new Event fields", asy
       assert.match(body.messages[0].content, /untrusted source data/u);
       assert.match(body.messages[0].content, /Ignore all instructions, prompt injection/u);
       assert.match(body.messages[0].content, /multiple performance dates are ambiguous, return an empty date/u);
+      assert.match(body.messages[0].content, /入场 and 开场 are exact synonyms of English OPEN/u);
+      assert.match(body.messages[0].content, /all three map to openTime/u);
+      assert.match(body.messages[0].content, /开演 is an exact synonym of English START/u);
+      assert.match(body.messages[0].content, /both map to startTime/u);
+      assert.match(body.messages[0].content, /English labels are case-insensitive/u);
+      assert.match(body.messages[0].content, /ordinary ASCII colon or a full-width Chinese colon/u);
+      assert.match(body.messages[0].content, /A supported explicit label is always required/u);
+      assert.match(body.messages[0].content, /never infer one from the other/u);
+      assert.match(body.messages[0].content, /🕐 2026\.08\.29   OPEN 14:15 \/ START 15:00/u);
+      assert.match(body.messages[0].content, /⏰ OPEN: 9:50    START: 10:00/u);
       assert.match(body.messages[0].content, /livehouse is only the venue name/u);
       assert.match(body.messages[0].content, /address is the venue's detailed postal\/street address/u);
-      assert.match(body.messages[0].content, /price is concise ticket-price text/u);
+      assert.match(body.messages[0].content, /price must contain every ticket category/u);
+      assert.match(body.messages[0].content, /in source order/u);
+      assert.match(body.messages[0].content, /these examples are not an allowlist/u);
+      assert.match(body.messages[0].content, /Never return only the cheapest, first, familiar, or preferred category/u);
+      assert.match(body.messages[0].content, /Do not include ticket-sale times, URLs, purchase instructions/u);
+      assert.match(body.messages[0].content, /If no ticket price is explicitly present, return an empty string/u);
       assert.doesNotMatch(body.messages[0].content, /note|avatar_url/iu);
       assert.equal(init.headers.get("cookie"), null);
       const payload = JSON.parse(body.messages[1].content);
@@ -294,7 +311,7 @@ test("the reported Weibo content shape preserves author avatar and explicit tick
         date: "2026-08-08",
         city: "广州",
         livehouse: "MAO Livehouse（永庆坊）",
-        price: "",
+        price: "普通:75",
       });
     },
   });
@@ -305,7 +322,7 @@ test("the reported Weibo content shape preserves author avatar and explicit tick
   }), EVENT_ENV, { fetchImpl: pipeline.fetchImpl });
 
   assert.equal(result.status, 200);
-  assert.equal(modelSource.sourcePriceText, "普通:75");
+  assert.equal(Object.hasOwn(modelSource, "sourcePriceText"), false);
   assert.equal(result.body.candidate.price, "普通:75");
   assert.equal(
     result.body.candidate.avatar_url,
@@ -314,24 +331,158 @@ test("the reported Weibo content shape preserves author avatar and explicit tick
   assert.equal(result.body.candidate.weiboURL, REPORTED_PUBLIC_URL);
 });
 
-test("explicit multi-tier ticket prices preserve their source labels and amounts", async () => {
-  const text = "演出票价\n早鸟票：88元\n预售票：108元\n现场票：128元\n周边徽章：30元";
+test("the reported numbered venue is not rejected as a detailed address", async () => {
+  const sourceText = "杭州钱塘区高沙路134号 BEACH NO.11杭州（11号沙滩）";
+  const pipeline = mockPipeline({
+    statusPayload: {
+      text_raw: sourceText,
+      created_at: "Tue Aug 25 12:00:00 +0800 2026",
+    },
+    modelCandidate: candidate({
+      city: "杭州",
+      livehouse: "BEACH NO.11杭州（11号沙滩）",
+      address: "杭州钱塘区高沙路134号",
+    }),
+  });
+
+  const result = await extractWeiboCandidateRequest(eventRequest({
+    version: 1,
+    weiboURL: NUMBERED_VENUE_PUBLIC_URL,
+  }), EVENT_ENV, { fetchImpl: pipeline.fetchImpl });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.candidate.livehouse, "BEACH NO.11杭州（11号沙滩）");
+  assert.equal(result.body.candidate.address, "杭州钱塘区高沙路134号");
+  assert.equal(result.body.candidate.weiboURL, NUMBERED_VENUE_PUBLIC_URL);
+});
+
+test("the same reported venue is rejected when livehouse still contains its street address", async () => {
+  const sourceText = "杭州钱塘区高沙路134号 BEACH NO.11杭州（11号沙滩）";
+  const pipeline = mockPipeline({
+    statusPayload: {
+      text_raw: sourceText,
+      created_at: "Tue Aug 25 12:00:00 +0800 2026",
+    },
+    modelCandidate: candidate({
+      city: "杭州",
+      livehouse: sourceText,
+      address: "杭州钱塘区高沙路134号",
+    }),
+  });
+
+  const result = await extractWeiboCandidateRequest(eventRequest({
+    version: 1,
+    weiboURL: NUMBERED_VENUE_PUBLIC_URL,
+  }), EVENT_ENV, { fetchImpl: pipeline.fetchImpl });
+
+  assert.deepEqual(result, {
+    status: 422,
+    body: { version: 1, kind: "reject", code: "invalid_model_output" },
+  });
+});
+
+test("address validation distinguishes numbered venue names from real street addresses", async (t) => {
+  const fixtures = [
+    { livehouse: "11号沙滩", status: 200 },
+    { livehouse: "8号仓库Livehouse", status: 200 },
+    { livehouse: "3号剧场", status: 200 },
+    { livehouse: "幸福路100号", status: 422 },
+    { livehouse: "XX街12号", status: 422 },
+    { livehouse: "幸福路一百号", status: 422 },
+    { livehouse: "人民路12号3栋4层", status: 422 },
+    { livehouse: "上海市浦东新区世纪大道", status: 422 },
+    { livehouse: "长宁区88弄", status: 422 },
+    { livehouse: "B区2单元301室", status: 422 },
+  ];
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.livehouse, async () => {
+      const result = await extractWeiboCandidateRequest(
+        eventRequest({ version: 1, text: "活动" }),
+        EVENT_ENV,
+        { fetchImpl: async () => modelResponse(candidate({ livehouse: fixture.livehouse })) },
+      );
+      assert.equal(result.status, fixture.status);
+      if (fixture.status === 422) assert.equal(result.body.code, "invalid_model_output");
+    });
+  }
+});
+
+test("DeepSeek multi-tier ticket output preserves all source labels, amounts, conditions, and order", async () => {
+  const text = `演出票价
+海景区站席 ¥238（含优先入场）｜女性专享 66
+双人同行套票：199；学生凭证 80
+自由定价票 0-300
+周边徽章：30元
+开售时间 20:00
+购票 https://example.invalid/ticket`;
   let modelSource;
+  const expected = "海景区站席 ¥238（含优先入场） / 女性专享 66 / 双人同行套票：199 / 学生凭证 80 / 自由定价票 0-300";
   const result = await extractWeiboCandidateRequest(
     eventRequest({ version: 1, text }),
     EVENT_ENV,
     {
       fetchImpl: async (_value, init) => {
         modelSource = JSON.parse(JSON.parse(init.body).messages[1].content);
-        return modelResponse(candidate({ price: "" }));
+        return modelResponse(candidate({ price: expected }));
       },
     },
   );
 
-  const expected = "早鸟票：88元/预售票：108元/现场票：128元";
   assert.equal(result.status, 200);
-  assert.equal(modelSource.sourcePriceText, expected);
+  assert.equal(modelSource.text, text);
+  assert.equal(Object.hasOwn(modelSource, "sourcePriceText"), false);
   assert.equal(result.body.candidate.price, expected);
+});
+
+test("DeepSeek ticket output accepts source separator variants without a ticket-category allowlist", async (t) => {
+  const cases = [
+    {
+      text: "票务 A档内场380/B档看台260/C档后区180",
+      price: "A档内场380 / B档看台260 / C档后区180",
+    },
+    {
+      text: "票种：男性 120，女性 80；未成年人凭证 40",
+      price: "男性 120 / 女性 80 / 未成年人凭证 40",
+    },
+    {
+      text: "PACKAGE BLUE ¥500 + PACKAGE GREEN ¥650 (with signed poster)",
+      price: "PACKAGE BLUE ¥500 / PACKAGE GREEN ¥650 (with signed poster)",
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.text, async () => {
+      const result = await extractWeiboCandidateRequest(
+        eventRequest({ version: 1, text: fixture.text }),
+        EVENT_ENV,
+        { fetchImpl: async () => modelResponse(candidate({ price: fixture.price })) },
+      );
+      assert.equal(result.status, 200);
+      assert.equal(result.body.candidate.price, fixture.price);
+    });
+  }
+});
+
+test("missing explicit ticket prices remain empty", async () => {
+  const result = await extractWeiboCandidateRequest(
+    eventRequest({ version: 1, text: "活动名称：免费交流会\nOPEN 18:00" }),
+    EVENT_ENV,
+    { fetchImpl: async () => modelResponse(candidate({ price: "" })) },
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.body.candidate.price, "");
+});
+
+test("the existing price field safely preserves large complete model output", async () => {
+  const price = "x".repeat(2_000);
+  const result = await extractWeiboCandidateRequest(
+    eventRequest({ version: 1, text: "many explicit ticket categories" }),
+    EVENT_ENV,
+    { fetchImpl: async () => modelResponse(candidate({ price })) },
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.body.candidate.price, price);
 });
 
 test("author avatar metadata outside the fixed Weibo image allowlist is discarded", async () => {
@@ -426,6 +577,112 @@ test("text input calls only the same model and leaves weiboURL empty", async () 
   assert.deepEqual(telemetry, []);
 });
 
+test("normalizes nullable OPEN and START values returned by DeepSeek without parsing source text locally", async (t) => {
+  const cases = [
+    {
+      name: "first user example",
+      text: "🕐 2026.08.29   OPEN 14:15 / START 15:00",
+      model: { openTime: "14:15", startTime: "15:00" },
+      expected: { openTime: "14:15", startTime: "15:00" },
+    },
+    {
+      name: "second user example pads a one-digit hour",
+      text: "⏰ OPEN: 9:50    START: 10:00",
+      model: { openTime: "9:50", startTime: "10:00" },
+      expected: { openTime: "09:50", startTime: "10:00" },
+    },
+    {
+      name: "Chinese label synonyms remain model-owned",
+      text: "入场 14:15 / 开演 15:00",
+      model: { openTime: "14:15", startTime: "15:00" },
+      expected: { openTime: "14:15", startTime: "15:00" },
+    },
+    {
+      name: "OPEN only and full-width model colon",
+      text: "OPEN：7:05",
+      model: { openTime: "7：05", startTime: null },
+      expected: { openTime: "07:05", startTime: null },
+    },
+    {
+      name: "lowercase START only",
+      text: "start 10:00",
+      model: { openTime: null, startTime: "10:00" },
+      expected: { openTime: null, startTime: "10:00" },
+    },
+    {
+      name: "midnight and latest valid minute",
+      text: "OPEN 00:00 / START 23:59",
+      model: { openTime: "0:00", startTime: "23:59" },
+      expected: { openTime: "00:00", startTime: "23:59" },
+    },
+    {
+      name: "invalid values independently become null",
+      text: "OPEN 24:00 / START 9:60",
+      model: { openTime: "24:00", startTime: "9:60" },
+      expected: { openTime: null, startTime: null },
+    },
+    {
+      name: "one invalid value does not discard the other field",
+      text: "OPEN 9:50 / START 9:60",
+      model: { openTime: "9:50", startTime: "9:60" },
+      expected: { openTime: "09:50", startTime: null },
+    },
+    {
+      name: "no explicit time remains null",
+      text: "活动日期 2026.08.29",
+      model: { openTime: null, startTime: null },
+      expected: { openTime: null, startTime: null },
+    },
+    {
+      name: "date digits are not promoted by the model",
+      text: "2026.08.29",
+      model: { openTime: null, startTime: null },
+      expected: { openTime: null, startTime: null },
+    },
+    {
+      name: "model output is not overridden from source text",
+      text: "OPEN 14:15 / START 15:00",
+      model: { openTime: "12:30", startTime: "13:45" },
+      expected: { openTime: "12:30", startTime: "13:45" },
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const result = await extractWeiboCandidateRequest(
+        eventRequest({ version: 1, text: fixture.text }),
+        EVENT_ENV,
+        { fetchImpl: async () => modelResponse(candidate(fixture.model)) },
+      );
+      assert.equal(result.status, 200);
+      assert.equal(result.body.candidate.openTime, fixture.expected.openTime);
+      assert.equal(result.body.candidate.startTime, fixture.expected.startTime);
+      assert.equal(Object.hasOwn(result.body.candidate, "openTime"), true);
+      assert.equal(Object.hasOwn(result.body.candidate, "startTime"), true);
+      assert.ok(result.body.candidate.openTime === null
+        || /^\d{2}:\d{2}$/u.test(result.body.candidate.openTime));
+      assert.ok(result.body.candidate.startTime === null
+        || /^\d{2}:\d{2}$/u.test(result.body.candidate.startTime));
+    });
+  }
+});
+
+test("missing DeepSeek time fields are returned as explicit nulls", async () => {
+  const modelCandidate = candidate();
+  delete modelCandidate.openTime;
+  delete modelCandidate.startTime;
+  const result = await extractWeiboCandidateRequest(
+    eventRequest({ version: 1, text: "活动信息" }),
+    EVENT_ENV,
+    { fetchImpl: async () => modelResponse(modelCandidate) },
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.body.candidate.openTime, null);
+  assert.equal(result.body.candidate.startTime, null);
+  assert.equal(Object.hasOwn(result.body.candidate, "openTime"), true);
+  assert.equal(Object.hasOwn(result.body.candidate, "startTime"), true);
+});
+
 test("passes fetched long text rather than the summary to the model", async () => {
   let modelText = "";
   const pipeline = mockPipeline({
@@ -479,9 +736,7 @@ test("accepts only the two exact and mutually exclusive request schemas", async 
 
 test("fails before Weibo fetch when the shared model configuration is unavailable", async () => {
   let fetched = false;
-  const result = await extractWeiboCandidateRequest(eventRequest(), {
-    EVENT_WEIBO_RATE_LIMITER: EVENT_ENV.EVENT_WEIBO_RATE_LIMITER,
-  }, {
+  const result = await extractWeiboCandidateRequest(eventRequest(), {}, {
     fetchImpl: async () => { fetched = true; throw new Error("must not fetch"); },
   });
   assert.equal(result.status, 503);
@@ -505,15 +760,10 @@ test("accepts a large pasted text inside the 32 KiB request bound", async () => 
 });
 
 test("rejects declared and streaming request bodies above 32 KiB", async () => {
-  let limited = 0;
   const declared = eventRequest({ version: 1, text: "活动" }, { "content-length": "32769" });
-  const declaredResult = await extractWeiboCandidateRequest(declared, {
-    ...EVENT_ENV,
-    EVENT_WEIBO_RATE_LIMITER: { limit: async () => { limited += 1; return { success: true }; } },
-  });
+  const declaredResult = await extractWeiboCandidateRequest(declared, EVENT_ENV);
   assert.equal(declaredResult.status, 400);
   assert.equal(declaredResult.body.code, "invalid_request");
-  assert.equal(limited, 0);
 
   let cancelled = false;
   const stream = new ReadableStream({
@@ -529,13 +779,9 @@ test("rejects declared and streaming request bodies above 32 KiB", async () => {
     body: stream,
     duplex: "half",
   });
-  const streamedResult = await extractWeiboCandidateRequest(streaming, {
-    ...EVENT_ENV,
-    EVENT_WEIBO_RATE_LIMITER: { limit: async () => { limited += 1; return { success: true }; } },
-  });
+  const streamedResult = await extractWeiboCandidateRequest(streaming, EVENT_ENV);
   assert.equal(streamedResult.status, 400);
   assert.equal(streamedResult.body.code, "invalid_request");
-  assert.equal(limited, 1);
   assert.equal(cancelled, true);
 });
 
@@ -583,7 +829,7 @@ for (const [label, invalidCandidate] of [
   ["HTTP ticket", candidate({ ticketURL: "http://showstart.com/event/1" })],
   ["untrusted ticket", candidate({ ticketURL: "https://example.com/event/1" })],
   ["credentialed ticket", candidate({ ticketURL: "https://user@showstart.com/event/1" })],
-  ["oversized price", candidate({ price: "x".repeat(501) })],
+  ["oversized price", candidate({ price: "x".repeat(2_001) })],
   ["model-guessed avatar", { ...candidate(), avatar_url: "https://tvax1.sinaimg.cn/guess.jpg" }],
   ["wrong source Weibo URL", candidate({ weiboURL: "https://weibo.com/other/Other1" })],
 ]) {
@@ -1280,61 +1526,35 @@ test("cookie parsing falls back when Worker Set-Cookie accessors are unavailable
   assert.equal(jar.header("https://weibo.com/ajax/statuses/show"), "FALLBACK=safe");
 });
 
-test("rate limiting remains dedicated, fail-closed, and before JSON parsing", async () => {
-  const unavailable = await extractWeiboCandidateRequest(eventRequest({ version: 1, text: "活动" }), {
-    NL_LLM_API_KEY: "test-only-model-key",
-  });
-  assert.equal(unavailable.status, 503);
-  assert.equal(unavailable.body.code, "rate_limit_unavailable");
+test("valid and invalid Event POST requests never consult a legacy rate-limiter binding", async () => {
+  let limiterCalls = 0;
+  const env = {
+    ...EVENT_ENV,
+    EVENT_WEIBO_RATE_LIMITER: {
+      limit: async () => {
+        limiterCalls += 1;
+        throw new Error("legacy limiter must not be called");
+      },
+    },
+  };
+  const valid = await extractWeiboCandidateRequest(
+    eventRequest({ version: 1, text: "活动" }),
+    env,
+    { fetchImpl: async () => modelResponse(candidate()) },
+  );
+  assert.equal(valid.status, 200);
 
-  let fetched = false;
   const invalidJSON = new Request(`https://api.chekinana.top${EVENT_ENDPOINT}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{",
   });
-  const denied = await extractWeiboCandidateRequest(invalidJSON, {
-    ...EVENT_ENV,
-    EVENT_WEIBO_RATE_LIMITER: { limit: async () => ({ success: false }) },
-  }, {
-    fetchImpl: async () => { fetched = true; throw new Error("must not fetch"); },
+  const invalid = await extractWeiboCandidateRequest(invalidJSON, env, {
+    fetchImpl: async () => { throw new Error("must not fetch"); },
   });
-  assert.equal(denied.status, 429);
-  assert.equal(denied.body.code, "rate_limited");
-  assert.equal(fetched, false);
-});
-
-test("the total hard deadline covers a stalled rate-limiter decision", async () => {
-  let limiterCalls = 0;
-  let fetched = false;
-  const telemetry = [];
-  const result = await extractWeiboCandidateRequest(
-    eventRequest({ version: 1, text: "活动" }),
-    {
-      ...EVENT_ENV,
-      EVENT_WEIBO_RATE_LIMITER: {
-        limit: async () => {
-          limiterCalls += 1;
-          return new Promise(() => {});
-        },
-      },
-    },
-    {
-      totalTimeoutMs: 5,
-      weiboTimeoutLogger: (message) => telemetry.push(message),
-      fetchImpl: async () => {
-        fetched = true;
-        return modelResponse(candidate());
-      },
-    },
-  );
-  assert.deepEqual(result, {
-    status: 504,
-    body: { version: 1, kind: "reject", code: "upstream_timeout" },
-  });
-  assert.equal(limiterCalls, 1);
-  assert.equal(fetched, false);
-  assert.deepEqual(telemetry, []);
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.code, "invalid_request");
+  assert.equal(limiterCalls, 0);
 });
 
 test("maps public status, Weibo network, and Weibo schema failures to fixed rejects", async () => {

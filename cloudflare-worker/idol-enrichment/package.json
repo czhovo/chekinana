@@ -1,0 +1,14 @@
+{
+  "name": "chekinana-idol-enrichment-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:assets": "node scripts/build-pattern-assets.mjs",
+    "check:assets": "node scripts/build-pattern-assets.mjs --check",
+    "build:worker": "wrangler deploy --dry-run --config wrangler.bundle.toml --outdir dist",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.125.0"
+  }
+}

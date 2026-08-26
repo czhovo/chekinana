@@ -74,7 +74,6 @@ enum ChekinanaScannerConfiguration {
         idolRecognitionEnabled: Bool = false,
         idolCandidateIDs: [UUID] = [],
         includeUnassignedCandidate: Bool = true,
-        idolSimilarityThreshold: Float? = nil,
         sleevesEnabled: Bool = false,
         directInputEnabled: Bool = false
     ) -> ChekinanaTypedCommandPreparation {
@@ -129,11 +128,6 @@ enum ChekinanaScannerConfiguration {
                 }
                 arguments.append("idol_recognition=true")
                 arguments.append("candidates=\(candidateTokens.joined(separator: ","))")
-                if let idolSimilarityThreshold {
-                    arguments.append(
-                        "idol_threshold=\(String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), idolSimilarityThreshold))"
-                    )
-                }
             }
             prepared.append(arguments.joined(separator: " "))
         }

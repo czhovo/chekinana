@@ -121,17 +121,19 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         ChekinanaGalleryMediaStore.cleanupOrphanedImports()
         ChekinanaGalleryMediaStore.cleanupStagedImports()
         ChekinanaCapturedPhotoStore.cleanupStaleFiles()
+        do {
+            try ChekinanaIdolPatternPersistence
+                .discardIncompatiblePatternsIfNeeded(in: launchContext)
+        } catch {
+            installRecoveryRoot(in: window)
+            return
+        }
 #if DEBUG
         ChekinanaProductUITestFixture.seedIfRequested(in: container)
 #endif
-        ChekinanaPresetSeedPolicy.resetForUITestingIfRequested()
-        if ChekinanaPresetSeedPolicy.shouldSeed() {
-            do {
-                try ChekinanaPresetIdolSeeder.ensureSeeds(in: launchContext)
-            } catch {
-                // The app remains usable when a launch-time seed cannot be saved;
-                // native Idol screens expose missing-pattern state explicitly.
-            }
+        Task { @MainActor in
+            try? await ChekinanaIdolPatternPersistence
+                .refreshPendingCataloguePatterns(in: launchContext)
         }
         let rootView: AnyView
 #if DEBUG

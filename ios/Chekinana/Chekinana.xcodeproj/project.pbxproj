@@ -36,6 +36,7 @@
 		D1D1D1D1D1D1D1D1D1D1D103 /* MatchGame in Resources */ = {isa = PBXBuildFile; fileRef = D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */; };
 		F6F6F6F6F6F6F6F6F6F6F601 /* ChekinanaPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */; };
 		F6F6F6F6F6F6F6F6F6F6F602 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */; };
+		AB12CD34EF56AB78CD90EF01 /* ChekinanaScheduleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -90,6 +91,7 @@
 		D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/MatchGame; sourceTree = "<group>"; };
 		F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaPresentation.swift; sourceTree = "<group>"; };
 		F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaScheduleClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -149,6 +151,7 @@
 				E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */,
 				F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */,
 				F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */,
+				AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */,
 				D1D1D1D1D1D1D1D1D1D1D111 /* MatchGameEngine.swift */,
 				D1D1D1D1D1D1D1D1D1D1D112 /* MatchGameView.swift */,
 				D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */,
@@ -340,6 +343,7 @@
 				E7E7E7E7E7E7E7E7E7E7E701 /* ChekinanaChekiRokuImport.swift in Sources */,
 				E7E7E7E7E7E7E7E7E7E7E702 /* ChekinanaChekiRokuImportWizard.swift in Sources */,
 				F6F6F6F6F6F6F6F6F6F6F601 /* ChekinanaPresentation.swift in Sources */,
+				AB12CD34EF56AB78CD90EF01 /* ChekinanaScheduleClient.swift in Sources */,
 				D1D1D1D1D1D1D1D1D1D1D101 /* MatchGameEngine.swift in Sources */,
 				D1D1D1D1D1D1D1D1D1D1D102 /* MatchGameView.swift in Sources */,
 			);

@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 @MainActor
 final class ChekinanaProductShellUITests: XCTestCase {
@@ -62,10 +63,17 @@ final class ChekinanaProductShellUITests: XCTestCase {
         app.buttons["chekinana.shell.drawer.settings"].tap()
         XCTAssertTrue(element("chekinana.settings.page").waitForExistence(timeout: 4))
 
-        selectAppLanguage("en")
-        XCTAssertEqual(app.buttons["chekinana.settings.done"].label, "Done")
-
-        selectAppLanguage("ja")
+        let languagePicker = element("chekinana.settings.language.picker")
+        languagePicker.tap()
+        let japaneseOption = element("chekinana.settings.language.option.ja")
+        let chineseOption = element("chekinana.settings.language.option.zh-Hans")
+        XCTAssertTrue(japaneseOption.waitForExistence(timeout: 4))
+        XCTAssertTrue(chineseOption.exists)
+        XCTAssertFalse(element("chekinana.settings.language.option.en").exists)
+        japaneseOption.tap()
+        XCTAssertTrue(waitUntil(timeout: 4) {
+            self.element("chekinana.settings.language.picker").value as? String == "ja"
+        })
         XCTAssertTrue(waitUntil(timeout: 4) {
             self.app.buttons["chekinana.settings.done"].label == "完了"
         })
@@ -140,6 +148,285 @@ final class ChekinanaProductShellUITests: XCTestCase {
         })
         XCTAssertEqual(month.label, displayedMonthTitle)
         XCTAssertTrue(leadingDate.isSelected)
+    }
+
+    func testCalendarExactCombinationVisualFixtureOpensUnifiedEditorAndViewer() {
+        launch(fixture: "calendar-groups")
+        tapTab("Calendar")
+
+        let groupedRow = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.calendar.group.combination-"
+            )
+        ).firstMatch
+        XCTAssertTrue(groupedRow.waitForExistence(timeout: 4))
+        groupedRow.tap()
+
+        let groupEditor = element("chekinana.calendar.group-editor")
+        XCTAssertTrue(groupEditor.waitForExistence(timeout: 4))
+        XCTAssertGreaterThanOrEqual(
+            app.buttons.matching(
+                NSPredicate(
+                    format: "identifier BEGINSWITH %@",
+                    "chekinana.calendar.group-editor.cheki-media."
+                )
+            ).count,
+            2
+        )
+        XCTAssertTrue(
+            app.buttons["chekinana.calendar.group-editor.save"]
+                .waitForExistence(timeout: 4)
+        )
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(
+                format: "identifier ENDSWITH %@",
+                ".save"
+            )).count,
+            1
+        )
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND identifier ENDSWITH %@",
+                "chekinana.calendar.group-editor.record.",
+                ".delete"
+            )).count,
+            2
+        )
+
+        let firstMedia = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.calendar.group-editor.cheki-media."
+            )
+        ).firstMatch
+        firstMedia.tap()
+        XCTAssertTrue(
+            app.buttons["chekinana.gallery.editor.save"]
+                .waitForExistence(timeout: 4)
+        )
+        XCTAssertFalse(element("chekinana.cheki.viewer").exists)
+    }
+
+    func testCalendarChekiViewerPhysicalTapOpensExactEditorButSwipeDoesNot() {
+        launch(fixture: "calendar-groups")
+        tapTab("Calendar")
+
+        app.swipeUp()
+        XCTAssertFalse(element("chekinana.cheki.viewer").exists)
+        XCTAssertFalse(element("chekinana.calendar.group-editor").exists)
+        app.swipeDown()
+
+        let groupRows = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.calendar.group.combination-"
+            )
+        ).allElementsBoundByIndex
+        let multiRow = groupRows.first {
+            $0.label.contains("Airi") && $0.label.contains("Mina")
+        }
+        XCTAssertNotNil(multiRow)
+        guard let multiRow else { return }
+
+        let gestureDebug = element(
+            multiRow.identifier.replacingOccurrences(
+                of: "chekinana.calendar.group.",
+                with: "chekinana.calendar.debug.group-gesture."
+            )
+        )
+        XCTAssertTrue(gestureDebug.waitForExistence(timeout: 4))
+        let layoutState = gestureDebug.value as? String ?? "missing"
+        let layoutDimensions = layoutState
+            .replacingOccurrences(of: "layout:", with: "")
+            .split(separator: "x")
+            .compactMap { Double($0) }
+        XCTAssertEqual(layoutDimensions.count, 2, "Unexpected surface state: \(layoutState)")
+        if layoutDimensions.count == 2 {
+            XCTAssertGreaterThan(layoutDimensions[0], 0, "Surface width: \(layoutState)")
+            XCTAssertGreaterThan(layoutDimensions[1], 0, "Surface height: \(layoutState)")
+            XCTAssertGreaterThanOrEqual(
+                layoutDimensions[0],
+                multiRow.frame.width,
+                "Gesture surface must cover at least the row's primary content width."
+            )
+            XCTAssertEqual(
+                layoutDimensions[1],
+                multiRow.frame.height,
+                accuracy: 2,
+                "Gesture surface must cover the complete row height."
+            )
+        }
+
+        let thumbnails = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.calendar.thumbnail."
+            )
+        ).allElementsBoundByIndex.filter {
+            abs($0.frame.midY - multiRow.frame.midY) < 8
+        }.sorted { $0.frame.minX < $1.frame.minX }
+        XCTAssertGreaterThanOrEqual(thumbnails.count, 2)
+        if layoutDimensions.count == 2, let lastThumbnail = thumbnails.last {
+            let visibleContentWidth = lastThumbnail.frame.maxX - multiRow.frame.minX
+            XCTAssertGreaterThanOrEqual(
+                layoutDimensions[0] + 2,
+                visibleContentWidth,
+                "Gesture surface must also cover the trailing thumbnail strip."
+            )
+        }
+        guard let thumbnail = thumbnails.first else { return }
+        let chekiID = String(
+            thumbnail.identifier.dropFirst("chekinana.calendar.thumbnail.".count)
+        )
+
+        thumbnail.tap()
+        let viewer = element("chekinana.cheki.viewer")
+        XCTAssertTrue(
+            viewer.waitForExistence(timeout: 4),
+            "Viewer did not appear; gesture state: \(gestureDebug.value as? String ?? "missing")"
+        )
+        let pageIdentifier = "chekinana.cheki.viewer.page.\(chekiID)"
+        let page = element(pageIdentifier)
+        XCTAssertTrue(page.waitForExistence(timeout: 4))
+        page.swipeLeft()
+        XCTAssertFalse(
+            element("chekinana.gallery.editor").waitForExistence(timeout: 1),
+            "A paging swipe must not be interpreted as an editing tap."
+        )
+        app.buttons["chekinana.cheki.viewer.close"].tap()
+        XCTAssertTrue(waitUntil(timeout: 4) {
+            !self.element("chekinana.cheki.viewer").exists
+        })
+
+        element("chekinana.calendar.thumbnail.\(chekiID)").tap()
+        let reopenedPage = element(pageIdentifier)
+        XCTAssertTrue(reopenedPage.waitForExistence(timeout: 4))
+        reopenedPage.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)
+        ).tap()
+        let editor = element("chekinana.gallery.editor")
+        XCTAssertTrue(editor.waitForExistence(timeout: 4))
+        XCTAssertEqual(editor.value as? String, chekiID)
+    }
+
+    func testIdolDetailChekiViewerPhysicalTapOpensExactEditor() {
+        launch(fixture: "data")
+        tapTab("Idols")
+
+        let search = app.textFields["chekinana.idols.search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 4))
+        search.tap()
+        search.typeText("Rin")
+        let searchKey = app.keyboards.buttons["Search"].firstMatch
+        if searchKey.waitForExistence(timeout: 2) { searchKey.tap() }
+
+        let idolCard = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.idols.card."
+            )
+        ).firstMatch
+        XCTAssertTrue(idolCard.waitForExistence(timeout: 4))
+        idolCard.tap()
+        XCTAssertTrue(element("chekinana.idols.detail").waitForExistence(timeout: 4))
+
+        let chekiType = app.buttons["chekinana.idols.detail.type.cheki"]
+        XCTAssertTrue(chekiType.waitForExistence(timeout: 4))
+        chekiType.tap()
+        let date = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.idols.detail.date.cheki."
+            )
+        ).firstMatch
+        XCTAssertTrue(date.waitForExistence(timeout: 4))
+        date.tap()
+
+        let cheki = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.idols.detail.media.cheki-"
+            )
+        ).firstMatch
+        XCTAssertTrue(cheki.waitForExistence(timeout: 4))
+        let chekiID = String(
+            cheki.identifier.dropFirst(
+                "chekinana.idols.detail.media.cheki-".count
+            )
+        )
+        cheki.tap()
+        assertCurrentChekiViewerPhysicallyEdits(chekiID: chekiID)
+    }
+
+    func testGalleryChekiViewerPhysicalTapOpensExactEditor() {
+        launch(fixture: "data")
+        tapTab("Gallery")
+
+        let chekiCard = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.gallery.card.cheki-"
+            )
+        ).firstMatch
+        XCTAssertTrue(chekiCard.waitForExistence(timeout: 5))
+        let chekiID = String(
+            chekiCard.identifier.dropFirst(
+                "chekinana.gallery.card.cheki-".count
+            )
+        )
+        chekiCard.tap()
+        assertCurrentChekiViewerPhysicallyEdits(chekiID: chekiID)
+    }
+
+    func testCalendarGroupUIKitSnapshotDragPersistsExactlyOnce() throws {
+        launch(fixture: "calendar-groups")
+        tapTab("Calendar")
+
+        func orderedGroupIDs() -> [String] {
+            app.buttons.matching(
+                NSPredicate(
+                    format: "identifier BEGINSWITH %@",
+                    "chekinana.calendar.group.combination-"
+                )
+            ).allElementsBoundByIndex.map(\.identifier)
+        }
+        let initialOrder = orderedGroupIDs()
+        XCTAssertGreaterThanOrEqual(initialOrder.count, 2)
+        let sourceID = try XCTUnwrap(initialOrder.first)
+        let targetID = initialOrder[1]
+        let source = app.buttons[sourceID]
+        let target = app.buttons[targetID]
+        XCTAssertTrue(source.waitForExistence(timeout: 4))
+        XCTAssertTrue(target.exists)
+
+        source.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)
+        ).press(
+            forDuration: 0.6,
+            thenDragTo: target.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.45, dy: 0.8)
+            )
+        )
+        XCTAssertTrue(waitUntil(timeout: 5) {
+            Array(orderedGroupIDs().prefix(2)) == [targetID, sourceID]
+        })
+
+        let debugID = sourceID.replacingOccurrences(
+            of: "chekinana.calendar.group.",
+            with: "chekinana.calendar.debug.group-gesture."
+        )
+        let debug = element(debugID)
+        XCTAssertTrue(debug.waitForExistence(timeout: 4))
+        XCTAssertTrue(waitUntil(timeout: 4) {
+            let value = debug.value as? String ?? ""
+            return value.contains("swift-state=0")
+                && value.contains("persist=1")
+        })
+
+        tapTab("Idols")
+        tapTab("Calendar")
+        XCTAssertEqual(Array(orderedGroupIDs().prefix(2)), [targetID, sourceID])
     }
 
     func testEmptyShellNavigationDrawerAndSettings() {
@@ -525,6 +812,8 @@ final class ChekinanaProductShellUITests: XCTestCase {
     }
 
     func testEventEditorUsesWeiboURLWithAlwaysEditableFieldsAndImages() {
+        let sourceURL = "https://weibo.com/123456/AbC123"
+        UIPasteboard.general.string = sourceURL
         app?.terminate()
         app = XCUIApplication()
         app.launchEnvironment["CHEKINANA_UI_TEST_STORE"] = "1"
@@ -538,10 +827,14 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertFalse(app.segmentedControls["chekinana.events.editor.mode"].exists)
         XCTAssertFalse(app.textViews["chekinana.events.editor.text-source"].exists)
 
+        let pasteButton = app.buttons["chekinana.events.editor.weibo-paste"]
+        XCTAssertTrue(pasteButton.waitForExistence(timeout: 4))
+        XCTAssertTrue(waitUntil(timeout: 4) { pasteButton.isHittable })
+        pasteButton.tap()
         let urlSource = app.textFields["chekinana.events.editor.weibo-source"]
-        XCTAssertTrue(app.buttons["chekinana.events.editor.weibo-paste"].exists)
-        urlSource.tap()
-        urlSource.typeText("https://weibo.com/123456/AbC123")
+        XCTAssertTrue(waitUntil(timeout: 4) {
+            urlSource.value as? String == sourceURL
+        })
         let parseURL = app.buttons["chekinana.events.editor.extract"]
         XCTAssertTrue(parseURL.exists)
         XCTAssertTrue(parseURL.isHittable)
@@ -603,6 +896,37 @@ final class ChekinanaProductShellUITests: XCTestCase {
             })
         }
         XCTAssertTrue(savedEvent.waitForExistence(timeout: 5))
+    }
+
+    func testEventEditorSystemPasteControlPastesWeiboURLOnRealTap() {
+        let uniqueURL = "https://weibo.com/7890706297/5293529858316367?ui-paste=container"
+        UIPasteboard.general.string = uniqueURL
+        XCTAssertEqual(UIPasteboard.general.string, uniqueURL)
+
+        launch(fixture: nil)
+        tapTab("Events")
+        openEventEditor()
+
+        let pasteButton = app.buttons["chekinana.events.editor.weibo-paste"]
+        XCTAssertTrue(pasteButton.waitForExistence(timeout: 4))
+        XCTAssertTrue(pasteButton.isEnabled)
+        XCTAssertTrue(waitUntil(timeout: 4) { pasteButton.isHittable })
+        pasteButton.tap()
+
+        let sourceField = app.textFields["chekinana.events.editor.weibo-source"]
+        XCTAssertTrue(sourceField.waitForExistence(timeout: 4))
+        let didPaste = waitUntil(timeout: 4) {
+            sourceField.value as? String == uniqueURL
+        }
+        XCTAssertTrue(
+            didPaste,
+            "Expected pasted URL; actual source: \(String(describing: sourceField.value))"
+        )
+        XCTAssertFalse(pasteButton.exists)
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { sourceField.isHittable },
+            "A nonempty URL must remove the paste overlay and restore normal field editing."
+        )
     }
 
     func testAssistantLongCandidatesStayAtTopAndSessionSurvivesReentry() {
@@ -1354,6 +1678,51 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertTrue(
             window.intersects(element.frame),
             "\(description) must remain inside the visible window",
+            file: file,
+            line: line
+        )
+    }
+
+    private func assertCurrentChekiViewerPhysicallyEdits(
+        chekiID: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let viewer = element("chekinana.cheki.viewer")
+        XCTAssertTrue(
+            viewer.waitForExistence(timeout: 5),
+            "The shared Cheki viewer must appear.",
+            file: file,
+            line: line
+        )
+        let page = element("chekinana.cheki.viewer.page.\(chekiID)")
+        XCTAssertTrue(
+            page.waitForExistence(timeout: 5),
+            "The viewer must start on the selected physical Cheki.",
+            file: file,
+            line: line
+        )
+        page.swipeLeft()
+        XCTAssertFalse(
+            element("chekinana.gallery.editor").waitForExistence(timeout: 1),
+            "A page swipe must not open the editor.",
+            file: file,
+            line: line
+        )
+        page.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)
+        ).tap()
+        let editor = element("chekinana.gallery.editor")
+        XCTAssertTrue(
+            editor.waitForExistence(timeout: 5),
+            "A physical image tap must open the Cheki editor.",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            editor.value as? String,
+            chekiID,
+            "The editor must receive the exact physical Cheki UUID.",
             file: file,
             line: line
         )
