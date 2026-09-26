@@ -168,6 +168,13 @@ Worker；否则 Travel 查询不可用。本仓库只保存 iOS 客户端的严�
 - Scheme：`Chekinana`
 - iOS App 无第三方 Swift Package 依赖
 
+构建前，在仓库根目录下载 Release 中的模型权重并解压到当前目录（需已安装 GitHub CLI）。压缩包保留仓库相对路径，用于恢复未纳入 Git 的模型权重文件：
+
+```sh
+gh release download ios-resignable-20260910 --repo czhovo/chekinana --pattern Chekinana-model-weights-20260927.zip --dir /tmp
+unzip -o /tmp/Chekinana-model-weights-20260927.zip -d .
+```
+
 构建：
 
 ```sh

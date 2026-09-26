@@ -235,3 +235,6 @@ sam3_model/
 # Docker volumes
 certbot/
 nginx/logs/
+
+# Core ML weights are distributed with GitHub Release assets.
+ios/Chekinana/Chekinana/Models/**/weights/*.bin
