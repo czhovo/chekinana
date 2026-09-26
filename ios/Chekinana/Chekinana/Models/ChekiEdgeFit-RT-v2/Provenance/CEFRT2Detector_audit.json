@@ -1,0 +1,84 @@
+{
+  "name": "CEFRT2Detector",
+  "path": "Models/CEFRT2Detector.mlpackage",
+  "bytes": 81329580,
+  "sha256": "3de5113ee5c72696d7bc472eb599ff603a37e2aca0a52a5f2b01d514e690fc13",
+  "computePrecision": "FLOAT32",
+  "minimumDeploymentTarget": "iOS17",
+  "format": "mlprogram",
+  "inputs": [
+    {
+      "name": "image",
+      "shape": [
+        1,
+        3,
+        768,
+        768
+      ],
+      "dtype": "float32"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "shape": [
+        1,
+        300
+      ],
+      "dtype": "float32"
+    },
+    {
+      "name": "boxes_cxcywh",
+      "shape": [
+        1,
+        300,
+        4
+      ],
+      "dtype": "float32"
+    }
+  ],
+  "static_type_audit": {
+    "tensor_type_occurrences": {
+      "FLOAT32": 1117,
+      "STRING": 1563,
+      "INT32": 799,
+      "BOOL": 118
+    },
+    "operator_counts": {
+      "const": 873,
+      "conv": 69,
+      "relu": 33,
+      "max_pool": 1,
+      "add": 49,
+      "avg_pool": 3,
+      "reshape": 67,
+      "transpose": 45,
+      "linear": 57,
+      "mul": 20,
+      "matmul": 8,
+      "softmax": 7,
+      "layer_norm": 12,
+      "gelu": 1,
+      "silu": 28,
+      "upsample_nearest_neighbor": 2,
+      "concat": 8,
+      "reduce_max": 1,
+      "topk": 1,
+      "expand_dims": 10,
+      "tile": 2,
+      "gather_along_axis": 2,
+      "sigmoid": 4,
+      "slice_by_index": 9,
+      "split": 6,
+      "sub": 6,
+      "resample": 9,
+      "reduce_sum": 3,
+      "clip": 9,
+      "real_div": 3,
+      "log": 3
+    },
+    "all_float_mil_types_fp32": true
+  },
+  "coreMLRuntimeParityPassed": false,
+  "conversionReady": true
+}

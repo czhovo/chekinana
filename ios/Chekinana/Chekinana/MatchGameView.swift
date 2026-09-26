@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 
 struct ChekinanaLianliankanView: View {
+    @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @StateObject private var model = ChekinanaMatchGameViewModel()
     let onClose: () -> Void
 
@@ -11,23 +12,36 @@ struct ChekinanaLianliankanView: View {
     }
 
     var body: some View {
+        let _ = languageRevision
         NavigationStack {
             GeometryReader { viewport in
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 14) {
                             HStack(spacing: 10) {
-                                MatchGameStatPill(title: "时间", value: model.formattedTime)
-                                MatchGameStatPill(title: "剩余", value: "\(model.engine.remainingPairs)")
+                                MatchGameStatPill(
+                                    title: ChekinanaL10n.text(
+                                        "match_game.stat.time",
+                                        fallback: "Time"
+                                    ),
+                                    value: model.formattedTime
+                                )
+                                MatchGameStatPill(
+                                    title: ChekinanaL10n.text(
+                                        "match_game.stat.remaining",
+                                        fallback: "Remaining"
+                                    ),
+                                    value: "\(model.engine.remainingPairs)"
+                                )
                             }
 
                             HStack(spacing: 10) {
-                                Button("重置") {
+                                Button(ChekinanaL10n.message("重置")) {
                                     model.reset()
                                 }
                                 .buttonStyle(MatchGameControlButtonStyle(color: Color(red: 0.11, green: 0.31, blue: 0.72)))
 
-                                Button(model.isAutoSolving ? "暂停" : "解答") {
+                                Button(model.isAutoSolving ? ChekinanaL10n.text("暂停", fallback: "Pause") : ChekinanaL10n.text("解答", fallback: "Solve")) {
                                     model.toggleAnswer()
                                 }
                                 .buttonStyle(MatchGameControlButtonStyle(color: Color(red: 0.05, green: 0.60, blue: 0.83)))
@@ -75,14 +89,14 @@ struct ChekinanaLianliankanView: View {
                 }
             }
             .background(Color(red: 0.96, green: 0.97, blue: 1).ignoresSafeArea())
-            .navigationTitle("连连看")
+            .navigationTitle(ChekinanaProductCopy.text("sidebar.match", "Link Link"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                     }
-                    .accessibilityLabel("关闭连连看")
+                    .accessibilityLabel(ChekinanaL10n.text("关闭连连看", fallback: "Close Link Link"))
                     .accessibilityIdentifier("chekinana.match-game.close")
                 }
             }
@@ -213,12 +227,14 @@ private struct MatchGameBoardView: View {
 }
 
 private struct MatchGameTileButton: View {
+    @Environment(\.chekinanaLanguageRevision) private var languageRevision
     let tile: Int
     let assetID: Int
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
+        let _ = languageRevision
         Button(action: action) {
             ZStack {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -252,7 +268,15 @@ private struct MatchGameTileButton: View {
         }
         .buttonStyle(.plain)
         .disabled(tile == 0)
-        .accessibilityLabel(tile == 0 ? "空白" : "图案 \(assetID)")
+        .accessibilityLabel(
+            tile == 0
+                ? ChekinanaL10n.text("空白", fallback: "Blank")
+                : ChekinanaL10n.format(
+                    "图案 %lld",
+                    fallback: "Pattern %lld",
+                    Int64(assetID)
+                )
+        )
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
@@ -308,17 +332,59 @@ private struct MatchGameConnectionPath: View {
     }
 }
 
+enum ChekinanaMatchGameStatus: String, CaseIterable, Sendable {
+    case imagesDiffer = "match_game.status.images_differ"
+    case invalidPath = "match_game.status.invalid_path"
+    case solving = "match_game.status.solving"
+    case noSolution = "match_game.status.no_solution"
+    case answerEnded = "match_game.status.answer_ended"
+    case paused = "match_game.status.paused"
+    case completed = "match_game.status.completed"
+
+    var fallback: String {
+        switch self {
+        case .imagesDiffer: "The images do not match."
+        case .invalidPath: "No valid path connects these images."
+        case .solving: "Solving…"
+        case .noSolution: "No solution is available for the current board."
+        case .answerEnded: "The answer has ended."
+        case .paused: "Paused"
+        case .completed: "Complete!"
+        }
+    }
+
+    func text(bundle: Bundle? = nil) -> String {
+        ChekinanaL10n.text(rawValue, fallback: fallback, bundle: bundle)
+    }
+}
+
+enum ChekinanaMatchGameAudioError: String, CaseIterable, Sendable {
+    case unavailable = "match_game.audio_error.unavailable"
+    case cannotPlay = "match_game.audio_error.cannot_play"
+
+    var fallback: String {
+        switch self {
+        case .unavailable: "Local audio is unavailable."
+        case .cannotPlay: "Local audio could not be played."
+        }
+    }
+
+    func text(bundle: Bundle? = nil) -> String {
+        ChekinanaL10n.text(rawValue, fallback: fallback, bundle: bundle)
+    }
+}
+
 @MainActor
 final class ChekinanaMatchGameViewModel: ObservableObject {
     @Published private(set) var engine: MatchGameEngine
     @Published private(set) var selected: MatchGamePosition?
     @Published private(set) var visiblePath: [MatchGamePosition]?
     @Published private(set) var elapsedSeconds = 0
-    @Published private(set) var statusText = ""
+    @Published private(set) var status: ChekinanaMatchGameStatus?
     @Published private(set) var isAutoSolving = false
     @Published private(set) var isSolving = false
 
-    let audioPlayer = ChekinanaMatchGameAudioPlayer()
+    let audioPlayer: ChekinanaMatchGameAudioPlayer
 
     private var boardIndex: Int
     private var assetIDsByTile: [Int]
@@ -327,7 +393,11 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
     private var moveTask: Task<Void, Never>?
     private var solveTask: Task<Void, Never>?
 
-    init(initialBoardIndex: Int? = nil) {
+    init(
+        initialBoardIndex: Int? = nil,
+        audioPlayer: ChekinanaMatchGameAudioPlayer? = nil
+    ) {
+        self.audioPlayer = audioPlayer ?? ChekinanaMatchGameAudioPlayer()
 #if DEBUG
         if ProcessInfo.processInfo.environment["CHEKINANA_MATCH_GAME_UI_COMPLETE"] == "1" {
             boardIndex = 0
@@ -346,6 +416,10 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
         boardIndex = index
         engine = MatchGameEngine(board: MatchGamePresetBoards.all[index])
         assetIDsByTile = [0] + Array(1...14).shuffled()
+    }
+
+    var statusText: String {
+        status?.text() ?? ""
     }
 
     var formattedTime: String {
@@ -391,7 +465,7 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
         selected = nil
         visiblePath = nil
         elapsedSeconds = 0
-        statusText = ""
+        status = nil
         isAutoSolving = false
         isSolving = false
         isAnimatingMove = false
@@ -404,30 +478,30 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
 
         guard let first = selected else {
             selected = position
-            statusText = ""
+            status = nil
             return
         }
 
         if first == position {
             selected = nil
-            statusText = ""
+            status = nil
             return
         }
 
         guard engine.tile(at: first) == engine.tile(at: position) else {
             selected = nil
-            statusText = "图片不同"
+            status = .imagesDiffer
             return
         }
 
         guard let path = engine.connectionPath(from: first, to: position) else {
             selected = nil
-            statusText = "路径不合法"
+            status = .invalidPath
             return
         }
 
         selected = nil
-        statusText = ""
+        status = nil
         visiblePath = path
         isAnimatingMove = true
         let move = MatchGameMove(first: first, second: position, path: path)
@@ -459,7 +533,7 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
         guard !engine.isComplete, !isAnimatingMove else { return }
         selected = nil
         visiblePath = nil
-        statusText = "正在求解…"
+        status = .solving
         isSolving = true
         let snapshot = engine
 
@@ -471,13 +545,13 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.isSolving = false
             guard let solution else {
-                self.statusText = "当前棋盘无解"
+                self.status = .noSolution
                 self.solveTask = nil
                 return
             }
 
             self.isAutoSolving = true
-            self.statusText = ""
+            self.status = nil
             await self.play(solution)
             self.solveTask = nil
         }
@@ -519,7 +593,7 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
 
         isAutoSolving = false
         if !engine.isComplete {
-            statusText = "解答已结束"
+            status = .answerEnded
         }
     }
 
@@ -531,7 +605,7 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
         isAnimatingMove = false
         visiblePath = nil
         if showMessage {
-            statusText = "已暂停"
+            status = .paused
         }
     }
 
@@ -541,7 +615,7 @@ final class ChekinanaMatchGameViewModel: ObservableObject {
         visiblePath = nil
         isAutoSolving = false
         isSolving = false
-        statusText = "完成！"
+        status = .completed
         audioPlayer.playFromBeginning()
     }
 }
@@ -551,24 +625,46 @@ final class ChekinanaMatchGameAudioPlayer: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
-    @Published private(set) var errorText = ""
+    @Published private(set) var error: ChekinanaMatchGameAudioError?
 
     private var player: AVAudioPlayer?
     private var progressTask: Task<Void, Never>?
+    private let victoryAudioURL: () -> URL?
+    private let makeAudioPlayer: (URL) throws -> AVAudioPlayer
+    private let activateAudioSession: () -> Void
+
+    init(
+        victoryAudioURL: @escaping () -> URL? = { MatchGameBundleAssets.victoryAudioURL },
+        makeAudioPlayer: @escaping (URL) throws -> AVAudioPlayer = {
+            try AVAudioPlayer(contentsOf: $0)
+        },
+        activateAudioSession: @escaping () -> Void = {
+            ChekinanaMediaPlaybackAudioSession.activate(mode: .default)
+        }
+    ) {
+        self.victoryAudioURL = victoryAudioURL
+        self.makeAudioPlayer = makeAudioPlayer
+        self.activateAudioSession = activateAudioSession
+    }
 
     var progress: Double {
         duration > 0 ? min(1, max(0, currentTime / duration)) : 0
     }
 
+    var errorText: String {
+        error?.text() ?? ""
+    }
+
     func playFromBeginning() {
         reset()
-        guard let url = MatchGameBundleAssets.victoryAudioURL else {
-            errorText = "本地音频不可用"
+        guard let url = victoryAudioURL() else {
+            error = .unavailable
             return
         }
 
         do {
-            let audioPlayer = try AVAudioPlayer(contentsOf: url)
+            activateAudioSession()
+            let audioPlayer = try makeAudioPlayer(url)
             audioPlayer.prepareToPlay()
             player = audioPlayer
             duration = audioPlayer.duration
@@ -577,7 +673,7 @@ final class ChekinanaMatchGameAudioPlayer: ObservableObject {
             isPlaying = true
             startProgressUpdates()
         } catch {
-            errorText = "本地音频无法播放"
+            self.error = .cannotPlay
         }
     }
 
@@ -590,6 +686,7 @@ final class ChekinanaMatchGameAudioPlayer: ObservableObject {
         if player.isPlaying {
             pause()
         } else {
+            activateAudioSession()
             if player.currentTime >= max(0, player.duration - 0.05) {
                 player.currentTime = 0
             }
@@ -622,7 +719,7 @@ final class ChekinanaMatchGameAudioPlayer: ObservableObject {
         isPlaying = false
         currentTime = 0
         duration = 0
-        errorText = ""
+        error = nil
     }
 
     private func startProgressUpdates() {
@@ -643,9 +740,11 @@ final class ChekinanaMatchGameAudioPlayer: ObservableObject {
 }
 
 private struct MatchGameAudioPlayerView: View {
+    @Environment(\.chekinanaLanguageRevision) private var languageRevision
     @ObservedObject var player: ChekinanaMatchGameAudioPlayer
 
     var body: some View {
+        let _ = languageRevision
         HStack(spacing: 14) {
             Button {
                 player.togglePlayback()
@@ -655,10 +754,14 @@ private struct MatchGameAudioPlayerView: View {
                     .foregroundStyle(Color(red: 0.12, green: 0.38, blue: 0.91))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(player.isPlaying ? "暂停" : "播放")
+            .accessibilityLabel(
+                player.isPlaying
+                    ? ChekinanaL10n.text("暂停", fallback: "Pause")
+                    : ChekinanaL10n.text("播放", fallback: "Play")
+            )
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("目光 - 空色轨迹")
+                Text(verbatim: "目光 - 空色轨迹")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Color(red: 0.12, green: 0.31, blue: 0.75))
 

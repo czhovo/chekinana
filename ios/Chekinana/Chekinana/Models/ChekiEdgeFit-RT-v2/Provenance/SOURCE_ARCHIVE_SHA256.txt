@@ -1,0 +1,1 @@
+858a5a37c2284b32aa3a072bd7cbc19f463ae2cf95549dfcb3ba139307497a63  ChekiEdgeFit-RT-v2-coreml-fp32-20260903.zip

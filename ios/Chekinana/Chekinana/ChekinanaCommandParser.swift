@@ -1,5 +1,24 @@
 import Foundation
 
+/// Keep the parser usable by the standalone Foundation contract harnesses.
+enum ChekinanaParserCopy {
+    static func list(_ values: [String]) -> String {
+        let formatter = ListFormatter()
+#if canImport(UIKit)
+        formatter.locale = ChekinanaLanguagePreference.displayLocale()
+#endif
+        return formatter.string(from: values) ?? values.joined(separator: ", ")
+    }
+
+    static func message(_ value: String.LocalizationValue) -> String {
+#if canImport(UIKit)
+        ChekinanaL10n.message(value)
+#else
+        String(localized: value)
+#endif
+    }
+}
+
 struct ChekinanaParsedCommand {
     let name: String
     let target: String?
@@ -15,13 +34,13 @@ enum ChekinanaCommandParseError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .empty:
-            "empty command"
+            ChekinanaParserCopy.message("empty command")
         case .unterminatedQuote:
-            "unterminated quote"
+            ChekinanaParserCopy.message("unterminated quote")
         case .duplicateKey(let key):
-            "duplicate argument: \(key)"
+            ChekinanaParserCopy.message("duplicate argument: \(key)")
         case .invalidArgument(let value):
-            "invalid argument: \(value)"
+            ChekinanaParserCopy.message("invalid argument: \(value)")
         }
     }
 }

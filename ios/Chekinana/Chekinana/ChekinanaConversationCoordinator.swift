@@ -381,6 +381,27 @@ enum ChekinanaEventCandidateConversationRoute: Equatable, Sendable {
 
 @MainActor
 enum ChekinanaConversationCoordinator {
+    /// Only adjacent deletions share a confirmation; other operations retain order.
+    static func leadingBatchCount(_ operations: [ChekinanaNLOperation]) -> Int {
+        guard operations.first?.intent == .deleteidol else { return min(1, operations.count) }
+        return operations.prefix { $0.intent == .deleteidol }.count
+    }
+
+    static func combinedIdolDeletionCommand(_ commands: [String]) throws -> String {
+        var ids: [UUID] = []
+        var seen = Set<UUID>()
+        for command in commands {
+            let parsed = try ChekinanaCommandParser.parse(command)
+            guard parsed.name == "deleteidol", parsed.arguments.isEmpty,
+                  let target = parsed.target, let id = UUID(uuidString: target) else {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+            if seen.insert(id).inserted { ids.append(id) }
+        }
+        guard (1...50).contains(ids.count) else { throw ChekinanaNLClientError.invalidSchema }
+        return "deleteidol " + ids.map { $0.uuidString.lowercased() }.joined(separator: ",")
+    }
+
     static func compile(
         _ interpretation: ChekinanaNLInterpretation,
         continuingIntent: ChekinanaNLIntent? = nil,
@@ -406,11 +427,9 @@ enum ChekinanaConversationCoordinator {
             do {
                 try ChekinanaNLSchemaValidator.validateDraft(operation, missing: missing)
                 try validateSelections(selections, for: operation, modelContext: modelContext)
-                if operation.intent == .addevent {
-                    if let url = try eventCandidateURL(in: [operation]) {
-                        return .eventCandidateURL(url)
-                    }
-                    return .eventCandidateText
+                if operation.intent == .addevent,
+                   let url = try eventCandidateURL(in: [operation]) {
+                    return .eventCandidateURL(url)
                 }
                 return .clarification(.init(
                     operation: operation,
@@ -439,18 +458,9 @@ enum ChekinanaConversationCoordinator {
                     throw ChekinanaNLClientError.invalidSchema
                 }
             }
-            let addEventCount = operations.filter { $0.intent == .addevent }.count
-            if addEventCount > 0 {
-                guard operations.count == 1, addEventCount == 1 else {
-                    throw ChekinanaNLClientError.invalidSchema
-                }
-                if let url = try eventCandidateURL(in: operations) {
-                    return .eventCandidateURL(url)
-                }
-                return .eventCandidateText
-            }
-            if operations.count > 1, selections.hasLocalValues {
-                throw ChekinanaNLClientError.invalidSchema
+            if let url = try eventCandidateURL(in: operations) {
+                guard operations.count == 1 else { throw ChekinanaNLClientError.invalidSchema }
+                return .eventCandidateURL(url)
             }
             if let operation = operations.first {
                 try validateSelections(selections, for: operation, modelContext: modelContext)
@@ -477,6 +487,9 @@ enum ChekinanaConversationCoordinator {
                         return result(for: error)
                     }
                 }
+            }
+            if operations.allSatisfy({ $0.intent == .deleteidol }) {
+                return .commands([try combinedIdolDeletionCommand(commands)])
             }
             return .commands(commands)
         } catch {
@@ -606,6 +619,17 @@ private extension ChekinanaConversationCoordinator {
         var command: String
 
         switch operation.intent {
+        case .statscheki:
+            command = "statscheki"
+            if let idol = slots.idol {
+                let id = try resolveIdol(idol, overrides: selections.idolOverrides, modelContext: modelContext)
+                command += " idol=\(shortID(id))"
+            }
+            if let event = slots.event {
+                let id = try resolveEvent(event, overrides: selections.eventOverrides, modelContext: modelContext)
+                command += " event=\(shortID(id))"
+            }
+            if let from = slots.dateFrom, let to = slots.dateTo { command += " date_from=\(from) date_to=\(to)" }
         case .navigate:
             command = "navigate \(try quote(required(slots.destination)))"
             if let date = slots.date { command += " date=\(date)" }
@@ -645,7 +669,7 @@ private extension ChekinanaConversationCoordinator {
                 }
             }
             if let clear = slots.clearFields {
-                command += " clear_fields=\(clear.joined(separator: ","))"
+                for field in clear { command += " \(field)=-" }
             }
         case .deleteidol, .favoriteidol:
             let idolID = try resolveIdol(required(slots.target), overrides: selections.idolOverrides, modelContext: modelContext)
@@ -658,6 +682,9 @@ private extension ChekinanaConversationCoordinator {
                 command = "addevent \(try quoteURL(url)) name=\(try quote(name)) date=\(try quote(date))"
             } else {
                 command = "addevent \(try quote(name)) date=\(try quote(date))"
+            }
+            for (key, value) in [("city", slots.city), ("livehouse", slots.livehouse), ("price", slots.price), ("ticket_url", slots.ticketURL), ("note", slots.note)] {
+                if let value { command += " \(key)=\(try quote(value))" }
             }
         case .editevent, .deleteevent:
             let eventID = try resolveEvent(required(slots.target), overrides: selections.eventOverrides, modelContext: modelContext)
@@ -740,8 +767,13 @@ private extension ChekinanaConversationCoordinator {
             if let selectedChekiID = selections.selectedChekiID,
                ChekinanaSelectedChekiLanguage.referencesSelectedCheki(target) {
                 let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
-                let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
-                    .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+                let available = Set(((try? modelContext.fetch(FetchDescriptor<MediaItem>())) ?? [])
+                    .filter {
+                        $0.kind == .cheki && ChekinanaVisibilityPolicy.includesRecord(
+                            idolIDs: $0.idolIDs,
+                            hiddenIDs: hiddenIDs
+                        )
+                    }
                     .map(\.id))
                 guard available.contains(selectedChekiID) else {
                     throw ResolutionError.staleLocalSelection
@@ -756,8 +788,13 @@ private extension ChekinanaConversationCoordinator {
             if let selectedChekiID = selections.selectedChekiID,
                ChekinanaSelectedChekiLanguage.referencesSelectedCheki(rawTarget) {
                 let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
-                let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
-                    .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+                let available = Set(((try? modelContext.fetch(FetchDescriptor<MediaItem>())) ?? [])
+                    .filter {
+                        $0.kind == .cheki && ChekinanaVisibilityPolicy.includesRecord(
+                            idolIDs: $0.idolIDs,
+                            hiddenIDs: hiddenIDs
+                        )
+                    }
                     .map(\.id))
                 guard available.contains(selectedChekiID) else {
                     throw ResolutionError.staleLocalSelection
@@ -768,7 +805,7 @@ private extension ChekinanaConversationCoordinator {
             }
             command = operation.intent == .deletecheki
                 ? "deletecheki \(try quote(resolvedTarget))"
-                : "editrecord cheki target=\(try quote(resolvedTarget))\(try recordPatchArguments(slots, selections: selections, modelContext: modelContext))"
+                : "editcheki \(try quote(resolvedTarget))\(try mediaPatchArguments(slots, selections: selections, modelContext: modelContext))"
         case .listrecord:
             command = "listrecord"
             if let type = slots.recordType { command += " \(type)" }
@@ -795,6 +832,18 @@ private extension ChekinanaConversationCoordinator {
         return command
     }
 
+    static func mediaPatchArguments(_ slots: ChekinanaNLSlots, selections: ChekinanaConversationSelections, modelContext: ModelContext) throws -> String {
+        guard slots.idx == nil, slots.count == nil else { throw ChekinanaNLClientError.invalidSchema }
+        var copy = slots
+        copy.clearFields = nil
+        var result = try recordPatchArguments(copy, selections: selections, modelContext: modelContext)
+        for field in slots.clearFields ?? [] {
+            guard ["idols", "event", "date", "user", "note", "size"].contains(field) else { throw ChekinanaNLClientError.invalidSchema }
+            result += " \(field)=-"
+        }
+        return result
+    }
+
     static func recordPatchArguments(
         _ slots: ChekinanaNLSlots,
         selections: ChekinanaConversationSelections,
@@ -810,6 +859,7 @@ private extension ChekinanaConversationCoordinator {
             result += " event=\(shortID(id))"
         }
         for (key, value) in [("date", slots.date), ("note", slots.note), ("size", slots.size)] where value != nil { result += " \(key)=\(try quote(value!))" }
+        if let count = slots.count { result += " count=\(count)" }
         if let user = slots.user { result += " user=\(user)" }
         if let idx = slots.idx { result += " idx=\(idx)" }
         if let favorite = slots.favorite { result += " favorite=\(favorite)" }
@@ -849,8 +899,13 @@ private extension ChekinanaConversationCoordinator {
             return target
         }
         let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
-        let available = Set(((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? [])
-            .filter { ChekinanaVisibilityPolicy.includesRecord(idols: $0.idols, hiddenIDs: hiddenIDs) }
+        let available = Set(((try? modelContext.fetch(FetchDescriptor<MediaItem>())) ?? [])
+            .filter {
+                $0.kind == .cheki && ChekinanaVisibilityPolicy.includesRecord(
+                    idolIDs: $0.idolIDs,
+                    hiddenIDs: hiddenIDs
+                )
+            }
             .map(\.id))
         guard available.contains(selected) else { throw ResolutionError.staleLocalSelection }
         return shortID(selected)
@@ -961,12 +1016,18 @@ private extension ChekinanaConversationCoordinator {
         name: KeyPath<Value, String>
     ) -> [Value] {
         let query = normalize(rawQuery)
-        let idMatches = values.filter {
-            $0[keyPath: id].uuidString.lowercased().hasPrefix(query)
-        }
-        if !idMatches.isEmpty { return idMatches }
+        guard !query.isEmpty else { return [] }
+        // Keep identifier parsing on the original whitespace-sensitive path.
+        let identifierQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+        if let identifier = UUID(uuidString: identifierQuery) { return values.filter { $0[keyPath: id] == identifier } }
         let exact = values.filter { normalize($0[keyPath: name]) == query }
         if !exact.isEmpty { return exact }
+        if identifierQuery.range(of: #"^[0-9a-f]{8,32}$"#, options: .regularExpression) != nil {
+            let idMatches = values.filter { $0[keyPath: id].uuidString.lowercased().hasPrefix(identifierQuery) }
+            if !idMatches.isEmpty { return idMatches }
+        }
         return values.filter { normalize($0[keyPath: name]).contains(query) }
     }
 
@@ -1023,13 +1084,14 @@ private extension ChekinanaConversationCoordinator {
     }
 
     static func normalize(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
-            .lowercased()
+        ChekinanaLocalEntityMatch.key(value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        ))
     }
 
     static func shortID(_ id: UUID) -> String {
-        String(id.uuidString.prefix(8)).lowercased()
+        id.uuidString.lowercased()
     }
 
     static func continuationIntentMatches(
@@ -1112,22 +1174,7 @@ private extension ChekinanaConversationCoordinator {
     }
 
     static func eventCandidateURL(in operations: [ChekinanaNLOperation]) throws -> String? {
-        let eventURLs = operations.compactMap { operation -> String? in
-            guard operation.intent == .addevent else { return nil }
-            return operation.slots.url
-        }
-        let weiboURLs = eventURLs.filter { value in
-            guard let host = URLComponents(string: value)?.host?.lowercased() else { return false }
-            return host == "weibo.com" || host == "www.weibo.com"
-        }
-        guard !weiboURLs.isEmpty else { return nil }
-        guard operations.count == 1,
-              weiboURLs.count == 1,
-              let url = weiboURLs.first,
-              ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(url) else {
-            throw ChekinanaNLClientError.invalidSchema
-        }
-        return url
+        try ChekinanaAssistantEventFlow.extractionURL(in: operations)
     }
 
 }

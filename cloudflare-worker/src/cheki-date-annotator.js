@@ -1,6 +1,6 @@
 import { CHEKI_DATE_PROMPT } from "./cheki-date-prompt.js";
 
-const DEFAULT_MODEL = "qwen3.7-flash";
+const DEFAULT_MODEL = "qwen3.7-plus";
 const DEFAULT_IMAGE_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_QWEN_TIMEOUT_MS = 90_000;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;

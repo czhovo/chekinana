@@ -6,8 +6,8 @@ enum ChekinanaAsyncDeadlineError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .timedOut: "photo loading timed out"
-        case .cancelled: "photo loading was cancelled"
+        case .timedOut: ChekinanaL10n.message("photo loading timed out")
+        case .cancelled: ChekinanaL10n.message("photo loading was cancelled")
         }
     }
 }

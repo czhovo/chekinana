@@ -1,0 +1,49 @@
+{
+  "code": 200,
+  "message": "OK",
+  "tweet": {
+    "url": "https://x.com/Yoruamiofficial/status/2085682463745970481",
+    "id": "2085682463745970481",
+    "text": "【⭐️新体制初開催‼️YORU-FES🔥】\n2026.09.11(Fri)\n『YORU-FES vol.11 ~0915TourFinal決起会SP~』\n\n新体制初となるYORU-FES✨️\n今回は豪華出演者さんと一緒にツアーファイナル決起会👊🏻❤️‍🔥\n大成功させるべく最高の1日に✊🏻\n\\お目当て特典🎁新体制も𝑷𝒓𝒆𝒎𝒊𝒖𝒎なよるふぇすくじ♡/\n\n🎫チケット発売(8/8 22:00~)\nhttps://t-dv.com/yoru_fes11\n\n #よるあみ",
+    "raw_text": {
+      "text": "【⭐️新体制初開催‼️YORU-FES🔥】\n2026.09.11(Fri)\n『YORU-FES vol.11 ~0915TourFinal決起会SP~』\n\n新体制初となるYORU-FES✨️\n今回は豪華出演者さんと一緒にツアーファイナル決起会👊🏻❤️‍🔥\n大成功させるべく最高の1日に✊🏻\n\\お目当て特典🎁新体制も𝑷𝒓𝒆𝒎𝒊𝒖𝒎なよるふぇすくじ♡/\n\n🎫チケット発売(8/8 22:00~)\nhttps://t.co/bRf0Dtzuji\n\n #よるあみ",
+      "facets": [
+        {
+          "type": "media",
+          "original": "https://t.co/YjlbAgqziF",
+          "replacement": "https://x.com/Yoruamiofficial/status/2085682463745970481/photo/1"
+        },
+        {
+          "type": "url",
+          "original": "https://t.co/bRf0Dtzuji",
+          "replacement": "https://t-dv.com/yoru_fes11",
+          "display": "t-dv.com/yoru_fes11"
+        }
+      ]
+    },
+    "author": {
+      "screen_name": "Yoruamiofficial",
+      "avatar_url": "https://pbs.twimg.com/profile_images/1372989147149836291/FqRnEwW3_200x200.jpg"
+    },
+    "created_at": "Fri Aug 07 11:00:24 +0000 2026",
+    "is_note_tweet": true,
+    "media": {
+      "all": [
+        {
+          "type": "photo",
+          "url": "https://pbs.twimg.com/media/HPHVJCmaMAAL1go.jpg?name=orig",
+          "width": 2480,
+          "height": 3508
+        }
+      ],
+      "photos": [
+        {
+          "type": "photo",
+          "url": "https://pbs.twimg.com/media/HPHVJCmaMAAL1go.jpg?name=orig",
+          "width": 2480,
+          "height": 3508
+        }
+      ]
+    }
+  }
+}

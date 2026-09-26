@@ -282,42 +282,86 @@ actor ChekinanaScheduleClient {
         _ raw: String?
     ) throws -> (date: Date, timeZone: TimeZone)? {
         guard let raw else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: raw) {
-            return (date, try timeZone(from: raw))
-        }
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = formatter.date(from: raw) else {
+        let pattern = #"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(Z|([+-])([0-9]{2}):([0-9]{2}))"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
             throw ChekinanaScheduleClientError.invalidSchedule
         }
-        return (date, try timeZone(from: raw))
-    }
+        let fullRange = NSRange(raw.startIndex..., in: raw)
+        guard let match = expression.firstMatch(in: raw, range: fullRange),
+              match.range == fullRange else {
+            throw ChekinanaScheduleClientError.invalidSchedule
+        }
 
-    private static func timeZone(from raw: String) throws -> TimeZone {
-        if raw.hasSuffix("Z") { return TimeZone(secondsFromGMT: 0)! }
-        let pattern = #"([+-])(\d{2}):(\d{2})$"#
-        guard let expression = try? NSRegularExpression(pattern: pattern),
-              let match = expression.firstMatch(
-                  in: raw,
-                  range: NSRange(raw.startIndex..., in: raw)
-              ),
-              let signRange = Range(match.range(at: 1), in: raw),
-              let hourRange = Range(match.range(at: 2), in: raw),
-              let minuteRange = Range(match.range(at: 3), in: raw),
-              let hours = Int(raw[hourRange]),
-              let minutes = Int(raw[minuteRange]),
-              hours <= 23,
-              minutes <= 59 else {
+        func integer(at index: Int) -> Int? {
+            guard let range = Range(match.range(at: index), in: raw) else { return nil }
+            return Int(raw[range])
+        }
+
+        guard let year = integer(at: 1),
+              let month = integer(at: 2),
+              let day = integer(at: 3),
+              let hour = integer(at: 4),
+              let minute = integer(at: 5),
+              let second = integer(at: 6),
+              (1...9_999).contains(year),
+              (1...12).contains(month),
+              (1...31).contains(day),
+              (0...23).contains(hour),
+              (0...59).contains(minute),
+              (0...59).contains(second),
+              let zoneRange = Range(match.range(at: 8), in: raw) else {
             throw ChekinanaScheduleClientError.invalidSchedule
         }
-        let sign = raw[signRange] == "+" ? 1 : -1
-        guard let zone = TimeZone(
-            secondsFromGMT: sign * ((hours * 60 + minutes) * 60)
-        ) else {
+
+        let zoneText = raw[zoneRange]
+        let secondsFromGMT: Int
+        if zoneText == "Z" {
+            secondsFromGMT = 0
+        } else {
+            guard let signRange = Range(match.range(at: 9), in: raw),
+                  let offsetHour = integer(at: 10),
+                  let offsetMinute = integer(at: 11),
+                  (0...18).contains(offsetHour),
+                  (0...59).contains(offsetMinute),
+                  offsetHour < 18 || offsetMinute == 0 else {
+                throw ChekinanaScheduleClientError.invalidSchedule
+            }
+            let sign = raw[signRange] == "+" ? 1 : -1
+            secondsFromGMT = sign * ((offsetHour * 60 + offsetMinute) * 60)
+        }
+        guard let timeZone = TimeZone(secondsFromGMT: secondsFromGMT) else {
             throw ChekinanaScheduleClientError.invalidSchedule
         }
-        return zone
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timeZone
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        components.second = second
+        guard components.isValidDate(in: calendar),
+              let wholeSecond = calendar.date(from: components) else {
+            throw ChekinanaScheduleClientError.invalidSchedule
+        }
+
+        let fractionalSeconds: TimeInterval
+        if let fractionRange = Range(match.range(at: 7), in: raw) {
+            // Date cannot retain sub-nanosecond precision, but every digit is syntax-checked.
+            let precisionDigits = raw[fractionRange].prefix(9)
+            let paddedDigits = precisionDigits
+                + String(repeating: "0", count: 9 - precisionDigits.count)
+            guard let nanoseconds = Int(paddedDigits) else {
+                throw ChekinanaScheduleClientError.invalidSchedule
+            }
+            fractionalSeconds = TimeInterval(nanoseconds) / 1_000_000_000
+        } else {
+            fractionalSeconds = 0
+        }
+        return (wholeSecond.addingTimeInterval(fractionalSeconds), timeZone)
     }
 
     private static let liveTransport: Transport = { request in

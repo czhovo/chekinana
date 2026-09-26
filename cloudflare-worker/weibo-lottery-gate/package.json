@@ -1,0 +1,14 @@
+{
+  "name": "chekinana-weibo-lottery-gate",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "jose": "6.2.10"
+  },
+  "devDependencies": {
+    "wrangler": "4.127.0"
+  }
+}

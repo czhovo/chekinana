@@ -1,0 +1,344 @@
+{
+  "algorithm": "ChekiEdgeFit-RT v2",
+  "asset_version": "cefrt2-fp32-20260903.1",
+  "global_threshold": 0.9267578125,
+  "neural_precision": "FP32",
+  "model_count": 2,
+  "coreml_component_count": 3,
+  "conversion_ready": true,
+  "static_package_audit_passed": true,
+  "windows_torchscript_synthetic_parity_passed": true,
+  "linux_torchscript_synthetic_parity_passed": true,
+  "coreml_runtime_parity_passed": false,
+  "swift_compilation_tested": false,
+  "end_to_end_coreml_image_parity_tested": false,
+  "iphone_ready_verified": false,
+  "dataset_images_read_for_export": 0,
+  "checkpoints_modified": false,
+  "source_checkpoint_hashes": {
+    "production_rtdetr/epoch_24.pt": "65c90302a1064742b0befb67478ab58088b4973272380f9d4fbd43099b2df9c0",
+    "production_edgesam/epoch_10.pt": "841c35089c4b49cf4beb2b3cd09df62af60c09378a490c66bcda05bb11f4d221",
+    "production_edgesam/epoch_15.pt": "86b0f8191da9947f3afe8831eba163552e1ccf4b8b3c12d13671d78cdbf3feaa"
+  },
+  "selected_edgesam_epoch": 10,
+  "g_sha256": "92e2cd5222d115b19c3c24449e1bde98422311ebef34aca658cbe9da5cca8999",
+  "inventory_exclusions": [
+    "SHA256SUMS.txt",
+    "delivery_manifest.json"
+  ],
+  "checksum_file_exclusion": "SHA256SUMS.txt itself",
+  "file_count_excluding_inventory_and_checksums": 62,
+  "bytes_excluding_inventory_and_checksums": 306915585,
+  "files": [
+    {
+      "path": "coreml_manifest.json",
+      "bytes": 5545,
+      "sha256": "8f7e70d98a001002f537792b75cc6f6aaf153fa9d2ab933c0ee8de54bd1c590b"
+    },
+    {
+      "path": "Export/convert_cefrt2_coreml_fp32.py",
+      "bytes": 5824,
+      "sha256": "89607c8b50b819e095cbdbfd3c30b8df6df7d4063ecd4d4beb4be3da0fa392ec"
+    },
+    {
+      "path": "Export/export_cefrt2_torchscript_fp32.py",
+      "bytes": 11114,
+      "sha256": "becb2ac7de25d93f3ed5b77c7e5ef5f467d92f93d1908a609d930a5d2713a22c"
+    },
+    {
+      "path": "Export/package_cefrt2_coreml.py",
+      "bytes": 8060,
+      "sha256": "0a38a20b171dcd067ca9047784c3891b63429b893836a126942a342f956982d5"
+    },
+    {
+      "path": "Export/verify_cefrt2_coreml.py",
+      "bytes": 8906,
+      "sha256": "03949893124a9f5ccc23c4fb2614ce467e9b3b8c7ea2ad1f49b927808d4e03a0"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_0_boxes_cxcywh.f32",
+      "bytes": 4800,
+      "sha256": "ffab6dcf4571c487040d1944070a2b02042a1e2c2176718d62ef3b4010055f3d"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_0_image.f32",
+      "bytes": 7077888,
+      "sha256": "468a4a459772da4e498bc9635d3a9c9b12584490e1edcc1d914ee7df6448d8b2"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_0_logits.f32",
+      "bytes": 1200,
+      "sha256": "86290f08e8e46c72b33eb5f8c3a90e31639faf7cfe3edf2c961e35c74ef3226a"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_1_boxes_cxcywh.f32",
+      "bytes": 4800,
+      "sha256": "fef517cd6431df850cab96a47bff9a50000f554eeb9e59bf378fdcbd54fdc003"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_1_image.f32",
+      "bytes": 7077888,
+      "sha256": "547a504e0550e396a0f617186b08086a0980970be89253b235f46e1a58e792e7"
+    },
+    {
+      "path": "Fixtures/CEFRT2Detector_1_logits.f32",
+      "bytes": 1200,
+      "sha256": "3f403fb1c62216b0db280ff72febf127ca86c8cb6bae20f1660f088c2f7c01e6"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_0_box.f32",
+      "bytes": 16,
+      "sha256": "e766e38e87efa8ff60bf6b8bd49be7fbb7b6e51c10e94554f695853b41bae177"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_0_image_embeddings.f32",
+      "bytes": 4194304,
+      "sha256": "8b02bc7578cbf81268eba4707014458f59220e11371325c89d84ee679ce0c7b3"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_0_iou_prediction.f32",
+      "bytes": 4,
+      "sha256": "7522fccad56bfeb7ee70b495ce3a8f8c5ab905cc9c707133bc34a4e609f78ba4"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_0_mask_logits.f32",
+      "bytes": 262144,
+      "sha256": "e7fbb0148eafc30b14b94f3acbac51f00280a0821c9592a173ff782fdbf4b6d3"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_1_box.f32",
+      "bytes": 16,
+      "sha256": "312545b49bad897ccb86f7f255b4b980c3379e2b3aeffde5e6ce0c8771e21060"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_1_image_embeddings.f32",
+      "bytes": 4194304,
+      "sha256": "5366f88c21e0c1c4e8f79b6983f8beae5cc47a228a646ff9da48fb3ef4824864"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_1_iou_prediction.f32",
+      "bytes": 4,
+      "sha256": "b1363a633d303aa06f779b38881acd10ac7c6f698dfe10a9d4a57b81cabf90a0"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMBoxDecoder_1_mask_logits.f32",
+      "bytes": 262144,
+      "sha256": "9d2bab561efc81679c41b38e7dc2362a9a3b1853c96742909557db7eae02c8ea"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMEncoder_0_image.f32",
+      "bytes": 12582912,
+      "sha256": "cfadd44a103cbd6d5726fa07b27d7aad2f67ed3930ff96901c486a5beaf7e723"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMEncoder_0_image_embeddings.f32",
+      "bytes": 4194304,
+      "sha256": "8b02bc7578cbf81268eba4707014458f59220e11371325c89d84ee679ce0c7b3"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMEncoder_1_image.f32",
+      "bytes": 12582912,
+      "sha256": "37ced5409d29000fd1d1f001f28e4846d68735bfbdaf314b27f3cbe636ea4b25"
+    },
+    {
+      "path": "Fixtures/CEFRT2EdgeSAMEncoder_1_image_embeddings.f32",
+      "bytes": 4194304,
+      "sha256": "5366f88c21e0c1c4e8f79b6983f8beae5cc47a228a646ff9da48fb3ef4824864"
+    },
+    {
+      "path": "Fixtures/manifest.json",
+      "bytes": 10208,
+      "sha256": "924064b8b8bef0fd783f73d619672f97ecfa11efd05808b5f2fbdcacfbc187fc"
+    },
+    {
+      "path": "INTEGRATION_CONTRACT.md",
+      "bytes": 6482,
+      "sha256": "f09362131aed31549cf70662042243f8a92f9b67dc235d76ed2404c202de3ffe"
+    },
+    {
+      "path": "Licenses/EdgeSAM-LICENSE",
+      "bytes": 1751,
+      "sha256": "4122e9944900d9e23b8622b829f4343384fbb6e0667b39e4cf474b5d88a185dd"
+    },
+    {
+      "path": "Licenses/RT-DETR-LICENSE",
+      "bytes": 11558,
+      "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+    },
+    {
+      "path": "Models/CEFRT2Detector.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "bytes": 202323,
+      "sha256": "2809fcb1cbb1ba7ecb56683bb0d79d63e0b916b4bad3d073d222019a7850b721"
+    },
+    {
+      "path": "Models/CEFRT2Detector.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "bytes": 81126640,
+      "sha256": "abba98944ef78ba936a4967b09b0fd2ff59b932c28c3b7c27808f0aa054ef464"
+    },
+    {
+      "path": "Models/CEFRT2Detector.mlpackage/Manifest.json",
+      "bytes": 617,
+      "sha256": "7518c00b4f685b4a945bf1cdba0ed681ff83ff5f7853af5518133a97f3cd6fc7"
+    },
+    {
+      "path": "Models/CEFRT2Detector_audit.json",
+      "bytes": 1611,
+      "sha256": "bfac05815cceb32e8b960acc6b34bee13b26f2d0d20bc12b80db3e583e1bb55b"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMBoxDecoder.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "bytes": 96298,
+      "sha256": "51f908a0cf78a8dbe78d8779636a96b7885622dcf34254caddafb052a0950125"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMBoxDecoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "bytes": 24634176,
+      "sha256": "a20bd18031c86708bd0fed9062fa59f90117a8936ddc648e5d5ba73ae5c7e981"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMBoxDecoder.mlpackage/Manifest.json",
+      "bytes": 617,
+      "sha256": "f6d7db610d48a7e1dd9aa5c99b88bfaffb2dd579e75e1f70d5afd37dfe8e6565"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMBoxDecoder_audit.json",
+      "bytes": 1618,
+      "sha256": "e19653f75ebdaea11ed4655343c64356661b8e27fa3e533e9e1c2b7f3fe65138"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMEncoder.mlpackage/Data/com.apple.CoreML/model.mlmodel",
+      "bytes": 168257,
+      "sha256": "23a4a3ba7a57b1ade3abe303c5361f4b51e4db0eecc4567bb78f31278a1ab0e6"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMEncoder.mlpackage/Data/com.apple.CoreML/weights/weight.bin",
+      "bytes": 22011712,
+      "sha256": "84e891ac9bef2c5518ca8b126e99930465e0cdd9a4ce1a3c937ed4086b4524e6"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMEncoder.mlpackage/Manifest.json",
+      "bytes": 617,
+      "sha256": "b935304ff513f4a149e23bc25a4b21ed9db1609e5df3eb78631524b783b22598"
+    },
+    {
+      "path": "Models/CEFRT2EdgeSAMEncoder_audit.json",
+      "bytes": 1154,
+      "sha256": "4b2e3426f1fb63828951d3c07ac6b2780257ed83daa134e7e1cd394a5eab1814"
+    },
+    {
+      "path": "NUMERIC_VALIDATION_REPORT.md",
+      "bytes": 3514,
+      "sha256": "cac8ffb74ae03be92c607079f23ebd57eb254797fb613f13e9f2582c5690a6e5"
+    },
+    {
+      "path": "Package.swift",
+      "bytes": 375,
+      "sha256": "690fb6c570b891e44a0140a74a6ae076afba7c229e32c5c0812311bdc46f8115"
+    },
+    {
+      "path": "README.md",
+      "bytes": 5661,
+      "sha256": "ffb23a747784446ca8b1e705946f2e68a5e1517add5b26daf4bd2ecb0181b7db"
+    },
+    {
+      "path": "Reference/EdgeSAM/mask_decoder.py",
+      "bytes": 7627,
+      "sha256": "2bc3e97cd37de6b42020986371b7c62a874f8aaf5aa0d36464efc0db1637ee96"
+    },
+    {
+      "path": "Reference/EdgeSAM/predictor.py",
+      "bytes": 12215,
+      "sha256": "7ed1f7c03161c871b7a4ec614bc17abea3b864e8e6b0de6b4106a0b66c5b1441"
+    },
+    {
+      "path": "Reference/EdgeSAM/prompt_encoder.py",
+      "bytes": 9142,
+      "sha256": "017a7a3caa0b50dbe31b1218a78d1d26ba8cee94ec3a05ed76863abac02b45e4"
+    },
+    {
+      "path": "Reference/EdgeSAM/sam.py",
+      "bytes": 12117,
+      "sha256": "f2889f5d14df151aaa358cfde674f007abf61c558df71b6c661b37c62075f86e"
+    },
+    {
+      "path": "Reference/EdgeSAM/transforms.py",
+      "bytes": 4759,
+      "sha256": "74a62a23e8de9742cf75fba6184717ecb8722408f7742124349054d5d41b66a4"
+    },
+    {
+      "path": "Reference/production_fp32_run_manifest_v1_2.json",
+      "bytes": 1414,
+      "sha256": "9636ffee6b198a6d7ad3eebe22e7491b1029e4ebc0c7bd6b1b587ed0cb5ed658"
+    },
+    {
+      "path": "Reference/ransac_quadrilateral.py",
+      "bytes": 18964,
+      "sha256": "92e2cd5222d115b19c3c24449e1bde98422311ebef34aca658cbe9da5cca8999"
+    },
+    {
+      "path": "Reference/README.md",
+      "bytes": 1696,
+      "sha256": "a3c5569b832ac25878a39060af8a8f908417f94cc3d0345507d08c7f7a5a0749"
+    },
+    {
+      "path": "Reference/run_production_edgesam_stage_f_fp32_v1.py",
+      "bytes": 18735,
+      "sha256": "119e0311bfb5480b3da3861254c2eba2d2ee533ecd3640af609fd203eb29597f"
+    },
+    {
+      "path": "Reference/run_production_rtdetr_stage_d_fp32_v1.py",
+      "bytes": 35134,
+      "sha256": "ba12d762f486f89ed345fc1dc255a5144b0694115e5ee87f5655749868861fdd"
+    },
+    {
+      "path": "Reference/run_rtdetr_progressive_feasibility_v1.py",
+      "bytes": 68257,
+      "sha256": "6ab08a7dcb254eff410346ef0b98d1205422b78995d723921b140a9c869cc5e7"
+    },
+    {
+      "path": "Reference/source_manifest.json",
+      "bytes": 4439,
+      "sha256": "a53f88b99d7c12d1a921b3e2c03f03481f125ca3cd4f0d2a605196ec4f8b2e62"
+    },
+    {
+      "path": "Reference/train_rtdetr_r18_visiblebox_crossfit.py",
+      "bytes": 30172,
+      "sha256": "ee96795f8290a12775007a649b27ad650b76948e4c6532784ecf9191ef06d280"
+    },
+    {
+      "path": "Sources/ChekiEdgeFitRT/FP32Component.swift",
+      "bytes": 5507,
+      "sha256": "f63a23e82e115abe268912b8b0f7e2e5710501fb34444173031bc3108f5eef09"
+    },
+    {
+      "path": "Tests/ChekiEdgeFitRTTests/ModelParityTests.swift",
+      "bytes": 3888,
+      "sha256": "9a087958c6f09ad6ace078883d9217925661913a9124865d428398c8b514d6e6"
+    },
+    {
+      "path": "TorchScript/CEFRT2Detector.pt",
+      "bytes": 82000063,
+      "sha256": "5ad254c851ea34eda21ed96171377768311890945f715e795ca429eb73b51f6f"
+    },
+    {
+      "path": "TorchScript/CEFRT2EdgeSAMBoxDecoder.pt",
+      "bytes": 16462156,
+      "sha256": "a1888d795ff2b17635e998f4739ad795cace8cde119c11d7fe78781bc313ee36"
+    },
+    {
+      "path": "TorchScript/CEFRT2EdgeSAMEncoder.pt",
+      "bytes": 23238750,
+      "sha256": "c49c4e7783c8bf360d62ff6c0857da11f9d33e69a94025e31b8d24d804ac9ca0"
+    },
+    {
+      "path": "torchscript_manifest.json",
+      "bytes": 13953,
+      "sha256": "1d29a414030958155e2b0ac3e7b414587b12c9619c77f26e20bd20e257b7cf72"
+    },
+    {
+      "path": "Validation/linux_torchscript_verification.json",
+      "bytes": 6815,
+      "sha256": "b8debf4ca1538019adea12b594c4eb6e4917b4ff32867ec5f44d647487d30924"
+    }
+  ]
+}

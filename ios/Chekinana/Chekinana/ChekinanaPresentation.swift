@@ -1,5 +1,29 @@
+import AVFoundation
 import Foundation
+import os
 import SwiftUI
+
+enum ChekinanaMediaPlaybackAudioSession {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Chekinana",
+        category: "media-playback-audio-session"
+    )
+
+    @discardableResult
+    static func activate(mode: AVAudioSession.Mode) -> Bool {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: mode)
+            try session.setActive(true)
+            return true
+        } catch {
+            logger.error(
+                "Unable to activate media playback audio session: \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+    }
+}
 
 enum ChekinanaHiddenIdolPersistence {
     static let defaultsKey = "chekinana.hidden-idol-ids.v1"
@@ -76,8 +100,9 @@ final class ChekinanaHiddenIdolStore: ObservableObject {
 enum ChekinanaAppLanguage: String, CaseIterable, Identifiable, Sendable {
     case system
     case simplifiedChinese = "zh-Hans"
-    case english = "en"
+    case traditionalChinese = "zh-Hant"
     case japanese = "ja"
+    case english = "en"
 
     var id: String { rawValue }
 
@@ -85,24 +110,136 @@ enum ChekinanaAppLanguage: String, CaseIterable, Identifiable, Sendable {
         rawValue.flatMap(Self.init(rawValue:)) ?? .system
     }
 
-    /// Settings intentionally hides English as a selectable destination while
-    /// retaining the enum case for persisted preferences, parsing and tests.
-    static var settingsVisibleCases: [ChekinanaAppLanguage] {
-        allCases.filter { $0 != .english }
-    }
+    static var settingsVisibleCases: [ChekinanaAppLanguage] { allCases }
 
     var title: String {
         switch self {
         case .system:
             ChekinanaProductCopy.text("settings.language.system", "Follow System")
         case .simplifiedChinese:
-            ChekinanaProductCopy.text("settings.language.zh_hans", "简体中文")
+            "简体中文"
+        case .traditionalChinese:
+            "繁體中文"
         case .english:
-            ChekinanaProductCopy.text("settings.language.en", "English")
+            "English"
         case .japanese:
-            ChekinanaProductCopy.text("settings.language.ja", "日本語")
+            "日本語"
         }
     }
+}
+
+enum ChekinanaAssistantReplyLanguage: Equatable, Sendable {
+    case simplifiedChinese
+    case traditionalChinese
+    case japanese
+    case english
+    case appLocalizationFallback
+
+    var appLanguage: ChekinanaAppLanguage? {
+        switch self {
+        case .simplifiedChinese: .simplifiedChinese
+        case .traditionalChinese: .traditionalChinese
+        case .japanese: .japanese
+        case .english: .english
+        case .appLocalizationFallback: nil
+        }
+    }
+
+    var locale: Locale {
+        appLanguage.map { Locale(identifier: $0.rawValue) } ?? .current
+    }
+
+    var switchConfirmation: String {
+        switch self {
+        case .simplifiedChinese: "已切换为简体中文。"
+        case .traditionalChinese: "已切換為繁體中文。"
+        case .japanese: "日本語で返信します。"
+        case .english: "I'll reply in English."
+        case .appLocalizationFallback: ""
+        }
+    }
+
+    static func interfaceFallback(
+        configuredLanguage: ChekinanaAppLanguage = ChekinanaLanguagePreference.language(),
+        preferredLocalizations: [String] = Bundle.main.preferredLocalizations,
+        preferredLanguages: [String] = Locale.preferredLanguages
+    ) -> Self {
+        if let explicit = from(configuredLanguage) {
+            return explicit
+        }
+        for identifier in preferredLocalizations + preferredLanguages {
+            if let resolved = from(identifier: identifier) {
+                return resolved
+            }
+        }
+        return .appLocalizationFallback
+    }
+
+    static func from(_ language: ChekinanaAppLanguage) -> Self? {
+        switch language {
+        case .simplifiedChinese: .simplifiedChinese
+        case .traditionalChinese: .traditionalChinese
+        case .japanese: .japanese
+        case .english: .english
+        case .system: nil
+        }
+    }
+
+    static func from(identifier: String) -> Self? {
+        let normalized = identifier.replacingOccurrences(of: "_", with: "-").lowercased()
+        if normalized == "zh-hans" || normalized.hasPrefix("zh-hans-")
+            || normalized == "zh-cn" || normalized.hasPrefix("zh-cn-")
+            || normalized == "zh-sg" || normalized.hasPrefix("zh-sg-") {
+            return .simplifiedChinese
+        }
+        if normalized == "zh-hant" || normalized.hasPrefix("zh-hant-")
+            || normalized == "zh-tw" || normalized.hasPrefix("zh-tw-")
+            || normalized == "zh-hk" || normalized.hasPrefix("zh-hk-")
+            || normalized == "zh-mo" || normalized.hasPrefix("zh-mo-") {
+            return .traditionalChinese
+        }
+        if normalized == "ja" || normalized.hasPrefix("ja-") { return .japanese }
+        if normalized == "en" || normalized.hasPrefix("en-") { return .english }
+        return nil
+    }
+
+    func localized<Result>(_ operation: () throws -> Result) rethrows -> Result {
+        try ChekinanaAssistantReplyLocalization.$language.withValue(self, operation: operation)
+    }
+
+    @MainActor
+    func localized<Result>(_ operation: @MainActor () async throws -> Result) async rethrows -> Result {
+        try await ChekinanaAssistantReplyLocalization.$language.withValue(self, operation: operation)
+    }
+
+    func text(_ key: String, fallback: String) -> String {
+        localized { ChekinanaL10n.text(key, fallback: fallback) }
+    }
+
+    func format(_ key: String, fallback: String, _ arguments: CVarArg...) -> String {
+        localized {
+            String(
+                format: ChekinanaL10n.text(key, fallback: fallback),
+                locale: locale,
+                arguments: arguments
+            )
+        }
+    }
+
+    func quantity(_ key: String, count: Int, one: String, other: String) -> String {
+        localized {
+            ChekinanaL10n.quantity(
+                key,
+                count: count,
+                one: one,
+                other: other
+            )
+        }
+    }
+}
+
+enum ChekinanaAssistantReplyLocalization {
+    @TaskLocal static var language: ChekinanaAssistantReplyLanguage?
 }
 
 enum ChekinanaLanguagePreference {
@@ -123,6 +260,9 @@ enum ChekinanaLanguagePreference {
         for language: ChekinanaAppLanguage? = nil,
         systemLocale: Locale = .current
     ) -> Locale {
+        if language == nil, let replyLanguage = ChekinanaAssistantReplyLocalization.language {
+            return replyLanguage.appLanguage.map { Locale(identifier: $0.rawValue) } ?? systemLocale
+        }
         let resolved = language ?? self.language()
         return resolved == .system ? systemLocale : Locale(identifier: resolved.rawValue)
     }
@@ -131,6 +271,13 @@ enum ChekinanaLanguagePreference {
         for language: ChekinanaAppLanguage? = nil,
         candidates: [Bundle] = [Bundle.main]
     ) -> Bundle {
+        if language == nil,
+           let replyLanguage = ChekinanaAssistantReplyLocalization.language {
+            guard let replyAppLanguage = replyLanguage.appLanguage else {
+                return candidates.first ?? .main
+            }
+            return localizationBundle(for: replyAppLanguage, candidates: candidates)
+        }
         let resolved = language ?? self.language()
         let fallback = candidates.first ?? .main
         guard resolved != .system else { return fallback }
@@ -175,7 +322,156 @@ final class ChekinanaLanguageStore: ObservableObject {
     }
 }
 
+enum ChekinanaThemeOption: String, CaseIterable, Identifiable, Sendable {
+    case green, blue, aqua, purple, pink, red, orange, yellow, gray
+
+    var id: String { rawValue }
+
+    static func resolve(_ rawValue: String?) -> Self {
+        rawValue.flatMap(Self.init(rawValue:)) ?? .purple
+    }
+
+    var title: String {
+        ChekinanaL10n.text("settings.theme.\(rawValue)", fallback: fallbackTitle)
+    }
+
+    private var fallbackTitle: String {
+        switch self {
+        case .green: "Green"
+        case .blue: "Blue"
+        case .aqua: "Aqua"
+        case .purple: "Purple"
+        case .pink: "Pink"
+        case .red: "Red"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .gray: "Gray"
+        }
+    }
+
+    var hex: String {
+        switch self {
+        case .green: "#2E7D32"
+        case .blue: "#1565C0"
+        case .aqua: "#0277BD"
+        case .purple: "#4F337A"
+        case .pink: "#AD1457"
+        case .red: "#C62828"
+        case .orange: "#E65100"
+        case .yellow: "#827717"
+        case .gray: "#616161"
+        }
+    }
+
+    var rgb: (red: Double, green: Double, blue: Double) {
+        let raw = UInt32(hex.dropFirst(), radix: 16) ?? 0
+        return (
+            Double((raw >> 16) & 0xFF) / 255,
+            Double((raw >> 8) & 0xFF) / 255,
+            Double(raw & 0xFF) / 255
+        )
+    }
+
+    var accent: Color {
+        Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    /// A theme-aware grouped-card tint made by blending 12% accent into white.
+    var softAccent: Color {
+        Color(
+            red: 0.88 + rgb.red * 0.12,
+            green: 0.88 + rgb.green * 0.12,
+            blue: 0.88 + rgb.blue * 0.12
+        )
+    }
+}
+
+enum ChekinanaThemePreference {
+    static let defaultsKey = "chekinana.app-theme.v1"
+
+    static func theme(defaults: UserDefaults = .standard) -> ChekinanaThemeOption {
+        ChekinanaThemeOption.resolve(defaults.string(forKey: defaultsKey))
+    }
+
+    static func set(
+        _ theme: ChekinanaThemeOption,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(theme.rawValue, forKey: defaultsKey)
+    }
+}
+
+final class ChekinanaThemeRenderState: Sendable {
+    private let storage: OSAllocatedUnfairLock<ChekinanaThemeOption>
+
+    init(_ theme: ChekinanaThemeOption) {
+        storage = OSAllocatedUnfairLock(initialState: theme)
+    }
+
+    var theme: ChekinanaThemeOption {
+        storage.withLock { $0 }
+    }
+
+    func update(_ theme: ChekinanaThemeOption) {
+        storage.withLock { $0 = theme }
+    }
+}
+
+@MainActor
+final class ChekinanaThemeStore: ObservableObject {
+    nonisolated private static let sharedRenderState = ChekinanaThemeRenderState(
+        ChekinanaThemePreference.theme()
+    )
+    static let shared = ChekinanaThemeStore(
+        defaults: .standard,
+        renderState: sharedRenderState
+    )
+
+    nonisolated static var currentTheme: ChekinanaThemeOption {
+        sharedRenderState.theme
+    }
+
+    private let defaults: UserDefaults
+    private let renderState: ChekinanaThemeRenderState
+    private(set) var revision: UInt64 = 0
+    private var storedTheme: ChekinanaThemeOption
+
+    var theme: ChekinanaThemeOption {
+        get { storedTheme }
+        set {
+            guard newValue != storedTheme else { return }
+            objectWillChange.send()
+            storedTheme = newValue
+            renderState.update(newValue)
+            revision &+= 1
+            ChekinanaThemePreference.set(newValue, defaults: defaults)
+        }
+    }
+
+    var accent: Color { theme.accent }
+    var softAccent: Color { theme.softAccent }
+
+    convenience init(defaults: UserDefaults) {
+        self.init(defaults: defaults, renderState: nil)
+    }
+
+    init(
+        defaults: UserDefaults,
+        renderState: ChekinanaThemeRenderState?
+    ) {
+        self.defaults = defaults
+        let initialTheme = ChekinanaThemePreference.theme(defaults: defaults)
+        storedTheme = initialTheme
+        self.renderState = renderState ?? ChekinanaThemeRenderState(initialTheme)
+        self.renderState.update(initialTheme)
+    }
+}
+
 private struct ChekinanaLanguageRevisionKey: EnvironmentKey {
+    static let defaultValue: UInt64 = 0
+}
+
+private struct ChekinanaThemeRevisionKey: EnvironmentKey {
     static let defaultValue: UInt64 = 0
 }
 
@@ -184,9 +480,27 @@ extension EnvironmentValues {
         get { self[ChekinanaLanguageRevisionKey.self] }
         set { self[ChekinanaLanguageRevisionKey.self] = newValue }
     }
+
+    var chekinanaThemeRevision: UInt64 {
+        get { self[ChekinanaThemeRevisionKey.self] }
+        set { self[ChekinanaThemeRevisionKey.self] = newValue }
+    }
 }
 
 enum ChekinanaL10n {
+    /// Localizes complete runtime messages while preserving native typed interpolation.
+    static func message(
+        _ value: String.LocalizationValue,
+        bundle: Bundle? = nil,
+        locale: Locale? = nil
+    ) -> String {
+        String(
+            localized: value,
+            bundle: bundle ?? ChekinanaLanguagePreference.localizationBundle(),
+            locale: locale ?? ChekinanaLanguagePreference.displayLocale()
+        )
+    }
+
     static func text(_ key: String, fallback: String, bundle: Bundle? = nil) -> String {
         NSLocalizedString(
             key,
@@ -211,7 +525,7 @@ enum ChekinanaL10n {
         )
     }
 
-    /// The app currently ships English, Simplified Chinese, and Japanese. A
+    /// The app ships English, Simplified/Traditional Chinese, and Japanese. A
     /// compact one/other split keeps quantity copy grammatical without making
     /// business logic depend on a translated string.
     static func quantity(
@@ -313,6 +627,14 @@ enum ChekinanaMediaBackedCreationError: LocalizedError, Equatable {
 }
 
 enum ChekinanaDisplayFormat {
+    static func timestamp(_ date: Date, includesDate: Bool = true) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = ChekinanaLanguagePreference.displayLocale()
+        formatter.dateStyle = includesDate ? .medium : .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
     static func date(_ canonicalDate: Date, calendar: Calendar = .current) -> String {
         let displayedDate = ChekinanaDateOnly.displayDate(
             from: canonicalDate,
@@ -370,9 +692,51 @@ extension ChekinanaIdolPalette {
     }
 }
 
+enum ChekinanaIdolColorInputError: LocalizedError, Equatable {
+    case unrecognized
+
+    var errorDescription: String? {
+        ChekinanaL10n.text(
+            "idol.color.invalid",
+            fallback: "Color could not be recognized. Enter an RGB value (for example, #4CAF50)."
+        )
+    }
+}
+
+enum ChekinanaIdolColorInputPolicy {
+    static func normalizedStorageValue(_ rawValue: String) throws -> String? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let canonical = ChekinanaIdolPalette.canonicalPresetName(trimmed) {
+            return canonical
+        }
+        if let localized = ChekinanaIdolPalette.presetStorageValues.first(where: {
+            ChekinanaIdolPalette.localizedTitle(forStorageValue: $0)
+                .caseInsensitiveCompare(trimmed) == .orderedSame
+        }) {
+            return localized
+        }
+        guard trimmed.count == 7, trimmed.first == "#",
+              UInt32(trimmed.dropFirst(), radix: 16) != nil else {
+            throw ChekinanaIdolColorInputError.unrecognized
+        }
+        let normalizedHex = trimmed.uppercased()
+        return ChekinanaIdolPalette.presetName(hex: normalizedHex) ?? normalizedHex
+    }
+
+    static func validationMessage(_ rawValue: String) -> String? {
+        do {
+            _ = try normalizedStorageValue(rawValue)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+}
+
 enum ChekinanaDesignSystem {
-    static let accent = Color(red: 0.31, green: 0.20, blue: 0.48)
-    static let softAccent = Color(red: 0.94, green: 0.92, blue: 0.97)
+    static var accent: Color { ChekinanaThemeStore.currentTheme.accent }
+    static var softAccent: Color { ChekinanaThemeStore.currentTheme.softAccent }
     static let pageBackground = Color(uiColor: .systemGroupedBackground)
     static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
     static let border = Color(uiColor: .separator).opacity(0.22)

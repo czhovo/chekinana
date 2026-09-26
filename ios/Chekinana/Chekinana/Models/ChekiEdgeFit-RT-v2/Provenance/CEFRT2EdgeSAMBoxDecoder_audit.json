@@ -1,0 +1,87 @@
+{
+  "name": "CEFRT2EdgeSAMBoxDecoder",
+  "path": "Models/CEFRT2EdgeSAMBoxDecoder.mlpackage",
+  "bytes": 24731091,
+  "sha256": "3270f1d27e18d320bcbeaf7d79d0ccfb269348e2086e88896aa4494c47a0e739",
+  "computePrecision": "FLOAT32",
+  "minimumDeploymentTarget": "iOS17",
+  "format": "mlprogram",
+  "inputs": [
+    {
+      "name": "image_embeddings",
+      "shape": [
+        1,
+        256,
+        64,
+        64
+      ],
+      "dtype": "float32"
+    },
+    {
+      "name": "box",
+      "shape": [
+        1,
+        4
+      ],
+      "dtype": "float32"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "mask_logits",
+      "shape": [
+        1,
+        1,
+        256,
+        256
+      ],
+      "dtype": "float32"
+    },
+    {
+      "name": "iou_prediction",
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "float32"
+    }
+  ],
+  "static_type_audit": {
+    "tensor_type_occurrences": {
+      "FLOAT32": 525,
+      "STRING": 603,
+      "INT32": 266,
+      "BOOL": 118
+    },
+    "operator_counts": {
+      "const": 344,
+      "add": 20,
+      "reshape": 47,
+      "slice_by_index": 12,
+      "mul": 11,
+      "scatter": 4,
+      "sub": 2,
+      "linear": 48,
+      "sin": 1,
+      "cos": 1,
+      "concat": 3,
+      "transpose": 31,
+      "matmul": 15,
+      "softmax": 7,
+      "layer_norm": 9,
+      "relu": 12,
+      "conv_transpose": 2,
+      "reduce_mean": 2,
+      "pow": 1,
+      "sqrt": 1,
+      "real_div": 1,
+      "batch_norm": 1,
+      "gelu": 2,
+      "stack": 1,
+      "identity": 1
+    },
+    "all_float_mil_types_fp32": true
+  },
+  "coreMLRuntimeParityPassed": false,
+  "conversionReady": true
+}

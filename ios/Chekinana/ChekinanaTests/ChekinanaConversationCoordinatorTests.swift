@@ -220,20 +220,23 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
     }
 
     func testPatternCountLabelUsesCorrectPluralization() {
+        let previous = ChekinanaLanguageStore.shared.language
+        defer { ChekinanaLanguageStore.shared.language = previous }
+        ChekinanaLanguageStore.shared.language = .english
         XCTAssertEqual(ChekinanaPatternCountLabel.text(0), "No patterns")
         XCTAssertEqual(ChekinanaPatternCountLabel.text(0, whenEmpty: "No pattern"), "No pattern")
         XCTAssertEqual(ChekinanaPatternCountLabel.text(1), "1 pattern")
         XCTAssertEqual(ChekinanaPatternCountLabel.text(2), "2 patterns")
     }
 
-    func testChekiCountLabelUsesLowercaseEnglishPluralization() throws {
+    func testChekiCountLabelUsesConsistentEnglishTerminology() throws {
         let bundle = try XCTUnwrap(
             Bundle(path: try XCTUnwrap(Bundle.main.path(forResource: "en", ofType: "lproj")))
         )
         let locale = Locale(identifier: "en")
         XCTAssertEqual(
             ChekinanaRecordKind.cheki.countLabel(0, bundle: bundle, locale: locale),
-            "0 chekis"
+            "0 Cheki"
         )
         XCTAssertEqual(
             ChekinanaRecordKind.cheki.countLabel(1, bundle: bundle, locale: locale),
@@ -241,7 +244,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(
             ChekinanaRecordKind.cheki.countLabel(2, bundle: bundle, locale: locale),
-            "2 chekis"
+            "2 Cheki"
         )
     }
 
@@ -392,7 +395,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         var state = ChekinanaCandidateSelectionState()
 
         state.reconcile(validIDs: [first, second])
-        XCTAssertEqual(state.selectedIDs, [first, second])
+        XCTAssertTrue(state.selectedIDs.isEmpty)
 
         state.selectedIDs.removeAll()
         state.reconcile(validIDs: [first, second])
@@ -403,10 +406,10 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         XCTAssertEqual(state.selectedIDs, [first])
 
         state.reconcile(validIDs: [first, second, newlyEligible])
-        XCTAssertEqual(state.selectedIDs, [first, newlyEligible])
+        XCTAssertEqual(state.selectedIDs, [first])
 
         state.reconcile(validIDs: [second, newlyEligible])
-        XCTAssertEqual(state.selectedIDs, [newlyEligible])
+        XCTAssertTrue(state.selectedIDs.isEmpty)
     }
     func testGreetingIsHandledLocallyWithoutSwallowingARequestedAction() {
         XCTAssertEqual(
@@ -889,7 +892,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
 
     func testTypedSelectedChekiReferenceUsesOnlyLocalSelectionAfterLLM() throws {
         let fixture = try makeFixture()
-        let cheki = Cheki(note: "selected")
+        let cheki = MediaItem(kind: .cheki, mediaRef: "selected.jpg", note: "selected")
         fixture.context.insert(cheki)
         try fixture.context.save()
         var selections = ChekinanaConversationSelections()
@@ -1583,6 +1586,16 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
             XCTAssertNil(translation.command, input)
             XCTAssertEqual(translation.disposition, .localClarification, "\(input): \(translation.message)")
         }
+        for value in ["denoise", "off", "sharpen"] {
+            let input = "scancheki postprocess=\(value)"
+            let translation = ChekinanaNaturalLanguageTranslator.translate(input)
+            XCTAssertNil(translation.command, input)
+            XCTAssertEqual(
+                translation.disposition,
+                .localClarification,
+                "\(input): \(translation.message)"
+            )
+        }
     }
 
     func testCredentialedEventURLFailsClosedAndNeverAppearsInTranslation() {
@@ -1658,14 +1671,14 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
         }
         XCTAssertEqual(cards.count, 1)
         XCTAssertNotNil(cards[0].confirmationCode)
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testWorkerParityCompilesExplicitIdolClearsAndChekiUserPatchesWithoutSentinels() throws {
         let fixture = try makeFixture()
         let idol = Idol(name: "Mina", bio: "bio")
         fixture.context.insert(idol)
-        let cheki = Cheki(userAppears: true)
+        let cheki = MediaItem(kind: .cheki, userAppears: true, mediaRef: "two-shot.jpg")
         fixture.context.insert(cheki)
         cheki.idols = [idol]
         try fixture.context.save()
@@ -1707,7 +1720,7 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
     }
 
     private func makeFixture() throws -> Fixture {
-        let schema = Schema([Idol.self, Event.self, EventImage.self, Cheki.self])
+        let schema = Schema([Idol.self, Event.self, EventImage.self, MediaItem.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -1741,11 +1754,12 @@ final class ChekinanaConversationCoordinatorTests: XCTestCase {
     }
 
     private func cleanupManagedImages(in context: ModelContext) {
-        guard let chekis = try? context.fetch(FetchDescriptor<Cheki>()) else { return }
+        guard let chekis = try? context.fetch(FetchDescriptor<MediaItem>()) else { return }
         for cheki in chekis {
+            guard cheki.kind == .cheki else { continue }
             guard let url = ChekiImageRefResolver.managedChekiFileURL(
                 for: cheki.imageRef,
-                chekiID: cheki.id
+                chekiID: cheki.mediaOwnerID
             ) else { continue }
             try? FileManager.default.removeItem(at: url)
         }

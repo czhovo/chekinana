@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A921F8D69448434BA1620101 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A921F8D69448434BA1620111 /* PrivacyInfo.xcprivacy */; };
 		1A1A1A1A1A1A1A1A1A1A1A01 /* ChekinanaApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A11 /* ChekinanaApp.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A02 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A12 /* ContentView.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A03 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A13 /* Assets.xcassets */; };
@@ -16,27 +17,46 @@
 		1A1A1A1A1A1A1A1A1A1A1A07 /* ChekinanaIdolEnrichmentClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A18 /* ChekinanaIdolEnrichmentClient.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A08 /* ChekinanaAlbumPickerStateMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */; };
 		1A1A1A1A1A1A1A1A1A1A1A09 /* ChekinanaNaturalLanguageTranslator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */; };
+		2B2B2B2B2B2B2B2B2B2B2B01 /* ChekinanaNaturalLanguageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */; };
 		3C3C3C3C3C3C3C3C3C3C3C01 /* ChekinanaChekiIndexing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */; };
+		370037003700370037003701 /* ChekinanaMatchGameLocalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 370037003700370037003711 /* ChekinanaMatchGameLocalizationTests.swift */; };
+		4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */; };
 		5E5E5E5E5E5E5E5E5E5E5E01 /* ChekinanaNLInterpretClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */; };
 		5E5E5E5E5E5E5E5E5E5E5E02 /* ChekinanaConversationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */; };
 		5E5E5E5E5E5E5E5E5E5E5E03 /* ChekinanaNLInterpretClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */; };
-		E7E7E7E7E7E7E7E7E7E7E703 /* ChekinanaChekiRokuImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E713 /* ChekinanaChekiRokuImportTests.swift */; };
 		5E5E5E5E5E5E5E5E5E5E5E04 /* ChekinanaConversationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */; };
 		7F7F7F7F7F7F7F7F7F7F7F01 /* ChekinanaEventCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */; };
 		8A8A8A8A8A8A8A8A8A8A8A01 /* ChekinanaPatternEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8A8A8A8A8A8A8A8A8A8A11 /* ChekinanaPatternEncoder.swift */; };
-		8A8A8A8A8A8A8A8A8A8A8A02 /* ChekiPatternEncoder.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 8A8A8A8A8A8A8A8A8A8A8A12 /* ChekiPatternEncoder.mlpackage */; };
+		B0D2F19E64034A1590C63701 /* ChekinanaBoundedImageDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D2F19E64034A1590C63711 /* ChekinanaBoundedImageDownload.swift */; };
+		8A8A8A8A8A8A8A8A8A8A8A02 /* Models/ChekiPatternEncoder.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 8A8A8A8A8A8A8A8A8A8A8A12 /* Models/ChekiPatternEncoder.mlpackage */; };
 		9B9B9B9B9B9B9B9B9B9B9B01 /* ChekinanaProductShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B9B9B9B9B9B9B9B9B9B9B11 /* ChekinanaProductShell.swift */; };
-		E7E7E7E7E7E7E7E7E7E7E701 /* ChekinanaChekiRokuImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E711 /* ChekinanaChekiRokuImport.swift */; };
-		E7E7E7E7E7E7E7E7E7E7E702 /* ChekinanaChekiRokuImportWizard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */; };
-		4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */; };
-		2B2B2B2B2B2B2B2B2B2B2B01 /* ChekinanaNaturalLanguageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */; };
 		9C9C9C9C9C9C9C9C9C9C9C01 /* ChekinanaProductShellUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9C9C9C9C9C9C9C9C9C9C11 /* ChekinanaProductShellUITests.swift */; };
+		AB12CD34EF56AB78CD90EF01 /* ChekinanaScheduleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */; };
+		BACC0001BACC0001BACC0001 /* ChekinanaDataExportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACC0011BACC0011BACC0011 /* ChekinanaDataExportTests.swift */; };
+		CEEF0001CEEF0001CEEF0001 /* ChekinanaOnDeviceScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEEF0011CEEF0011CEEF0011 /* ChekinanaOnDeviceScanner.swift */; };
+		D01100000000000000000011 /* Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = E01100000000000000000011 /* Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage */; };
+		D01200000000000000000012 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = E01200000000000000000012 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage */; };
+		D01300000000000000000013 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = E01300000000000000000013 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage */; };
+		D01400000000000000000014 /* Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = E01400000000000000000014 /* Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json */; };
+		D01500000000000000000015 /* Models/ChekiEdgeFit-RT-v2/Provenance in Resources */ = {isa = PBXBuildFile; fileRef = E01500000000000000000015 /* Models/ChekiEdgeFit-RT-v2/Provenance */; };
+		D01600000000000000000016 /* ChekinanaEdgeFitRTV2Detector.swift in Sources */ = {isa = PBXBuildFile; fileRef = E01600000000000000000016 /* ChekinanaEdgeFitRTV2Detector.swift */; };
+		D01700000000000000000017 /* ChekinanaEdgeFitRTV2ReferenceMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = E01700000000000000000017 /* ChekinanaEdgeFitRTV2ReferenceMath.swift */; };
+		D01800000000000000000018 /* Resources/ChekiEdgeFitRTV2 in Resources */ = {isa = PBXBuildFile; fileRef = E01800000000000000000018 /* Resources/ChekiEdgeFitRTV2 */; };
 		D1D1D1D1D1D1D1D1D1D1D101 /* MatchGameEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1D1D1D1D1D1D1D1D1D1D111 /* MatchGameEngine.swift */; };
 		D1D1D1D1D1D1D1D1D1D1D102 /* MatchGameView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1D1D1D1D1D1D1D1D1D1D112 /* MatchGameView.swift */; };
-		D1D1D1D1D1D1D1D1D1D1D103 /* MatchGame in Resources */ = {isa = PBXBuildFile; fileRef = D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */; };
+		D1D1D1D1D1D1D1D1D1D1D103 /* Resources/MatchGame in Resources */ = {isa = PBXBuildFile; fileRef = D1D1D1D1D1D1D1D1D1D1D113 /* Resources/MatchGame */; };
+		DEB0C1EA0000000000000001 /* ChekinanaDebugMediaItemNoteClearer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEB0C1EA0000000000000011 /* ChekinanaDebugMediaItemNoteClearer.swift */; };
+		DEB0C1EA0000000000000002 /* ChekinanaDebugMediaItemNoteClearerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEB0C1EA0000000000000012 /* ChekinanaDebugMediaItemNoteClearerTests.swift */; };
+		E7E7E7E7E7E7E7E7E7E7E701 /* ChekinanaChekiRokuImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E711 /* ChekinanaChekiRokuImport.swift */; };
+		E7E7E7E7E7E7E7E7E7E7E702 /* ChekinanaChekiRokuImportWizard.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */; };
+		E7E7E7E7E7E7E7E7E7E7E703 /* ChekinanaChekiRokuImportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E7E7E7E7E7E7E7E7E7E713 /* ChekinanaChekiRokuImportTests.swift */; };
 		F6F6F6F6F6F6F6F6F6F6F601 /* ChekinanaPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */; };
 		F6F6F6F6F6F6F6F6F6F6F602 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */; };
-		AB12CD34EF56AB78CD90EF01 /* ChekinanaScheduleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */; };
+		C10CA1100000000000000002 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = C10CA1100000000000000001 /* InfoPlist.strings */; };
+		A55157000000000000000001 /* ChekinanaAssistantDialogue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55157000000000000000011 /* ChekinanaAssistantDialogue.swift */; };
+		A55157000000000000000002 /* ChekinanaAssistantStatistics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55157000000000000000012 /* ChekinanaAssistantStatistics.swift */; };
+		A55157000000000000000003 /* ChekinanaAssistantStatisticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55157000000000000000013 /* ChekinanaAssistantStatisticsTests.swift */; };
+		A55157000000000000000004 /* ChekinanaAssistantDialogueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55157000000000000000014 /* ChekinanaAssistantDialogueTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +77,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A921F8D69448434BA1620111 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A10 /* Chekinana.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Chekinana.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A1A1A1A1A1A1A1A1A1A1A11 /* ChekinanaApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaApp.swift; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A12 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -68,30 +89,52 @@
 		1A1A1A1A1A1A1A1A1A1A1A18 /* ChekinanaIdolEnrichmentClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaIdolEnrichmentClient.swift; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAlbumPickerStateMachine.swift; sourceTree = "<group>"; };
 		1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageTranslator.swift; sourceTree = "<group>"; };
+		2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageUITests.swift; sourceTree = "<group>"; };
 		3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiIndexing.swift; sourceTree = "<group>"; };
+		370037003700370037003711 /* ChekinanaMatchGameLocalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaMatchGameLocalizationTests.swift; sourceTree = "<group>"; };
+		4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandExecutorTests.swift; sourceTree = "<group>"; };
 		5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNLInterpretClient.swift; sourceTree = "<group>"; };
 		5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaConversationCoordinator.swift; sourceTree = "<group>"; };
 		5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNLInterpretClientTests.swift; sourceTree = "<group>"; };
-		E7E7E7E7E7E7E7E7E7E7E713 /* ChekinanaChekiRokuImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImportTests.swift; sourceTree = "<group>"; };
 		5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaConversationCoordinatorTests.swift; sourceTree = "<group>"; };
+		6C6C6C6C6C6C6C6C6C6C6C11 /* Config/Chekinana.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Chekinana.xcconfig; sourceTree = SOURCE_ROOT; };
 		7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaEventCandidate.swift; sourceTree = "<group>"; };
 		8A8A8A8A8A8A8A8A8A8A8A11 /* ChekinanaPatternEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaPatternEncoder.swift; sourceTree = "<group>"; };
-		8A8A8A8A8A8A8A8A8A8A8A12 /* ChekiPatternEncoder.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = Models/ChekiPatternEncoder.mlpackage; sourceTree = "<group>"; };
+		B0D2F19E64034A1590C63711 /* ChekinanaBoundedImageDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaBoundedImageDownload.swift; sourceTree = "<group>"; };
+		8A8A8A8A8A8A8A8A8A8A8A12 /* Models/ChekiPatternEncoder.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = Models/ChekiPatternEncoder.mlpackage; sourceTree = "<group>"; };
 		9B9B9B9B9B9B9B9B9B9B9B11 /* ChekinanaProductShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaProductShell.swift; sourceTree = "<group>"; };
-		E7E7E7E7E7E7E7E7E7E7E711 /* ChekinanaChekiRokuImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImport.swift; sourceTree = "<group>"; };
-		E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImportWizard.swift; sourceTree = "<group>"; };
-		4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandExecutorTests.swift; sourceTree = "<group>"; };
-		2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageUITests.swift; sourceTree = "<group>"; };
 		9C9C9C9C9C9C9C9C9C9C9C11 /* ChekinanaProductShellUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaProductShellUITests.swift; sourceTree = "<group>"; };
-		6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Chekinana.xcconfig; sourceTree = SOURCE_ROOT; };
+		AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaScheduleClient.swift; sourceTree = "<group>"; };
+		BACC0011BACC0011BACC0011 /* ChekinanaDataExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaDataExportTests.swift; sourceTree = "<group>"; };
+		CEEF0011CEEF0011CEEF0011 /* ChekinanaOnDeviceScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaOnDeviceScanner.swift; sourceTree = "<group>"; };
 		D1D1D1D1D1D1D1D1D1D1D111 /* MatchGameEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchGameEngine.swift; sourceTree = "<group>"; };
 		D1D1D1D1D1D1D1D1D1D1D112 /* MatchGameView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchGameView.swift; sourceTree = "<group>"; };
-		D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/MatchGame; sourceTree = "<group>"; };
+		D1D1D1D1D1D1D1D1D1D1D113 /* Resources/MatchGame */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/MatchGame; sourceTree = "<group>"; };
+		DEB0C1EA0000000000000011 /* ChekinanaDebugMediaItemNoteClearer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaDebugMediaItemNoteClearer.swift; sourceTree = "<group>"; };
+		DEB0C1EA0000000000000012 /* ChekinanaDebugMediaItemNoteClearerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaDebugMediaItemNoteClearerTests.swift; sourceTree = "<group>"; };
+		E01100000000000000000011 /* Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = "Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage"; sourceTree = "<group>"; };
+		E01200000000000000000012 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = "Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage"; sourceTree = "<group>"; };
+		E01300000000000000000013 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = "Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage"; sourceTree = "<group>"; };
+		E01400000000000000000014 /* Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json"; sourceTree = "<group>"; };
+		E01500000000000000000015 /* Models/ChekiEdgeFit-RT-v2/Provenance */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "Models/ChekiEdgeFit-RT-v2/Provenance"; sourceTree = "<group>"; };
+		E01600000000000000000016 /* ChekinanaEdgeFitRTV2Detector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaEdgeFitRTV2Detector.swift; sourceTree = "<group>"; };
+		E01700000000000000000017 /* ChekinanaEdgeFitRTV2ReferenceMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaEdgeFitRTV2ReferenceMath.swift; sourceTree = "<group>"; };
+		E01800000000000000000018 /* Resources/ChekiEdgeFitRTV2 */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ChekiEdgeFitRTV2; sourceTree = "<group>"; };
+		E7E7E7E7E7E7E7E7E7E7E711 /* ChekinanaChekiRokuImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImport.swift; sourceTree = "<group>"; };
+		E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImportWizard.swift; sourceTree = "<group>"; };
+		E7E7E7E7E7E7E7E7E7E7E713 /* ChekinanaChekiRokuImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiRokuImportTests.swift; sourceTree = "<group>"; };
 		F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaPresentation.swift; sourceTree = "<group>"; };
 		F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
-		AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaScheduleClient.swift; sourceTree = "<group>"; };
+		C10CA1100000000000000003 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en"; path = "en.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		C10CA1100000000000000004 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "ja"; path = "ja.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		C10CA1100000000000000005 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		C10CA1100000000000000006 /* zh-Hant */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hant"; path = "zh-Hant.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		A55157000000000000000011 /* ChekinanaAssistantDialogue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAssistantDialogue.swift; sourceTree = "<group>"; };
+		A55157000000000000000012 /* ChekinanaAssistantStatistics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAssistantStatistics.swift; sourceTree = "<group>"; };
+		A55157000000000000000013 /* ChekinanaAssistantStatisticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAssistantStatisticsTests.swift; sourceTree = "<group>"; };
+		A55157000000000000000014 /* ChekinanaAssistantDialogueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaAssistantDialogueTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -122,7 +165,7 @@
 		1A1A1A1A1A1A1A1A1A1A1A30 = {
 			isa = PBXGroup;
 			children = (
-				6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */,
+				6C6C6C6C6C6C6C6C6C6C6C11 /* Config/Chekinana.xcconfig */,
 				1A1A1A1A1A1A1A1A1A1A1A31 /* Chekinana */,
 				4D4D4D4D4D4D4D4D4D4D4D31 /* ChekinanaTests */,
 				2B2B2B2B2B2B2B2B2B2B2B31 /* ChekinanaUITests */,
@@ -146,18 +189,32 @@
 				5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */,
 				7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */,
 				8A8A8A8A8A8A8A8A8A8A8A11 /* ChekinanaPatternEncoder.swift */,
+				B0D2F19E64034A1590C63711 /* ChekinanaBoundedImageDownload.swift */,
 				9B9B9B9B9B9B9B9B9B9B9B11 /* ChekinanaProductShell.swift */,
 				E7E7E7E7E7E7E7E7E7E7E711 /* ChekinanaChekiRokuImport.swift */,
 				E7E7E7E7E7E7E7E7E7E7E712 /* ChekinanaChekiRokuImportWizard.swift */,
 				F6F6F6F6F6F6F6F6F6F6F611 /* ChekinanaPresentation.swift */,
+				A55157000000000000000012 /* ChekinanaAssistantStatistics.swift */,
+				A55157000000000000000011 /* ChekinanaAssistantDialogue.swift */,
 				F6F6F6F6F6F6F6F6F6F6F612 /* Localizable.xcstrings */,
+				C10CA1100000000000000001 /* InfoPlist.strings */,
 				AB12CD34EF56AB78CD90EF11 /* ChekinanaScheduleClient.swift */,
+				CEEF0011CEEF0011CEEF0011 /* ChekinanaOnDeviceScanner.swift */,
+				E01600000000000000000016 /* ChekinanaEdgeFitRTV2Detector.swift */,
+				E01700000000000000000017 /* ChekinanaEdgeFitRTV2ReferenceMath.swift */,
 				D1D1D1D1D1D1D1D1D1D1D111 /* MatchGameEngine.swift */,
 				D1D1D1D1D1D1D1D1D1D1D112 /* MatchGameView.swift */,
-				D1D1D1D1D1D1D1D1D1D1D113 /* MatchGame */,
-				8A8A8A8A8A8A8A8A8A8A8A12 /* ChekiPatternEncoder.mlpackage */,
+				DEB0C1EA0000000000000011 /* ChekinanaDebugMediaItemNoteClearer.swift */,
+				D1D1D1D1D1D1D1D1D1D1D113 /* Resources/MatchGame */,
+				8A8A8A8A8A8A8A8A8A8A8A12 /* Models/ChekiPatternEncoder.mlpackage */,
+				E01100000000000000000011 /* Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage */,
+				E01200000000000000000012 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage */,
+				E01300000000000000000013 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage */,
+				E01400000000000000000014 /* Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json */,
+				E01500000000000000000015 /* Models/ChekiEdgeFit-RT-v2/Provenance */,
 				1A1A1A1A1A1A1A1A1A1A1A13 /* Assets.xcassets */,
 				1A1A1A1A1A1A1A1A1A1A1A14 /* Info.plist */,
+				A921F8D69448434BA1620111 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Chekinana;
 			sourceTree = "<group>";
@@ -184,10 +241,16 @@
 		4D4D4D4D4D4D4D4D4D4D4D31 /* ChekinanaTests */ = {
 			isa = PBXGroup;
 			children = (
+				370037003700370037003711 /* ChekinanaMatchGameLocalizationTests.swift */,
 				4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */,
+				A55157000000000000000014 /* ChekinanaAssistantDialogueTests.swift */,
+				A55157000000000000000013 /* ChekinanaAssistantStatisticsTests.swift */,
+				BACC0011BACC0011BACC0011 /* ChekinanaDataExportTests.swift */,
+				DEB0C1EA0000000000000012 /* ChekinanaDebugMediaItemNoteClearerTests.swift */,
 				5E5E5E5E5E5E5E5E5E5E5E13 /* ChekinanaNLInterpretClientTests.swift */,
 				E7E7E7E7E7E7E7E7E7E7E713 /* ChekinanaChekiRokuImportTests.swift */,
 				5E5E5E5E5E5E5E5E5E5E5E14 /* ChekinanaConversationCoordinatorTests.swift */,
+				E01800000000000000000018 /* Resources/ChekiEdgeFitRTV2 */,
 			);
 			path = ChekinanaTests;
 			sourceTree = "<group>";
@@ -279,6 +342,7 @@
 				en,
 				ja,
 				"zh-Hans",
+				"zh-Hant",
 				Base,
 			);
 			mainGroup = 1A1A1A1A1A1A1A1A1A1A1A30;
@@ -298,9 +362,13 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A921F8D69448434BA1620101 /* PrivacyInfo.xcprivacy in Resources */,
 				1A1A1A1A1A1A1A1A1A1A1A03 /* Assets.xcassets in Resources */,
-				D1D1D1D1D1D1D1D1D1D1D103 /* MatchGame in Resources */,
+				D1D1D1D1D1D1D1D1D1D1D103 /* Resources/MatchGame in Resources */,
 				F6F6F6F6F6F6F6F6F6F6F602 /* Localizable.xcstrings in Resources */,
+				C10CA1100000000000000002 /* InfoPlist.strings in Resources */,
+				D01400000000000000000014 /* Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json in Resources */,
+				D01500000000000000000015 /* Models/ChekiEdgeFit-RT-v2/Provenance in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,6 +383,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D01800000000000000000018 /* Resources/ChekiEdgeFitRTV2 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -338,14 +407,24 @@
 				5E5E5E5E5E5E5E5E5E5E5E02 /* ChekinanaConversationCoordinator.swift in Sources */,
 				7F7F7F7F7F7F7F7F7F7F7F01 /* ChekinanaEventCandidate.swift in Sources */,
 				8A8A8A8A8A8A8A8A8A8A8A01 /* ChekinanaPatternEncoder.swift in Sources */,
-				8A8A8A8A8A8A8A8A8A8A8A02 /* ChekiPatternEncoder.mlpackage in Sources */,
+				B0D2F19E64034A1590C63701 /* ChekinanaBoundedImageDownload.swift in Sources */,
+				8A8A8A8A8A8A8A8A8A8A8A02 /* Models/ChekiPatternEncoder.mlpackage in Sources */,
 				9B9B9B9B9B9B9B9B9B9B9B01 /* ChekinanaProductShell.swift in Sources */,
 				E7E7E7E7E7E7E7E7E7E7E701 /* ChekinanaChekiRokuImport.swift in Sources */,
 				E7E7E7E7E7E7E7E7E7E7E702 /* ChekinanaChekiRokuImportWizard.swift in Sources */,
 				F6F6F6F6F6F6F6F6F6F6F601 /* ChekinanaPresentation.swift in Sources */,
+				A55157000000000000000002 /* ChekinanaAssistantStatistics.swift in Sources */,
+				A55157000000000000000001 /* ChekinanaAssistantDialogue.swift in Sources */,
 				AB12CD34EF56AB78CD90EF01 /* ChekinanaScheduleClient.swift in Sources */,
+				CEEF0001CEEF0001CEEF0001 /* ChekinanaOnDeviceScanner.swift in Sources */,
+				D01600000000000000000016 /* ChekinanaEdgeFitRTV2Detector.swift in Sources */,
+				D01700000000000000000017 /* ChekinanaEdgeFitRTV2ReferenceMath.swift in Sources */,
+				D01100000000000000000011 /* Models/ChekiEdgeFit-RT-v2/CEFRT2Detector.mlpackage in Sources */,
+				D01200000000000000000012 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMEncoder.mlpackage in Sources */,
+				D01300000000000000000013 /* Models/ChekiEdgeFit-RT-v2/CEFRT2EdgeSAMBoxDecoder.mlpackage in Sources */,
 				D1D1D1D1D1D1D1D1D1D1D101 /* MatchGameEngine.swift in Sources */,
 				D1D1D1D1D1D1D1D1D1D1D102 /* MatchGameView.swift in Sources */,
+				DEB0C1EA0000000000000001 /* ChekinanaDebugMediaItemNoteClearer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -362,7 +441,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				370037003700370037003701 /* ChekinanaMatchGameLocalizationTests.swift in Sources */,
 				4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */,
+				A55157000000000000000004 /* ChekinanaAssistantDialogueTests.swift in Sources */,
+				A55157000000000000000003 /* ChekinanaAssistantStatisticsTests.swift in Sources */,
+				BACC0001BACC0001BACC0001 /* ChekinanaDataExportTests.swift in Sources */,
+				DEB0C1EA0000000000000002 /* ChekinanaDebugMediaItemNoteClearerTests.swift in Sources */,
 				5E5E5E5E5E5E5E5E5E5E5E03 /* ChekinanaNLInterpretClientTests.swift in Sources */,
 				E7E7E7E7E7E7E7E7E7E7E703 /* ChekinanaChekiRokuImportTests.swift in Sources */,
 				5E5E5E5E5E5E5E5E5E5E5E04 /* ChekinanaConversationCoordinatorTests.swift in Sources */,
@@ -384,11 +468,26 @@
 		};
 /* End PBXTargetDependency section */
 
+/* Begin PBXVariantGroup section */
+		C10CA1100000000000000001 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				C10CA1100000000000000003 /* en */,
+				C10CA1100000000000000004 /* ja */,
+				C10CA1100000000000000005 /* zh-Hans */,
+				C10CA1100000000000000006 /* zh-Hant */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
 /* Begin XCBuildConfiguration section */
 		1A1A1A1A1A1A1A1A1A1A1A71 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */;
+			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Config/Chekinana.xcconfig */;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -412,6 +511,7 @@
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -419,8 +519,9 @@
 		};
 		1A1A1A1A1A1A1A1A1A1A1A72 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Chekinana.xcconfig */;
+			baseConfigurationReference = 6C6C6C6C6C6C6C6C6C6C6C11 /* Config/Chekinana.xcconfig */;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

@@ -91,6 +91,36 @@ def check_white_balance():
     assert np.mean(balanced[0:8, 0:8]) > np.mean(image[0:8, 0:8])
 
 
+def check_white_balance_accepts_bright_cyan_border():
+    border_color = np.array([150, 200, 220], dtype=np.uint8)
+    linear_border = backend_app.srgb_u8_to_linear_rgb(border_color)
+    bright_threshold = backend_app.srgb_channel_to_linear(140.0 / 255.0)
+    assert np.all(linear_border > bright_threshold)
+    assert np.min(border_color) < 170
+    assert np.std(linear_border) > 25.0 / 255.0
+
+    image = np.full((192, 192, 3), border_color, dtype=np.uint8)
+    image[48:144, 48:144] = [70, 80, 90]
+    geometry = {
+        "image_area_vertices": np.array(
+            [[48, 48], [144, 48], [144, 144], [48, 144]],
+            dtype=np.int32,
+        ),
+        "white_balance_block_size": 48,
+        "white_balance_step": 24,
+    }
+
+    balanced, info = backend_app.apply_fixed_border_white_balance(image, geometry)
+
+    assert info["applied"] is True
+    assert info["blocks"] > 0
+    assert 1 <= info["used_blocks"] <= 10
+    before_channels = image[0:48, 0:48].mean(axis=(0, 1))
+    after_channels = balanced[0:48, 0:48].mean(axis=(0, 1))
+    assert np.ptp(after_channels) < np.ptp(before_channels)
+    assert np.max(np.abs(after_channels - 240.0)) <= 1.0
+
+
 def check_postprocessing_steps():
     image = make_noisy_rgb()
     off, off_info = backend_app.apply_postprocess_mode(image.copy(), "off")
@@ -161,6 +191,7 @@ def main():
     started = time.time()
     check_parsing()
     check_white_balance()
+    check_white_balance_accepts_bright_cyan_border()
     check_postprocessing_steps()
     check_api_contract()
     print(f"postprocessing mode checks passed in {time.time() - started:.2f}s")

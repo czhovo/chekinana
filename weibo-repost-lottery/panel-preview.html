@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>微博抽奖工具v4</title>
+</head>
+<body>
+  <script src="./shortcut.js"></script>
+  <script>
+    (() => {
+      const openBlockedTerms = () => {
+        const host = document.getElementById("__weibo_repost_lottery__");
+        const manageButton = host?.shadowRoot?.querySelector("#wrl-manage-blocked");
+        if (manageButton) {
+          manageButton.click();
+          return;
+        }
+        requestAnimationFrame(openBlockedTerms);
+      };
+      openBlockedTerms();
+    })();
+  </script>
+</body>
+</html>

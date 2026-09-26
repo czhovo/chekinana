@@ -2,7 +2,7 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Deliberately local-only ChekiRoku import UI.  It never calls the idol catalogue.
+/// ChekiRoku identities are reviewed against the catalogue before any writes.
 struct ChekinanaChekiRokuImportWizard: View {
     let archive: ChekinanaChekiRokuImport.Archive
     let onClose: () -> Void
@@ -15,7 +15,11 @@ struct ChekinanaChekiRokuImportWizard: View {
     @State private var isSaving = false
     @State private var isPlanning = false
     @State private var isMatching = false
+    @State private var matchingTask: Task<Void, Never>?
+    @State private var matchingGeneration: UUID?
     @State private var cachedPlan: ChekiRokuRecordPlan?
+    @State private var selectedRecordRowIDs = Set<Int>()
+    @State private var ignoresRecordNotes = false
     @State private var recordImporter: ChekiRokuRecordImportActor?
     @State private var progress = ""
     @State private var progressCompleted = 0
@@ -43,15 +47,20 @@ struct ChekinanaChekiRokuImportWizard: View {
             else if step == 1 { idolStep }
             else { recordStep }
         }
-        .navigationTitle(ChekinanaL10n.text("import.title", fallback: "Import from ChekiRoku"))
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) { finish() }.disabled(isSaving || isPlanning || isMatching).accessibilityIdentifier("chekinana.import.wizard.cancel") } }
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                ChekinanaChekiRokuNavigationTitle()
+            }
+            ToolbarItem(placement: .cancellationAction) { Button(ChekinanaL10n.text("action.back", fallback: "Back")) { finish() }.disabled(isSaving || isPlanning).accessibilityIdentifier("chekinana.import.wizard.cancel") }
+        }
         .tint(ChekinanaDesignSystem.accent)
         .background(ChekinanaDesignSystem.pageBackground)
-        .navigationBarBackButtonHidden(isSaving || isPlanning || isMatching)
-        .interactiveDismissDisabled(isSaving || isPlanning || isMatching)
+        .navigationBarBackButtonHidden(isSaving || isPlanning)
+        .interactiveDismissDisabled(isSaving || isPlanning)
         .onChange(of: isSaving || isPlanning || isMatching) { _, busy in isExternallyBusy = busy }
         .onAppear { if drafts.isEmpty && !isMatching { prepareDrafts() } }
-        .onDisappear { if !completed { ChekinanaChekiRokuImport.cleanup(archive) } }
+        .onDisappear { cancelMatching(); if !completed { ChekinanaChekiRokuImport.cleanup(archive) } }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chekinana.import.wizard")
     }
@@ -60,7 +69,7 @@ struct ChekinanaChekiRokuImportWizard: View {
         List {
             Section {
                 ChekiRokuStepHeader(step: 1, title: ChekinanaL10n.text("import.step1", fallback: "Step 1 of 2 · Add Idols"))
-                Text(ChekinanaL10n.text("import.review", fallback: "Review each source Idol. Existing local Idols are skipped; ambiguous matches require a choice."))
+                Text(ChekinanaL10n.text("import.review", fallback: "Review the local Idol matches. New Idols use a unique name-and-group catalogue match, or the backup profile if the search fails."))
                     .font(.footnote).foregroundStyle(.secondary)
                 Text(ChekinanaL10n.format(
                     "import.selected_count",
@@ -74,13 +83,16 @@ struct ChekinanaChekiRokuImportWizard: View {
                 HStack {
                     Button(ChekinanaL10n.text("import.select_all", fallback: "Select All")) {
                         ChekiRokuMemberSelectionPolicy.setAll(true, drafts: &drafts)
+                        matchDrafts()
                     }
+                        .buttonStyle(.borderless)
                         .disabled(!draftControlsEnabled)
                         .accessibilityIdentifier("chekinana.import.step1.select-all")
                     Spacer()
                     Button(ChekinanaL10n.text("import.deselect_all", fallback: "Deselect All")) {
                         ChekiRokuMemberSelectionPolicy.setAll(false, drafts: &drafts)
                     }
+                        .buttonStyle(.borderless)
                         .disabled(!draftControlsEnabled)
                         .accessibilityIdentifier("chekinana.import.step1.deselect-all")
                 }
@@ -93,7 +105,13 @@ struct ChekinanaChekiRokuImportWizard: View {
                             fallback: "Include source Idol #%lld",
                             Int64(draft.memberID)
                         ),
-                        isOn: $draft.isSelected
+                        isOn: Binding(
+                            get: { draft.isSelected },
+                            set: { selected in
+                                draft.isSelected = selected
+                                if selected { matchDrafts(memberIDs: [draft.memberID]) }
+                            }
+                        )
                     )
                         .disabled(!draftControlsEnabled)
                         .accessibilityValue(
@@ -123,6 +141,8 @@ struct ChekinanaChekiRokuImportWizard: View {
                     }
                     .disabled(!draftControlsEnabled || !draft.isSelected)
                     .opacity(draft.isSelected ? 1 : 0.55)
+                    .onChange(of: draft.query) { _, _ in invalidateMatch(memberID: draft.memberID) }
+                    if draft.choice != .create || draft.catalogueCandidate == nil {
                     TextField(
                         ChekinanaL10n.text("import.color", fallback: "Color"),
                         text: localizedColorBinding($draft.color)
@@ -132,6 +152,16 @@ struct ChekinanaChekiRokuImportWizard: View {
                     .autocorrectionDisabled()
                     .disabled(!draftControlsEnabled || !draft.isSelected)
                     .opacity(draft.isSelected ? 1 : 0.55)
+                    if draft.isSelected,
+                       draft.choice == .create,
+                       let colorError = ChekinanaIdolColorInputPolicy
+                        .validationMessage(draft.color) {
+                        Text(colorError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    }
                     if !draft.isSelected {
                         Text(ChekinanaL10n.text(
                             "import.member_excluded",
@@ -163,10 +193,13 @@ struct ChekinanaChekiRokuImportWizard: View {
                                 .font(.footnote)
                                 .foregroundStyle(.orange)
                         }
-                    } else {
-                        Text(draft.choice.isExisting
-                            ? ChekinanaL10n.text("import.existing_skip", fallback: "Existing Idol — will skip")
-                            : ChekinanaL10n.text("import.new_create", fallback: "New Idol — will create"))
+                    }
+                    if draft.isSelected && draft.choice == .create {
+                        Text(catalogueSummary(draft))
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if draft.isSelected && draft.matchCandidates.count <= 1 {
+                        Text(ChekinanaL10n.text("import.existing_skip", fallback: "Existing Idol — will skip"))
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 } header: { Text(ChekinanaL10n.format("import.source_idol", fallback: "Source Idol #%lld", Int64(draft.memberID))) }
@@ -189,7 +222,7 @@ struct ChekinanaChekiRokuImportWizard: View {
         .safeAreaInset(edge: .bottom) {
             Button(ChekinanaL10n.text("import.action.continue", fallback: "Continue to Records")) { saveIdols() }
                 .buttonStyle(.borderedProminent).padding()
-                .disabled(isSaving || !ChekiRokuMemberSelectionPolicy.canAdvance(drafts))
+                .disabled(isSaving || isMatching || !ChekiRokuMemberSelectionPolicy.canAdvance(drafts))
                 .accessibilityIdentifier("chekinana.import.step1.continue")
         }
         .accessibilityElement(children: .contain)
@@ -205,15 +238,54 @@ struct ChekinanaChekiRokuImportWizard: View {
                     "import.record_summary",
                     fallback: "Source rows: %1$lld · Records to add: %2$lld",
                     Int64(selectedSourceRowCount),
-                    Int64(recordPlan.newCount)
+                    Int64(selectedRecordCount)
                 ))
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            ForEach(recordPlan.summaries, id: \.idolID) { item in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.idolName)
-                    Text(item.label).font(.footnote).foregroundStyle(.secondary)
+            Section {
+                HStack {
+                    Button(ChekinanaL10n.text("import.select_all", fallback: "Select All")) {
+                        selectedRecordRowIDs = Set(recordPlan.rows.map(\.sourceIndex))
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("chekinana.import.step2.select-all")
+                    Spacer()
+                    Button(ChekinanaL10n.text("import.deselect_all", fallback: "Deselect All")) {
+                        selectedRecordRowIDs.removeAll()
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("chekinana.import.step2.deselect-all")
                 }
+                Toggle(ChekinanaL10n.text("import.records.ignore_notes", fallback: "Ignore notes"), isOn: $ignoresRecordNotes)
+                    .accessibilityIdentifier("chekinana.import.step2.ignore-notes")
+            }
+            .disabled(isSaving || isPlanning)
+            ForEach(recordPlan.rows) { row in
+                Toggle(isOn: Binding(
+                    get: { selectedRecordRowIDs.contains(row.sourceIndex) },
+                    set: { selected in
+                        if selected { selectedRecordRowIDs.insert(row.sourceIndex) }
+                        else { selectedRecordRowIDs.remove(row.sourceIndex) }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(recordPlan.idolNames[row.idolID] ?? "")
+                        Text(row.day.map(ChekinanaDateOnly.string)
+                             ?? ChekinanaProductCopy.text("common.no_date", "No date"))
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Text(ChekinanaL10n.format(
+                            "import.records.row_quantity",
+                            fallback: "Source quantity: %1$lld · To add: %2$lld",
+                            Int64(recordPlan.sourceRecords[row.sourceIndex].count), Int64(row.count)
+                        ))
+                        .font(.footnote).foregroundStyle(.secondary)
+                        if !ignoresRecordNotes && !row.memo.isEmpty {
+                            Text(row.memo).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .disabled(isSaving || isPlanning)
+                .accessibilityIdentifier("chekinana.import.step2.row.\(row.sourceIndex)")
             }
             if !progress.isEmpty { Section { importProgress } }
             if let message { Section { Text(message).foregroundStyle(.red) } }
@@ -267,14 +339,14 @@ struct ChekinanaChekiRokuImportWizard: View {
     private var recordImportButton: some View {
         Button(ChekinanaL10n.quantity(
             "import.action.records",
-            count: recordPlan.newCount,
+            count: selectedRecordCount,
             one: "Import %lld Record",
             other: "Import %lld Records"
         )) {
             Task { await saveRecords() }
         }
         .buttonStyle(.borderedProminent)
-        .disabled(isSaving || isPlanning || cachedPlan == nil || recordImporter == nil)
+        .disabled(isSaving || isPlanning || cachedPlan == nil || recordImporter == nil || selectedRecordCount == 0)
         .accessibilityIdentifier("chekinana.import.step2.import")
     }
 
@@ -308,12 +380,15 @@ struct ChekinanaChekiRokuImportWizard: View {
     }
 
     private func prepareDrafts() {
+        cancelMatching()
+        let generation = UUID()
+        matchingGeneration = generation
         isMatching = true; progress = ChekinanaL10n.text("import.stage.matching", fallback: "Matching Idols")
         let source = archive.idols.map(ChekiRokuPreparedSourceIdol.init)
         let avatarData = archive.imageData
         let local = localIdols.map(ChekiRokuLocalIdol.init)
         let idolsByID = Dictionary(uniqueKeysWithValues: localIdols.map { ($0.id, $0) })
-        Task { @MainActor in
+        matchingTask = Task { @MainActor in
             async let matchingResults = Task.detached {
                 source.map { sourceIdol in
                     ChekiRokuMatchResult(
@@ -324,6 +399,7 @@ struct ChekinanaChekiRokuImportWizard: View {
             }.value
             async let previewResults = ChekiRokuAvatarPreviewer.makePreviews(avatarData)
             let (results, previews) = await (matchingResults, previewResults)
+            guard !Task.isCancelled, matchingGeneration == generation else { return }
             drafts = results.map { result in
                 let candidates = result.candidates.compactMap { idolsByID[$0.id] }
                 let exact = result.candidates.filter { $0.exact(result.source) }
@@ -338,53 +414,164 @@ struct ChekinanaChekiRokuImportWizard: View {
                     avatarPreview: sourceIdol.avatarName.flatMap { previews[$0] },
                     matchCandidates: candidates,
                     choice: resolved.map { .existing($0) }
-                        ?? (candidates.count > 1 ? .unresolved : .create)
+                        ?? (candidates.count > 1 ? .unresolved : .create),
+                    isSelected: false
                 )
             }
-            isMatching = false; progress = ""
+            matchingGeneration = nil; matchingTask = nil; isMatching = false; progress = ""
+        }
+    }
+
+    private func matchDrafts(memberIDs: Set<Int>? = nil) {
+        guard !isSaving, !isMatching else { return }
+        let generation = UUID()
+        matchingGeneration = generation
+        isMatching = true
+        message = nil
+        progress = ChekinanaL10n.text("import.stage.matching", fallback: "Searching Idol catalogue…")
+        matchingTask = Task { @MainActor in await resolveDrafts(generation: generation, memberIDs: memberIDs) }
+    }
+
+    @MainActor
+    private func resolveDrafts(generation: UUID, memberIDs: Set<Int>?) async {
+        defer {
+            if matchingGeneration == generation {
+                matchingGeneration = nil; matchingTask = nil; isMatching = false; progress = ""
+            }
+        }
+        let queries = ChekiRokuMemberSelectionPolicy.catalogueQueries(drafts, memberIDs: memberIDs)
+        do {
+            let results = try await ChekiRokuCatalogueMatching.resolve(queries)
+            try Task.checkCancellation()
+            guard matchingGeneration == generation else { return }
+            for index in drafts.indices {
+                guard drafts[index].isSelected, drafts[index].choice == .create,
+                      memberIDs?.contains(drafts[index].memberID) ?? true,
+                      let resolution = results[drafts[index].query] else { continue }
+                drafts[index].resolution = resolution
+            }
+        } catch is CancellationError {
+            // Closing this wizard is never permission to create fallback Idols.
+        } catch {
+            guard matchingGeneration == generation else { return }
+            message = error.localizedDescription
+        }
+    }
+
+    private func cancelMatching() {
+        matchingGeneration = nil; matchingTask?.cancel(); matchingTask = nil
+        isMatching = false; progress = ""
+    }
+
+    private func invalidateMatch(memberID: Int) {
+        guard let index = drafts.firstIndex(where: { $0.memberID == memberID }),
+              !drafts[index].hasCurrentResolution else { return }
+        drafts[index].resolution = nil
+    }
+
+    private func catalogueSummary(_ draft: ChekiRokuIdolDraft) -> String {
+        guard let resolution = draft.resolution, resolution.query == draft.query else {
+            return ChekinanaL10n.text("import.catalogue.pending", fallback: "Search the current name and group before continuing.")
+        }
+        switch resolution.outcome {
+        case .matched(let candidate):
+            return ChekinanaL10n.format("import.catalogue.matched", fallback: "Catalogue match: %1$@ · %2$@", candidate.idolName, candidate.groupName ?? "")
+        case .fallback(let reason):
+            let reasonText: String
+            switch reason {
+            case .missingGroup: reasonText = ChekinanaL10n.text("import.catalogue.missing_group", fallback: "Group is missing and cannot be verified.")
+            case .notFound: reasonText = ChekinanaL10n.text("import.catalogue.not_found", fallback: "No exact name match was found.")
+            case .groupMismatch: reasonText = ChekinanaL10n.text("import.catalogue.group_mismatch", fallback: "The group does not match.")
+            case .ambiguous: reasonText = ChekinanaL10n.text("import.catalogue.ambiguous", fallback: "More than one catalogue match was found.")
+            case .unavailable: reasonText = ChekinanaL10n.text("import.catalogue.unavailable", fallback: "The catalogue search failed.")
+            case .incomplete: reasonText = ChekinanaL10n.text("import.catalogue.incomplete", fallback: "Search results may be incomplete.")
+            case .invalidMetadata: reasonText = ChekinanaL10n.text("import.catalogue.invalid", fallback: "The catalogue profile contains invalid data.")
+            }
+            return ChekinanaL10n.format("import.catalogue.fallback", fallback: "%@ Using the backup profile.", reasonText)
         }
     }
 
     private func saveIdols() {
-        guard !isSaving, ChekiRokuMemberSelectionPolicy.canAdvance(drafts) else { return }
+        guard !isSaving, !isMatching, ChekiRokuMemberSelectionPolicy.canAdvance(drafts) else { return }
         let selectedIDs = ChekiRokuMemberSelectionPolicy.selectedMemberIDs(drafts)
         let selectedDrafts = drafts.filter(\.isSelected)
+        let previousMap = memberMap
         selectedSourceRowCount = selectedSourceRecords.count
         memberMap = memberMap.filter { selectedIDs.contains($0.key) }
-        isDraftFieldFocused = false; isSaving = true; progressTotal = selectedDrafts.count; progressCompleted = 0; progress = ChekinanaL10n.format("import.progress.idol", fallback: "Adding Idol %lld/%lld", 0, Int64(selectedDrafts.count)); message = nil
+        isDraftFieldFocused = false; isSaving = true; progressTotal = selectedDrafts.count; progressCompleted = 0
+        progress = ChekinanaL10n.format("import.progress.idol", fallback: "Adding Idol %lld/%lld", 0, Int64(selectedDrafts.count)); message = nil
         Task { @MainActor in
-            var created: [Idol] = []; var staged: [(Idol, ChekinanaIdolReferenceStore.StoredAvatar)] = []
             do {
-                for (offset, draft) in selectedDrafts.enumerated() {
-                    progress = ChekinanaL10n.format("import.progress.idol_name", fallback: "Adding Idol %1$lld/%2$lld · %3$@", Int64(offset + 1), Int64(selectedDrafts.count), draft.name)
-                    await Task.yield()
-                    guard !ChekinanaChekiRokuImport.normalized(draft.name).isEmpty else { throw ChekiRokuImportUIError.invalidName }
-                    switch draft.choice {
-                    case .unresolved:
-                        throw ChekiRokuImportUIError.unresolvedMember(draft.memberID)
-                    case .existing(let id):
-                        guard localIdols.contains(where: { $0.id == id }) else { throw ChekiRokuImportUIError.missingIdol(draft.memberID) }
-                        memberMap[draft.memberID] = id
-                    case .create:
-                        let idol = Idol(name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines), group: draft.group.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty, color: draft.color.nilIfEmpty)
-                        if let data = draft.avatarData {
-                            guard let safeAvatar = await safeAvatarData(data) else { throw ChekiRokuImportUIError.invalidAvatar }
-                            let saved = try await ChekinanaIdolReferenceStore.saveAvatar(safeAvatar, idolID: idol.id); idol.avatarImageRef = saved.ref; staged.append((idol, saved))
+                try await ChekinanaLibraryMutationProtocol.withExclusiveOperation {
+                    try ChekinanaLibraryMutationPreflight.requireImportConvergedExclusively(in: modelContext)
+                    let previousAutosave = modelContext.autosaveEnabled
+                    modelContext.autosaveEnabled = false
+                    defer { modelContext.autosaveEnabled = previousAutosave }
+                    var transactions: [(ChekinanaIdolAvatarStagingTransaction, Idol)] = []
+                    do {
+                        for (offset, draft) in selectedDrafts.enumerated() {
+                            try Task.checkCancellation()
+                            guard !ChekinanaChekiRokuImport.normalized(draft.name).isEmpty else { throw ChekiRokuImportUIError.invalidName }
+                            progress = ChekinanaL10n.format("import.progress.idol_name", fallback: "Adding Idol %1$lld/%2$lld · %3$@", Int64(offset + 1), Int64(selectedDrafts.count), draft.name)
+                            switch draft.choice {
+                            case .unresolved: throw ChekiRokuImportUIError.unresolvedMember(draft.memberID)
+                            case .existing(let id):
+                                guard localIdols.contains(where: { $0.id == id }) else { throw ChekiRokuImportUIError.missingIdol(draft.memberID) }
+                                memberMap[draft.memberID] = id
+                            case .create:
+                                guard draft.hasCurrentResolution else { throw ChekiRokuImportUIError.unresolvedMember(draft.memberID) }
+                                let idol: Idol
+                                if let candidate = draft.catalogueCandidate {
+                                    let candidate = try ChekinanaBirthdayValue.normalizedCatalogueCandidate(candidate)
+                                    let patterns = try await ChekinanaRemotePatternResources.shared.patterns(for: candidate.patternIds)
+                                    let prepared = try await ChekinanaCatalogueIdolAvatarResolver.prepare(candidate)
+                                    try Task.checkCancellation()
+                                    idol = Idol(sourceId: candidate.sourceId, name: candidate.idolName, group: candidate.groupName,
+                                                color: candidate.color, birthday: candidate.birthday, verification: candidate.verification,
+                                                bio: candidate.bio, patterns: patterns)
+                                    let transaction = try ChekinanaIdolAvatarStagingTransaction(in: modelContext)
+                                    transactions.append((transaction, idol))
+                                    idol.avatarImageRef = try await transaction.stage(prepared, idolID: idol.id).ref
+                                    modelContext.insert(IdolPatternState(idolID: idol.id, encoderVersion: ChekinanaPatternContract.encoderVersion,
+                                                                         cataloguePatternIDs: candidate.patternIds, cataloguePatternCount: patterns.count))
+                                    _ = try ChekinanaIdolAvatarStatePersistence.record(idolID: idol.id, source: .catalogue, intent: .userSelected, in: modelContext)
+                                } else {
+                                    idol = Idol(name: draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                                group: draft.group.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                                                color: try ChekinanaIdolColorInputPolicy.normalizedStorageValue(draft.color))
+                                    if let data = draft.avatarData {
+                                        guard let safeAvatar = await safeAvatarData(data) else { throw ChekiRokuImportUIError.invalidAvatar }
+                                        try Task.checkCancellation()
+                                        let transaction = try ChekinanaIdolAvatarStagingTransaction(in: modelContext)
+                                        transactions.append((transaction, idol))
+                                        idol.avatarImageRef = try await transaction.stage(safeAvatar, idolID: idol.id).ref
+                                        _ = try ChekinanaIdolAvatarStatePersistence.record(idolID: idol.id, source: .custom, intent: .userSelected, in: modelContext)
+                                    }
+                                }
+                                modelContext.insert(idol); memberMap[draft.memberID] = idol.id
+                            }
+                            progressCompleted = offset + 1
                         }
-                        modelContext.insert(idol); created.append(idol); memberMap[draft.memberID] = idol.id
+                        try Task.checkCancellation()
+                        try modelContext.save()
+                    } catch {
+                        modelContext.rollback()
+                        memberMap = previousMap
+                        let pendingCleanup = transactions.reduce(false) { pending, entry in
+                            let failed = entry.0.rollback() != nil
+                            return pending || failed
+                        }
+                        if pendingCleanup { throw ChekinanaCatalogueIdolAvatarLocalizerError.cleanupRequired }
+                        throw error
                     }
-                    progressCompleted = offset + 1
+                    for (transaction, idol) in transactions { transaction.commit(referencedImageRef: idol.avatarImageRef) }
                 }
-                try modelContext.save()
                 for index in drafts.indices where drafts[index].isSelected {
-                    if let id = memberMap[drafts[index].memberID] {
-                        drafts[index].choice = .existing(id)
-                    }
+                    if let id = memberMap[drafts[index].memberID] { drafts[index].choice = .existing(id) }
                 }
                 step = 2; progress = ""; progressCompleted = 0; progressTotal = 0; cachedPlan = nil; recordImporter = nil; planRecords()
             } catch {
-                modelContext.rollback(); for (_, saved) in staged { try? FileManager.default.removeItem(at: saved.url) }; created.forEach { modelContext.delete($0) }
-                message = error.localizedDescription; progress = ""
+                memberMap = previousMap; message = error.localizedDescription; progress = ""
             }
             isSaving = false
         }
@@ -397,6 +584,12 @@ struct ChekinanaChekiRokuImportWizard: View {
     }
 
     private var recordPlan: ChekiRokuRecordPlan { cachedPlan ?? .init(items: []) }
+    private var recordSelection: ChekiRokuRecordImportPlanner.Selection {
+        .init(quantities: Dictionary(uniqueKeysWithValues: recordPlan.rows.compactMap {
+            selectedRecordRowIDs.contains($0.sourceIndex) ? ($0.sourceIndex, $0.count) : nil
+        }), ignoresNotes: ignoresRecordNotes)
+    }
+    private var selectedRecordCount: Int { recordSelection.quantities.values.reduce(0, +) }
     private func planRecords() {
         guard !isPlanning else { return }
         isPlanning = true; progressTotal = 0; progressCompleted = 0; progress = ChekinanaL10n.text("import.stage.planning", fallback: "Planning records")
@@ -418,7 +611,8 @@ struct ChekinanaChekiRokuImportWizard: View {
                 let planner = await Task.detached(priority: .userInitiated) {
                     ChekiRokuRecordImportActor(modelContainer: container)
                 }.value
-                let planned = try await planner.plan(records: records, memberMap: members)
+                let plannedRows = try await planner.planRows(records: records, memberMap: members)
+                let planned = try ChekiRokuRecordImportPlanner.makeItems(from: plannedRows)
                 guard planned.allSatisfy({ namesByID[$0.idolID] != nil }) else { throw ChekiRokuImportUIError.unmappedRecord }
                 cachedPlan = .init(
                     items: planned.map { value in
@@ -430,10 +624,12 @@ struct ChekinanaChekiRokuImportWizard: View {
                         memoRuns: value.memoRuns
                     )
                     },
+                    rows: plannedRows,
                     sourceRecords: records,
                     memberMap: members,
                     idolNames: namesByID
                 )
+                selectedRecordRowIDs = Set(plannedRows.map(\.sourceIndex))
                 // Planning fetches all relevant local record relationships. Use a
                 // fresh actor for commit so those registered objects can be
                 // released before thousands of new models are inserted.
@@ -449,7 +645,10 @@ struct ChekinanaChekiRokuImportWizard: View {
         }
     }
     private func saveRecords() async {
-        guard !isSaving, let recordImporter, let cachedPlan else { return }; isSaving = true; progressTotal = cachedPlan.newCount; progressCompleted = 0; progress = ChekinanaL10n.text("import.stage.adding_records", fallback: "Adding records…"); message = nil
+        guard !isSaving, !isPlanning, let recordImporter, let cachedPlan,
+              selectedRecordCount > 0 else { return }
+        let selection = recordSelection
+        isSaving = true; progressTotal = selectedRecordCount; progressCompleted = 0; progress = ChekinanaL10n.text("import.stage.adding_records", fallback: "Adding records…"); message = nil
         let commitID = UUID()
         activeRecordCommitID = commitID
         do {
@@ -457,7 +656,8 @@ struct ChekinanaChekiRokuImportWizard: View {
                 commitID: commitID,
                 records: cachedPlan.sourceRecords,
                 memberMap: cachedPlan.memberMap,
-                idolNames: cachedPlan.idolNames
+                idolNames: cachedPlan.idolNames,
+                selection: selection
             ) { update in
                 guard ChekiRokuRecordProgressPolicy.shouldAccept(
                     activeCommitID: activeRecordCommitID,
@@ -496,7 +696,8 @@ struct ChekinanaChekiRokuImportWizard: View {
         isSaving = false
     }
     private func finish() {
-        guard !isSaving, !isPlanning, !isMatching else { return }
+        guard !isSaving, !isPlanning else { return }
+        cancelMatching()
         ChekinanaChekiRokuImport.cleanup(archive)
         onClose()
     }
@@ -620,9 +821,25 @@ struct ChekiRokuIdolDraft: Identifiable {
     let matchCandidates: [Idol]
     var choice: ChekiRokuIdolChoice
     var isSelected: Bool = true
+    var resolution: ChekiRokuCatalogueMatching.Resolution? = nil
+
+    var query: ChekiRokuCatalogueMatching.Query { .init(name: name, group: group) }
+    var hasCurrentResolution: Bool { resolution?.query == query }
+    var catalogueCandidate: ChekinanaEnrichedIdol? {
+        guard let resolution, resolution.query == query,
+              case .matched(let candidate) = resolution.outcome else { return nil }
+        return candidate
+    }
 }
 
 enum ChekiRokuMemberSelectionPolicy {
+    static func catalogueQueries(_ drafts: [ChekiRokuIdolDraft], memberIDs: Set<Int>? = nil) -> [ChekiRokuCatalogueMatching.Query] {
+        drafts.filter {
+            $0.isSelected && $0.choice == .create && !$0.hasCurrentResolution
+                && (memberIDs?.contains($0.memberID) ?? true)
+        }.map(\.query)
+    }
+
     static func controlsEnabled(isSaving: Bool, isMatching: Bool) -> Bool {
         !isSaving && !isMatching
     }
@@ -638,7 +855,7 @@ enum ChekiRokuMemberSelectionPolicy {
     static func canAdvance(_ drafts: [ChekiRokuIdolDraft]) -> Bool {
         drafts.lazy.filter(\.isSelected).allSatisfy {
             !ChekinanaChekiRokuImport.normalized($0.name).isEmpty
-                && $0.choice.isResolved
+                && $0.choice.isResolved && ($0.choice != .create || $0.hasCurrentResolution)
         }
     }
 
@@ -742,6 +959,7 @@ struct ChekiRokuPlanItem: Sendable {
 }
 private struct ChekiRokuRecordPlan {
  let items: [ChekiRokuPlanItem]
+ let rows: [ChekiRokuRecordImportPlanner.Row]
  let summaries: [Summary]
  let newCount: Int
  let sourceRecords: [ChekinanaChekiRokuImport.SourceRecord]
@@ -753,11 +971,13 @@ private struct ChekiRokuRecordPlan {
  /// UI summary only: one deterministic row per idol, never one row per date/object.
  init(
     items: [ChekiRokuPlanItem],
+    rows: [ChekiRokuRecordImportPlanner.Row] = [],
     sourceRecords: [ChekinanaChekiRokuImport.SourceRecord] = [],
     memberMap: [Int: UUID] = [:],
     idolNames: [UUID: String] = [:]
  ) {
     self.items = items
+    self.rows = rows
     self.sourceRecords = sourceRecords
     self.memberMap = memberMap
     self.idolNames = idolNames
@@ -793,71 +1013,91 @@ struct ChekiRokuRecordImportPlanner {
     }
     struct MemoRun: Sendable, Equatable { let memo: String; let count: Int }
     struct Item: Sendable { let idolID: UUID; let day: Date?; let category: Int; let memoRuns: [MemoRun]; var count: Int { memoRuns.reduce(0) { $0 + $1.count } } }
+    struct Row: Identifiable, Sendable {
+        let sourceIndex: Int
+        let idolID: UUID
+        let day: Date?
+        let memo: String
+        let count: Int
+        var id: Int { sourceIndex }
+    }
+    struct Selection: Sendable {
+        let quantities: [Int: Int]
+        let ignoresNotes: Bool
+    }
     private struct Key: Hashable { let idolID: UUID; let day: Date?; let category: Int }
+
     static func make(records: [ChekinanaChekiRokuImport.SourceRecord], memberMap: [Int: UUID], existing: [Existing]) throws -> [Item] {
-        var rows: [Key: [ChekinanaChekiRokuImport.SourceRecord]] = [:]
-        for record in records {
+        try makeItems(from: makeRows(records: records, memberMap: memberMap, existing: existing))
+    }
+
+    // Preserve each source position until live quota deduction and user authorization
+    // are both complete. Identical dates and notes do not collapse selection identity.
+    static func makeRows(
+        records: [ChekinanaChekiRokuImport.SourceRecord],
+        memberMap: [Int: UUID],
+        existing: [Existing]
+    ) throws -> [Row] {
+        var rows: [Key: [(index: Int, record: ChekinanaChekiRokuImport.SourceRecord)]] = [:]
+        for (index, record) in records.enumerated() {
             guard record.category == 1,
                   let idolID = memberMap[record.memberID],
                   record.count > 0 else { continue }
-            let key = Key(
-                idolID: idolID,
-                day: record.date.flatMap(ChekinanaDateOnly.canonicalized),
-                category: 1
-            )
-            rows[key, default: []].append(record)
+            let key = Key(idolID: idolID, day: record.date.flatMap(ChekinanaDateOnly.canonicalized), category: 1)
+            rows[key, default: []].append((index, record))
         }
-        var existingByKey: [Key: Int] = [:]
+        var existingByKey: [Key: [Int]] = [:]
         for value in existing {
             guard value.category == 1 else { continue }
             let key = Key(idolID: value.idolID, day: value.day.flatMap(ChekinanaDateOnly.canonicalized), category: value.category)
-            existingByKey[key] = try ChekinanaChekiRecordStore.checkedCountSum(
-                existingByKey[key] ?? 0,
-                value.count
-            )
+            guard rows[key] != nil else { continue }
+            existingByKey[key, default: []].append(value.count)
         }
-        var items: [Item] = []
+        var result: [Row] = []
         for key in rows.keys.sorted(by: { "\($0.idolID)-\($0.day?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude)-\($0.category)" < "\($1.idolID)-\($1.day?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude)-\($1.category)" }) {
-            let skip = existingByKey[key] ?? 0
-            var ignored = skip; var memoRuns: [MemoRun] = []
-            for row in rows[key] ?? [] {
-                let skipped = min(ignored, row.count)
-                ignored -= skipped
-                let remaining = row.count - skipped
+            let quotas = existingByKey[key] ?? []
+            var quotaIndex = 0
+            var availableQuota = 0
+            for entry in rows[key] ?? [] {
+                var remaining = entry.record.count
+                while remaining > 0 {
+                    if availableQuota == 0 {
+                        guard quotaIndex < quotas.count else { break }
+                        availableQuota = quotas[quotaIndex]
+                        quotaIndex += 1
+                    }
+                    let skipped = min(availableQuota, remaining)
+                    availableQuota -= skipped
+                    remaining -= skipped
+                }
                 guard remaining > 0 else { continue }
-                if let last = memoRuns.last, last.memo == row.memo {
-                    memoRuns[memoRuns.count - 1] = MemoRun(
-                        memo: last.memo,
-                        count: try ChekinanaChekiRecordStore.checkedCountSum(
-                            last.count,
-                            remaining
-                        )
-                    )
-                } else {
-                    memoRuns.append(MemoRun(memo: row.memo, count: remaining))
-                }
-            }
-            if !memoRuns.isEmpty {
-                _ = try memoRuns.reduce(0) { partialResult, run in
-                    try ChekinanaChekiRecordStore.checkedCountSum(
-                        partialResult,
-                        run.count
-                    )
-                }
-                items.append(Item(
-                    idolID: key.idolID,
-                    day: key.day,
-                    category: key.category,
-                    memoRuns: memoRuns
-                ))
+                result.append(Row(sourceIndex: entry.index, idolID: key.idolID,
+                                  day: key.day, memo: entry.record.memo, count: remaining))
             }
         }
-        _ = try items.reduce(0) { partialResult, item in
-            try ChekinanaChekiRecordStore.checkedCountSum(
-                partialResult,
-                item.count
-            )
+        _ = try result.reduce(0) { try ChekinanaChekiRecordStore.checkedCountSum($0, $1.count) }
+        return result
+    }
+
+    static func makeItems(from rows: [Row], selection: Selection? = nil) throws -> [Item] {
+        var runsByKey: [Key: [MemoRun]] = [:]
+        var orderedKeys: [Key] = []
+        for row in rows {
+            let count = selection.map { min(row.count, max(0, $0.quantities[row.sourceIndex] ?? 0)) } ?? row.count
+            guard count > 0 else { continue }
+            let key = Key(idolID: row.idolID, day: row.day, category: 1)
+            if runsByKey[key] == nil { orderedKeys.append(key) }
+            let memo = selection?.ignoresNotes == true ? "" : row.memo
+            var runs = runsByKey[key] ?? []
+            if let last = runs.last, last.memo == memo {
+                runs[runs.count - 1] = MemoRun(memo: memo, count: try ChekinanaChekiRecordStore.checkedCountSum(last.count, count))
+            } else {
+                runs.append(MemoRun(memo: memo, count: count))
+            }
+            runsByKey[key] = runs
         }
+        let items = orderedKeys.map { Item(idolID: $0.idolID, day: $0.day, category: 1, memoRuns: runsByKey[$0] ?? []) }
+        _ = try items.reduce(0) { try ChekinanaChekiRecordStore.checkedCountSum($0, $1.count) }
         return items
     }
 }
@@ -900,11 +1140,20 @@ actor ChekiRokuRecordImportActor {
         )
     }
 
+    func planRows(
+        records: [ChekinanaChekiRokuImport.SourceRecord],
+        memberMap: [Int: UUID]
+    ) throws -> [ChekiRokuRecordImportPlanner.Row] {
+        try ChekiRokuRecordImportPlanner.makeRows(records: records, memberMap: memberMap, existing: liveExistingRecords())
+    }
+
     private func liveExistingRecords() throws -> [ChekiRokuRecordImportPlanner.Existing] {
-        let chekis = try modelContext.fetch(FetchDescriptor<Cheki>())
+        let chekis = try modelContext.fetch(FetchDescriptor<MediaItem>()).filter {
+            $0.kind == .cheki
+        }
         let mediaRecords = chekis.compactMap { value -> ChekiRokuRecordImportPlanner.Existing? in
-            guard value.idols.count == 1,
-                  let idolID = value.idols.first?.id else { return nil }
+            guard value.idolIDs.count == 1,
+                  let idolID = value.idolIDs.first else { return nil }
             return .init(idolID: idolID, day: value.date, category: 1)
         }
         let simpleRecords = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
@@ -927,6 +1176,7 @@ actor ChekiRokuRecordImportActor {
         records: [ChekinanaChekiRokuImport.SourceRecord],
         memberMap: [Int: UUID],
         idolNames: [UUID: String],
+        selection: ChekiRokuRecordImportPlanner.Selection? = nil,
         beforePersistForTesting: (@Sendable () -> Void)? = nil,
         progress: @escaping ProgressHandler
     ) throws -> Int {
@@ -935,11 +1185,19 @@ actor ChekiRokuRecordImportActor {
         }
         activeCommitID = commitID
         defer { activeCommitID = nil }
+        if selection?.quantities.isEmpty == true { return 0 }
         return try ChekinanaChekiRecordStore.withMutationLock {
             modelContext.autosaveEnabled = false
             do {
-        let chekiRecords = records.filter { $0.category == 1 }
-        let requiredIDs = Set(chekiRecords.compactMap { memberMap[$0.memberID] })
+        // Keep original source indexes even when non-Cheki rows are interleaved.
+        let liveRows = try ChekiRokuRecordImportPlanner.makeRows(
+            records: records, memberMap: memberMap, existing: liveExistingRecords()
+        )
+        let liveItems = try ChekiRokuRecordImportPlanner.makeItems(from: liveRows, selection: selection)
+        if selection != nil && liveItems.isEmpty { return 0 }
+        let requiredIDs = selection == nil
+            ? Set(records.filter { $0.category == 1 }.compactMap { memberMap[$0.memberID] })
+            : Set(liveItems.map(\.idolID))
         let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
         guard requiredIDs.isDisjoint(with: hiddenIDs) else {
             throw ChekiRokuImportUIError.missingDestinationIdol
@@ -958,9 +1216,21 @@ actor ChekiRokuRecordImportActor {
         let existingSimpleRecords = try modelContext.fetch(
             FetchDescriptor<ChekiRecord>()
         ).sorted { $0.id.uuidString < $1.id.uuidString }
+        let selectedIdentities: Set<ChekinanaChekiRecordIdentity>? = selection.map { _ in
+            Set(liveItems.flatMap { item in
+                let eventID = ChekinanaChekiEventAutoAssociation.uniqueEventID(
+                    for: item.day, events: fetchedEvents.map { ($0.id, $0.date) }
+                )
+                return item.memoRuns.map { run in
+                    ChekinanaChekiRecordIdentity(idolIDs: [item.idolID], date: item.day,
+                        eventID: eventID, sizeRawValue: ChekiSize.mini.rawValue, note: run.memo)
+                }
+            })
+        }
         var recordsByIdentity: [ChekinanaChekiRecordIdentity: ChekiRecord] = [:]
         for record in existingSimpleRecords {
             let identity = ChekinanaChekiRecordIdentity(record)
+            if let selectedIdentities, !selectedIdentities.contains(identity) { continue }
             record.date = identity.canonicalDate
             if let retained = recordsByIdentity[identity] {
                 retained.count = try ChekinanaChekiRecordStore.checkedCountSum(
@@ -974,15 +1244,6 @@ actor ChekiRokuRecordImportActor {
             }
         }
 
-        // Preview is advisory. Re-fetch and rebuild the live deficit plan in this
-        // exact committing context immediately before any insert so a record
-        // added after preview cannot be duplicated.
-        let liveExisting = try liveExistingRecords()
-        let liveItems = try ChekiRokuRecordImportPlanner.make(
-            records: chekiRecords,
-            memberMap: memberMap,
-            existing: liveExisting
-        )
         guard liveItems.allSatisfy({ idolNames[$0.idolID] != nil }) else {
             throw ChekiRokuImportUIError.unmappedRecord
         }
@@ -1005,6 +1266,7 @@ actor ChekiRokuRecordImportActor {
         var inserted = 0
         var lastPublished = -64
         var publishedIdolID: UUID?
+        var eventPropagationSources: [UUID: ChekiRecord] = [:]
             for item in items {
                 try Task.checkCancellation()
                 guard let idol = destinationIdols[item.idolID] else {
@@ -1037,6 +1299,9 @@ actor ChekiRokuRecordImportActor {
                             record.count,
                             run.count
                         )
+                        if record.eventID != nil {
+                            eventPropagationSources[record.id] = record
+                        }
                     } else {
                         let record = ChekiRecord(
                             idols: [idol],
@@ -1048,6 +1313,9 @@ actor ChekiRokuRecordImportActor {
                         )
                         modelContext.insert(record)
                         recordsByIdentity[identity] = record
+                        if record.eventID != nil {
+                            eventPropagationSources[record.id] = record
+                        }
                     }
                     inserted = try ChekinanaChekiRecordStore.checkedCountSum(
                         inserted,
@@ -1061,6 +1329,12 @@ actor ChekiRokuRecordImportActor {
                         lastPublished = inserted
                     }
                 }
+            }
+            for source in eventPropagationSources.values {
+                try ChekinanaEventAssociationPropagation.propagate(
+                    from: source,
+                    in: modelContext
+                )
             }
             beforePersistForTesting?()
             try Task.checkCancellation()
@@ -1107,31 +1381,82 @@ struct ChekinanaChekiRokuClipboardImportView: View {
                         self.archive = nil
                     }, isExternallyBusy: $wizardBusy)
                 } else {
-                    VStack(spacing: 20) {
-                        Image(systemName: "folder")
-                            .font(.system(size: 48))
-                            .foregroundStyle(Color.accentColor)
-                        Text(ChekinanaL10n.text("import.title", fallback: "Import from ChekiRoku")).font(.title2.weight(.semibold))
-                        Text(ChekinanaL10n.text("import.intro", fallback: "Browse Files and select one .chekiroku backup."))
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 28)
-                        if !stage.isEmpty { ProgressView(stage).padding(.top, 4) }
-                        if let error { Text(error).font(.footnote).multilineTextAlignment(.center).foregroundStyle(.red).padding(.horizontal, 24) }
-                        Button(ChekinanaL10n.text("import.action.read", fallback: "Choose ChekiRoku File")) {
-                            error = nil
-                            isFileImporterPresented = true
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            VStack(spacing: 18) {
+                                Image(systemName: "square.and.arrow.down.on.square")
+                                    .font(.system(size: 34, weight: .medium))
+                                    .foregroundStyle(ChekinanaDesignSystem.accent)
+                                    .frame(width: 64, height: 64)
+                                    .background(ChekinanaDesignSystem.softAccent)
+                                    .clipShape(Circle())
+
+                                Text(ChekinanaL10n.text(
+                                    "import.export_steps",
+                                    fallback: "ChekiRoku → Settings → Backup & Restore → Local Backup → Save to Files"
+                                ))
+                                    .font(.body)
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                Button {
+                                    error = nil
+                                    isFileImporterPresented = true
+                                } label: {
+                                    Label(
+                                        ChekinanaL10n.text(
+                                            "import.action.read",
+                                            fallback: "Open File Browser"
+                                        ),
+                                        systemImage: "folder"
+                                    )
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(isReading)
+                                .accessibilityIdentifier("chekinana.import.read")
+                            }
+                            .padding(22)
+                            .background(ChekinanaDesignSystem.cardBackground)
+                            .clipShape(
+                                RoundedRectangle(
+                                    cornerRadius: ChekinanaDesignSystem.cardRadius,
+                                    style: .continuous
+                                )
+                            )
+                            .overlay {
+                                RoundedRectangle(
+                                    cornerRadius: ChekinanaDesignSystem.cardRadius,
+                                    style: .continuous
+                                )
+                                .stroke(ChekinanaDesignSystem.border, lineWidth: 0.5)
+                            }
+
+                            if !stage.isEmpty {
+                                ProgressView(stage)
+                                    .padding(.top, 4)
+                            }
+                            if let error {
+                                Text(error)
+                                    .font(.footnote)
+                                    .multilineTextAlignment(.center)
+                                    .foregroundStyle(.red)
+                                    .padding(.horizontal, 24)
+                            }
                         }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isReading)
-                            .accessibilityIdentifier("chekinana.import.read")
+                        .padding(16)
                     }
+                    .background(ChekinanaDesignSystem.pageBackground)
                 }
             }
-            .navigationTitle(ChekinanaL10n.text("import.title", fallback: "ChekiRoku Import"))
+            .navigationTitle("")
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    ChekinanaChekiRokuNavigationTitle()
+                }
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(ChekinanaL10n.text("action.back", fallback: "Back")) { close() }
+                    Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) { close() }
                         .disabled(isReading || wizardBusy)
                         .accessibilityIdentifier("chekinana.import.back")
                 }
@@ -1170,27 +1495,28 @@ struct ChekinanaChekiRokuClipboardImportView: View {
                 defer { try? FileManager.default.removeItem(at: temporaryURL) }
                 guard !Task.isCancelled, generation == readGeneration else { return }
                 stage = ChekinanaL10n.text("import.stage.parsing", fallback: "Parsing archive")
-                let result = await Task.detached { Result { try ChekinanaChekiRokuImport.read(temporaryURL) } }.value
-                guard !Task.isCancelled, generation == readGeneration else { if case .success(let parsed) = result { ChekinanaChekiRokuImport.cleanup(parsed) }; return }
-                switch result {
-                case .success(let parsed):
-                    stage = ChekinanaL10n.text("import.stage.matching", fallback: "Matching Idols")
-                    await Task.yield()
-                    guard ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
-                        isCancelled: Task.isCancelled,
-                        generation: generation,
-                        currentGeneration: readGeneration
-                    ) else {
-                        ChekinanaChekiRokuImport.cleanup(parsed)
-                        return
-                    }
-                    archive = parsed
-                    stage = ""
-                case .failure(let parseError): throw parseError
+                let parsed = try await ChekinanaChekiRokuImport.readDetached(temporaryURL)
+                guard !Task.isCancelled, generation == readGeneration else {
+                    ChekinanaChekiRokuImport.cleanup(parsed)
+                    return
                 }
+                stage = ChekinanaL10n.text("import.stage.matching", fallback: "Matching Idols")
+                await Task.yield()
+                guard ChekinanaChekiRokuImportPublicationPolicy.shouldPublish(
+                    isCancelled: Task.isCancelled,
+                    generation: generation,
+                    currentGeneration: readGeneration
+                ) else {
+                    ChekinanaChekiRokuImport.cleanup(parsed)
+                    return
+                }
+                archive = parsed
+                stage = ""
             } catch {
                 stage = ""
-                self.error = error.localizedDescription
+                if !Self.isUserCancellation(error), generation == readGeneration {
+                    self.error = error.localizedDescription
+                }
             }
             if generation == readGeneration { isReading = false; readTask = nil }
         }
@@ -1243,6 +1569,17 @@ struct ChekinanaChekiRokuClipboardImportView: View {
             self.error = error.localizedDescription
         }
 #endif
+    }
+}
+
+private struct ChekinanaChekiRokuNavigationTitle: View {
+    var body: some View {
+        Text(ChekinanaL10n.text("import.title", fallback: "Import from ChekiRoku"))
+            .font(.headline)
+            .lineLimit(1)
+            .minimumScaleFactor(0.68)
+            .allowsTightening(true)
+            .accessibilityIdentifier("chekinana.import.navigation-title")
     }
 }
 

@@ -1,9 +1,14 @@
 import CoreGraphics
 @preconcurrency import CoreML
+import CryptoKit
 import Foundation
 import ImageIO
+#if !CHEKINANA_DINO_HOST_TOOL
 import SwiftData
+#endif
+#if canImport(UIKit)
 import UIKit
+#endif
 
 enum ChekinanaPatternEncoderError: LocalizedError {
     case invalidImage
@@ -15,15 +20,15 @@ enum ChekinanaPatternEncoderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidImage:
-            "无法为 Idol 识别读取拍立得图片"
+            ChekinanaL10n.message("The Cheki image could not be read for Idol recognition.")
         case .modelUnavailable:
-            "本机 Idol 编码器不可用"
+            ChekinanaL10n.message("The on-device Idol encoder is unavailable.")
         case .invalidModelInput:
-            "本机 Idol 编码器输入无效"
+            ChekinanaL10n.message("The on-device Idol encoder input is invalid.")
         case .invalidModelOutput:
-            "本机 Idol 编码器返回了无效编码"
+            ChekinanaL10n.message("The on-device Idol encoder returned an invalid embedding.")
         case .noValidCandidates:
-            "候选 Idol 中没有可用的 256 维原型编码"
+            ChekinanaL10n.message("No valid 256-dimensional pattern embedding is available for the candidate Idols.")
         }
     }
 }
@@ -149,6 +154,191 @@ enum ChekinanaPatternVectors {
     }
 }
 
+struct ChekinanaPatternEncodingResult: Equatable, Sendable {
+    let raw: [Float]
+    let normalized: [Float]
+}
+
+#if DEBUG
+enum ChekinanaDINOFloat32Encoding {
+    static let dtype = "float32"
+    static let byteOrder = "little-endian"
+
+    static func data(_ values: [Float]) -> Data {
+        var result = Data(capacity: values.count * MemoryLayout<UInt32>.size)
+        for value in values {
+            var bits = value.bitPattern.littleEndian
+            withUnsafeBytes(of: &bits) { result.append(contentsOf: $0) }
+        }
+        return result
+    }
+}
+#endif
+
+#if DEBUG && CHEKINANA_DINO_DEBUG_CAPTURE
+private actor ChekinanaDINODebugCaptureStore {
+    static let shared = ChekinanaDINODebugCaptureStore()
+
+    private struct Manifest: Codable {
+        let format: String
+        let session: String
+        let createdAt: String
+        let encoderVersion: String
+        let modelResource: String
+        let computeUnits: String
+        let vectorDType: String
+        let vectorByteOrder: String
+        var entries: [Entry]
+    }
+
+    private struct Entry: Codable {
+        let sequence: Int
+        let capturedAt: String
+        let inputFile: String
+        let inputFormat: String
+        let inputWidth: Int?
+        let inputHeight: Int?
+        let rawVectorFile: String
+        let normalizedVectorFile: String
+        let dimension: Int
+        let rawNorm: Float
+        let normalizedNorm: Float
+        let rawIsFinite: Bool
+        let normalizedIsFinite: Bool
+    }
+
+    private let directory: URL?
+    private var manifest: Manifest
+    private var nextSequence = 1
+
+    init(fileManager: FileManager = .default) {
+        let timestamp = Self.timestamp(Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let session = "session-\(timestamp)-\(UUID().uuidString.lowercased())"
+        manifest = Manifest(
+            format: "chekinana_dino_debug_capture_v1",
+            session: session,
+            createdAt: Self.timestamp(Date()),
+            encoderVersion: ChekinanaPatternContract.encoderVersion,
+            modelResource: "ChekiPatternEncoder.mlmodelc",
+            computeUnits: "all",
+            vectorDType: ChekinanaDINOFloat32Encoding.dtype,
+            vectorByteOrder: ChekinanaDINOFloat32Encoding.byteOrder,
+            entries: []
+        )
+        do {
+            let base = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            let directory = base
+                .appendingPathComponent("Chekinana", isDirectory: true)
+                .appendingPathComponent("DINO-Debug-Capture", isDirectory: true)
+                .appendingPathComponent(session, isDirectory: true)
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            var resourceValues = URLResourceValues()
+            resourceValues.isExcludedFromBackup = true
+            var mutableDirectory = directory
+            try? mutableDirectory.setResourceValues(resourceValues)
+            self.directory = directory
+        } catch {
+            directory = nil
+        }
+    }
+
+    func capture(
+        imageData: Data,
+        raw: [Float],
+        normalized: [Float]
+    ) {
+        guard let directory else { return }
+        let sequence = nextSequence
+        nextSequence += 1
+        let stem = String(format: "%06d", sequence)
+        let imageMetadata = Self.imageMetadata(imageData)
+        let inputFile = "\(stem)-input.\(imageMetadata.extension)"
+        let rawFile = "\(stem)-raw.f32"
+        let normalizedFile = "\(stem)-normalized.f32"
+        do {
+            try imageData.write(
+                to: directory.appendingPathComponent(inputFile),
+                options: .atomic
+            )
+            try ChekinanaDINOFloat32Encoding.data(raw).write(
+                to: directory.appendingPathComponent(rawFile),
+                options: .atomic
+            )
+            try ChekinanaDINOFloat32Encoding.data(normalized).write(
+                to: directory.appendingPathComponent(normalizedFile),
+                options: .atomic
+            )
+            manifest.entries.append(Entry(
+                sequence: sequence,
+                capturedAt: Self.timestamp(Date()),
+                inputFile: inputFile,
+                inputFormat: imageMetadata.format,
+                inputWidth: imageMetadata.width,
+                inputHeight: imageMetadata.height,
+                rawVectorFile: rawFile,
+                normalizedVectorFile: normalizedFile,
+                dimension: raw.count,
+                rawNorm: Self.norm(raw),
+                normalizedNorm: Self.norm(normalized),
+                rawIsFinite: raw.allSatisfy(\.isFinite),
+                normalizedIsFinite: normalized.allSatisfy(\.isFinite)
+            ))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(manifest).write(
+                to: directory.appendingPathComponent("manifest.json"),
+                options: .atomic
+            )
+        } catch {
+            // Diagnostics must never affect classification or surface user UI.
+        }
+    }
+
+    private static func imageMetadata(
+        _ data: Data
+    ) -> (format: String, extension: String, width: Int?, height: Int?) {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return ("application/octet-stream", "bin", nil, nil)
+        }
+        let format = (CGImageSourceGetType(source) as String?)
+            ?? "application/octet-stream"
+        let fileExtension: String
+        if format.localizedCaseInsensitiveContains("jpeg") {
+            fileExtension = "jpg"
+        } else if format.localizedCaseInsensitiveContains("png") {
+            fileExtension = "png"
+        } else if format.localizedCaseInsensitiveContains("heic")
+                    || format.localizedCaseInsensitiveContains("heif") {
+            fileExtension = "heic"
+        } else {
+            fileExtension = "bin"
+        }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+            as? [CFString: Any]
+        let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
+        let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+        return (format, fileExtension, width, height)
+    }
+
+    private static func norm(_ values: [Float]) -> Float {
+        sqrt(values.reduce(Float.zero) { $0 + $1 * $1 })
+    }
+
+    private static func timestamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+}
+#endif
+
 #if DEBUG
 enum ChekinanaPatternDebugFixture {
     static func unitVector(_ index: Int) -> [Float] {
@@ -200,20 +390,53 @@ enum ChekinanaPatternResourceError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
-            "Pattern resources returned an invalid response."
+            ChekinanaL10n.message("Pattern resources returned an invalid response.")
         case .httpStatus(let status):
-            "Pattern resources returned HTTP \(status)."
+            ChekinanaL10n.message("Pattern resources returned HTTP \(status).")
         case .invalidManifest:
-            "Pattern resource manifest is incompatible with this app."
+            ChekinanaL10n.message("Pattern resource manifest is incompatible with this app.")
         case .invalidPrototypeBank:
-            "Pattern prototype bank failed validation."
+            ChekinanaL10n.message("Pattern prototype bank failed validation.")
         case .invalidIdolPatternMap:
-            "Idol pattern mapping failed validation."
+            ChekinanaL10n.message("Idol pattern mapping failed validation.")
         case .unknownPatternID(let id):
-            "Unknown pattern ID: \(id)"
+            ChekinanaL10n.message("Unknown pattern ID: \(id)")
         case .cacheUnavailable:
-            "No validated pattern resource cache is available."
+            ChekinanaL10n.message("No validated pattern resource cache is available.")
         }
+    }
+}
+
+enum ChekinanaPatternResourceIntegrity {
+    static func normalizedSHA256(_ value: String) -> String? {
+        guard value.utf8.count == 64,
+              value.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte)
+                    || (65...70).contains(byte)
+                    || (97...102).contains(byte)
+              }) else {
+            return nil
+        }
+        return value.lowercased()
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        let digits = Array("0123456789abcdef".utf8)
+        let digest = SHA256.hash(data: data)
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(SHA256.Digest.byteCount * 2)
+        for byte in digest {
+            bytes.append(digits[Int(byte >> 4)])
+            bytes.append(digits[Int(byte & 0x0f)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    static func matches(_ data: Data, expectedSHA256: String) -> Bool {
+        guard let expected = normalizedSHA256(expectedSHA256) else {
+            return false
+        }
+        return sha256Hex(data) == expected
     }
 }
 
@@ -248,12 +471,18 @@ struct ChekinanaPatternResourceSnapshot: Sendable {
 }
 
 private struct ChekinanaPatternResourceManifest: Decodable {
+    struct ResourceDigest: Decodable {
+        let sha256: String
+    }
+
     let version: String
     let embeddingDimension: Int
     let patternCount: Int
     let encoderCheckpointSHA256: String
     let prototypesURL: URL
     let idolPatternMapURL: URL
+    let prototypeBank: ResourceDigest
+    let idolPatternMap: ResourceDigest
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -262,6 +491,8 @@ private struct ChekinanaPatternResourceManifest: Decodable {
         case encoderCheckpointSHA256
         case prototypesURL = "prototypesUrl"
         case idolPatternMapURL = "idolPatternMapUrl"
+        case prototypeBank
+        case idolPatternMap
     }
 }
 
@@ -288,25 +519,40 @@ private struct ChekinanaIdolPatternMap: Decodable {
 }
 
 actor ChekinanaRemotePatternResources {
+    typealias CacheWriter = @Sendable (Data, URL) throws -> Void
+
     static let shared = ChekinanaRemotePatternResources()
 
     private let endpoints: ChekinanaPatternResourceEndpoints
     private let session: URLSession
     private let cacheDirectory: URL
+    private let cacheWriter: CacheWriter
     private var loadedSnapshot: ChekinanaPatternResourceSnapshot?
 
     init(
         endpoints: ChekinanaPatternResourceEndpoints = .production,
         session: URLSession = .shared,
-        cacheDirectory: URL? = nil
+        cacheDirectory: URL? = nil,
+        cacheWriter: @escaping CacheWriter = { data, url in
+            try data.write(to: url, options: .atomic)
+        }
     ) {
         self.endpoints = endpoints
         self.session = session
+        self.cacheWriter = cacheWriter
         self.cacheDirectory = cacheDirectory
             ?? ChekinanaPatternContract.validatedResourceCacheDirectory(
                 baseDirectory: FileManager.default
                     .urls(for: .cachesDirectory, in: .userDomainMask)[0]
             )
+    }
+
+    /// Local startup/recognition must not initiate or wait for remote fetching.
+    func cachedSnapshot() throws -> ChekinanaPatternResourceSnapshot {
+        if let loadedSnapshot { return loadedSnapshot }
+        let cached = try loadCachedSnapshot()
+        loadedSnapshot = cached
+        return cached
     }
 
     func snapshot() async throws -> ChekinanaPatternResourceSnapshot {
@@ -317,11 +563,17 @@ actor ChekinanaRemotePatternResources {
             loadedSnapshot = loaded.snapshot
             return loaded.snapshot
         } catch {
-            guard let cached = try? loadCachedSnapshot() else {
-                throw error
+            let networkError = error
+            do {
+                let cached = try loadCachedSnapshot()
+                loadedSnapshot = cached
+                return cached
+            } catch let cacheError as ChekinanaPatternResourceError {
+                guard cacheError == .cacheUnavailable else {
+                    throw cacheError
+                }
+                throw networkError
             }
-            loadedSnapshot = cached
-            return cached
         }
     }
 
@@ -387,7 +639,13 @@ actor ChekinanaRemotePatternResources {
            manifest.prototypesURL.scheme?.lowercased() == "https",
            manifest.idolPatternMapURL.scheme?.lowercased() == "https",
            manifest.prototypesURL == endpoints.prototypesURL,
-           manifest.idolPatternMapURL == endpoints.idolPatternMapURL else {
+           manifest.idolPatternMapURL == endpoints.idolPatternMapURL,
+           ChekinanaPatternResourceIntegrity.normalizedSHA256(
+               manifest.prototypeBank.sha256
+           ) != nil,
+           ChekinanaPatternResourceIntegrity.normalizedSHA256(
+               manifest.idolPatternMap.sha256
+           ) != nil else {
             throw ChekinanaPatternResourceError.invalidManifest
         }
         return manifest
@@ -398,6 +656,18 @@ actor ChekinanaRemotePatternResources {
         prototypesData: Data,
         idolPatternMapData: Data
     ) throws -> ChekinanaPatternResourceSnapshot {
+        guard ChekinanaPatternResourceIntegrity.matches(
+            prototypesData,
+            expectedSHA256: manifest.prototypeBank.sha256
+        ) else {
+            throw ChekinanaPatternResourceError.invalidPrototypeBank
+        }
+        guard ChekinanaPatternResourceIntegrity.matches(
+            idolPatternMapData,
+            expectedSHA256: manifest.idolPatternMap.sha256
+        ) else {
+            throw ChekinanaPatternResourceError.invalidIdolPatternMap
+        }
         guard let bank = try? JSONDecoder().decode(
             ChekinanaPatternPrototypeBank.self,
             from: prototypesData
@@ -463,19 +733,20 @@ actor ChekinanaRemotePatternResources {
             at: cacheDirectory,
             withIntermediateDirectories: true
         )
-        try JSONEncoder().encode(rawData).write(
-            to: cacheDirectory.appendingPathComponent("validated-resources.json"),
-            options: .atomic
+        try cacheWriter(
+            JSONEncoder().encode(rawData),
+            cacheDirectory.appendingPathComponent("validated-resources.json")
         )
     }
 
     private func loadCachedSnapshot() throws -> ChekinanaPatternResourceSnapshot {
-        let rawData = try JSONDecoder().decode(
-            RawResourceData.self,
-            from: Data(contentsOf: cacheDirectory.appendingPathComponent(
-                "validated-resources.json"
-            ))
-        )
+        guard let data = try? Data(contentsOf: cacheDirectory.appendingPathComponent(
+                  "validated-resources.json"
+              )),
+              let rawData = try? JSONDecoder().decode(RawResourceData.self, from: data)
+        else {
+            throw ChekinanaPatternResourceError.cacheUnavailable
+        }
         let manifest = try decodeManifest(rawData.manifest)
         return try decodeSnapshot(
             manifest: manifest,
@@ -485,6 +756,7 @@ actor ChekinanaRemotePatternResources {
     }
 }
 
+#if !CHEKINANA_DINO_HOST_TOOL
 @MainActor
 enum ChekinanaIdolPatternPersistence {
     static let pendingVersion = "pending-\(ChekinanaPatternContract.encoderVersion)"
@@ -573,70 +845,202 @@ enum ChekinanaIdolPatternPersistence {
         in context: ModelContext,
         defaults: UserDefaults = .standard
     ) throws {
-        let requiresFullMigration = defaults.string(forKey: migrationDefaultsKey)
-            != ChekinanaPatternContract.encoderVersion
-        let idols = try context.fetch(FetchDescriptor<Idol>())
-        let states = try context.fetch(FetchDescriptor<IdolPatternState>())
-        let statesByIdolID = Dictionary(uniqueKeysWithValues: states.map {
-            ($0.idolID, $0)
-        })
-        for idol in idols {
-            let existingState = statesByIdolID[idol.id]
-            guard requiresFullMigration
-                    || existingState?.encoderVersion
-                        != ChekinanaPatternContract.encoderVersion else {
-                continue
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let requiresFullMigration = defaults.string(forKey: migrationDefaultsKey)
+                != ChekinanaPatternContract.encoderVersion
+            let idols = try context.fetch(FetchDescriptor<Idol>())
+            let states = try context.fetch(FetchDescriptor<IdolPatternState>())
+            let statesByIdolID = Dictionary(uniqueKeysWithValues: states.map {
+                ($0.idolID, $0)
+            })
+            for idol in idols {
+                let existingState = statesByIdolID[idol.id]
+                guard requiresFullMigration
+                        || existingState?.encoderVersion
+                            != ChekinanaPatternContract.encoderVersion else {
+                    continue
+                }
+                idol.pattern = nil
+                idol.patterns = []
+                let record = existingState ?? IdolPatternState(
+                    idolID: idol.id,
+                    encoderVersion: pendingVersion
+                )
+                if record.modelContext == nil { context.insert(record) }
+                record.cataloguePatternIDs = []
+                record.cataloguePatternCount = 0
+                record.encoderVersion = idol.sourceId?.nonEmpty == nil
+                    ? ChekinanaPatternContract.encoderVersion
+                    : pendingVersion
             }
-            idol.pattern = nil
-            idol.patterns = []
-            let record = existingState ?? IdolPatternState(
-                idolID: idol.id,
-                encoderVersion: pendingVersion
+            if context.hasChanges { try context.save() }
+            defaults.set(
+                ChekinanaPatternContract.encoderVersion,
+                forKey: migrationDefaultsKey
             )
-            if record.modelContext == nil { context.insert(record) }
-            record.cataloguePatternIDs = []
-            record.cataloguePatternCount = 0
-            record.encoderVersion = idol.sourceId?.nonEmpty == nil
-                ? ChekinanaPatternContract.encoderVersion
-                : pendingVersion
         }
-        if context.hasChanges { try context.save() }
-        defaults.set(
-            ChekinanaPatternContract.encoderVersion,
-            forKey: migrationDefaultsKey
-        )
+    }
+
+    typealias SnapshotLoader = () async throws -> ChekinanaPatternResourceSnapshot
+
+    private struct PendingRefresh {
+        struct FieldSnapshot: Equatable {
+            let legacyPattern: [Float]?
+            let patterns: [[Float]]
+            let updatedAt: Date
+            let cataloguePatternIDs: [String]
+            let cataloguePatternCount: Int
+        }
+
+        let stateIdentity: PersistentIdentifier
+        let idolIdentity: PersistentIdentifier
+        let idolID: UUID
+        let sourceID: String
+        let expectedPendingVersion: String
+        let expectedResourceVersion: String
+        let libraryGeneration: UUID
+        let fields: FieldSnapshot
     }
 
     static func refreshPendingCataloguePatterns(
         in context: ModelContext,
-        resources: ChekinanaRemotePatternResources = .shared
+        resources: ChekinanaRemotePatternResources = .shared,
+        loadSnapshot: SnapshotLoader? = nil
     ) async throws {
-        let pendingStates = try context.fetch(FetchDescriptor<IdolPatternState>())
-            .filter { $0.encoderVersion != ChekinanaPatternContract.encoderVersion }
-        guard !pendingStates.isEmpty else { return }
-        let snapshot = try await resources.snapshot()
-        let idolsByID = Dictionary(uniqueKeysWithValues:
-            try context.fetch(FetchDescriptor<Idol>()).map { ($0.id, $0) }
-        )
-        for record in pendingStates {
-            guard let idol = idolsByID[record.idolID],
-                  let sourceID = idol.sourceId?.nonEmpty else {
-                record.encoderVersion = ChekinanaPatternContract.encoderVersion
-                continue
+        let container = context.container
+        let pending = try ChekinanaPersistenceMutationCoordinator.withLock {
+            let captureContext = ModelContext(container)
+            captureContext.autosaveEnabled = false
+            let pendingStates = try captureContext
+                .fetch(FetchDescriptor<IdolPatternState>())
+                .filter {
+                    $0.encoderVersion != ChekinanaPatternContract.encoderVersion
+                }
+            guard !pendingStates.isEmpty else { return [PendingRefresh]() }
+            let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(
+                in: captureContext
+            )
+            let idolsByID = Dictionary(uniqueKeysWithValues:
+                try captureContext.fetch(FetchDescriptor<Idol>()).map { ($0.id, $0) }
+            )
+            return pendingStates.compactMap { record in
+                guard let idol = idolsByID[record.idolID],
+                      let sourceID = idol.sourceId?.nonEmpty else {
+                    return nil
+                }
+                return PendingRefresh(
+                    stateIdentity: record.persistentModelID,
+                    idolIdentity: idol.persistentModelID,
+                    idolID: idol.id,
+                    sourceID: sourceID,
+                    expectedPendingVersion: record.encoderVersion,
+                    expectedResourceVersion: ChekinanaPatternContract.encoderVersion,
+                    libraryGeneration: generation,
+                    fields: PendingRefresh.FieldSnapshot(
+                        legacyPattern: idol.pattern,
+                        patterns: idol.patterns,
+                        updatedAt: idol.updatedAt,
+                        cataloguePatternIDs: record.cataloguePatternIDs,
+                        cataloguePatternCount: record.cataloguePatternCount
+                    )
+                )
             }
-            let patternIDs = snapshot.idolPatternIDs[sourceID] ?? []
-            let patterns = try snapshot.patterns(for: patternIDs)
-            _ = try replaceCataloguePatterns(
-                for: idol,
-                patternIDs: patternIDs,
-                prototypes: patterns,
-                customPatterns: [],
-                in: context
+        }
+        guard !pending.isEmpty else { return }
+
+        let snapshot: ChekinanaPatternResourceSnapshot
+        if let loadSnapshot {
+            snapshot = try await loadSnapshot()
+        } else {
+            snapshot = try await resources.cachedSnapshot()
+        }
+
+        struct CatalogueSelection {
+            let patternIDs: [String]
+            let patterns: [[Float]]
+        }
+        var catalogueBySourceID: [String: CatalogueSelection] = [:]
+        for value in pending where catalogueBySourceID[value.sourceID] == nil {
+            let mappedIDs = snapshot.idolPatternIDs[value.sourceID] ?? []
+            let selectedIDs: [String]
+            if value.fields.cataloguePatternIDs.isEmpty {
+                selectedIDs = mappedIDs
+            } else {
+                let priorSelection = Set(value.fields.cataloguePatternIDs)
+                selectedIDs = mappedIDs.filter(priorSelection.contains)
+            }
+            catalogueBySourceID[value.sourceID] = CatalogueSelection(
+                patternIDs: selectedIDs,
+                patterns: try snapshot.patterns(for: selectedIDs)
             )
         }
-        if context.hasChanges { try context.save() }
+
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let mutationContext = ModelContext(container)
+            mutationContext.autosaveEnabled = false
+            do {
+                guard let currentGeneration = try ChekinanaLibraryGenerationStore
+                        .current(in: mutationContext) else {
+                    return
+                }
+                let states = try mutationContext.fetch(FetchDescriptor<IdolPatternState>())
+                let idols = try mutationContext.fetch(FetchDescriptor<Idol>())
+                for expected in pending {
+                    guard expected.libraryGeneration == currentGeneration,
+                          expected.expectedResourceVersion
+                            == ChekinanaPatternContract.encoderVersion,
+                          let selection = catalogueBySourceID[expected.sourceID]
+                    else {
+                        continue
+                    }
+                    let matchingStates = states.filter { $0.idolID == expected.idolID }
+                    let matchingIdols = idols.filter { $0.id == expected.idolID }
+                    guard matchingStates.count == 1,
+                          matchingIdols.count == 1 else {
+                        continue
+                    }
+                    let record = matchingStates[0]
+                    let idol = matchingIdols[0]
+                    let currentFields = PendingRefresh.FieldSnapshot(
+                        legacyPattern: idol.pattern,
+                        patterns: idol.patterns,
+                        updatedAt: idol.updatedAt,
+                        cataloguePatternIDs: record.cataloguePatternIDs,
+                        cataloguePatternCount: record.cataloguePatternCount
+                    )
+                    guard record.persistentModelID == expected.stateIdentity,
+                          idol.persistentModelID == expected.idolIdentity,
+                          record.encoderVersion == expected.expectedPendingVersion,
+                          record.encoderVersion
+                            != ChekinanaPatternContract.encoderVersion,
+                          idol.sourceId?.nonEmpty == expected.sourceID,
+                          currentFields == expected.fields,
+                          record.cataloguePatternCount >= 0,
+                          record.cataloguePatternCount
+                            == record.cataloguePatternIDs.count,
+                          record.cataloguePatternCount <= idol.patterns.count else {
+                        continue
+                    }
+                    let customPatterns = Array(idol.patterns.dropFirst(
+                        record.cataloguePatternCount
+                    ))
+                    _ = try replaceCataloguePatterns(
+                        for: idol,
+                        patternIDs: selection.patternIDs,
+                        prototypes: selection.patterns,
+                        customPatterns: customPatterns,
+                        in: mutationContext
+                    )
+                }
+                if mutationContext.hasChanges { try mutationContext.save() }
+            } catch {
+                mutationContext.rollback()
+                throw error
+            }
+        }
     }
 }
+#endif
 
 actor ChekinanaPatternEncoder {
     static let shared = ChekinanaPatternEncoder()
@@ -656,7 +1060,42 @@ actor ChekinanaPatternEncoder {
         model = try? MLModel(contentsOf: compiledURL, configuration: configuration)
     }
 
+#if DEBUG
+    init(compiledModelURL: URL) throws {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        model = try MLModel(
+            contentsOf: compiledModelURL,
+            configuration: configuration
+        )
+    }
+#endif
+
     func encode(_ imageData: Data) async throws -> [Float] {
+        let result = try await encoding(imageData)
+#if DEBUG && CHEKINANA_DINO_DEBUG_CAPTURE
+        await ChekinanaDINODebugCaptureStore.shared.capture(
+            imageData: imageData,
+            raw: result.raw,
+            normalized: result.normalized
+        )
+#endif
+        return result.normalized
+    }
+
+    /// DEBUG comparison harness entry. It deliberately shares the exact model,
+    /// preprocessing, output extraction, and normalization used by `encode`.
+#if DEBUG
+    func comparisonEncoding(_ imageData: Data) async throws
+        -> ChekinanaPatternEncodingResult
+    {
+        try await encoding(imageData)
+    }
+#endif
+
+    private func encoding(_ imageData: Data) async throws
+        -> ChekinanaPatternEncodingResult
+    {
         guard let model else {
             throw ChekinanaPatternEncoderError.modelUnavailable
         }
@@ -680,7 +1119,10 @@ actor ChekinanaPatternEncoder {
         guard norm.isFinite, norm > 0 else {
             throw ChekinanaPatternEncoderError.invalidModelOutput
         }
-        return values.map { $0 / norm }
+        return ChekinanaPatternEncodingResult(
+            raw: values,
+            normalized: values.map { $0 / norm }
+        )
     }
 }
 

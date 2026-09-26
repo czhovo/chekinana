@@ -61,7 +61,7 @@ CLI 只打印候选命令或澄清信息，不执行命令。
 5. 可选 DeepSeek fallback：只有前三层不能确定时调用一次；先在本地裁剪到 top 1–3 个 schema，无候选时才发送全部精简 schema。
 6. LRU 结果缓存：同一进程内相同输入不重复计算或付费。
 
-模型固定为 `deepseek-v4-pro`，请求 `https://api.deepseek.com/chat/completions`，无历史对话、thinking disabled、`max_tokens=192`、JSON 输出。API key 优先读取 `DEEPSEEK_API_KEY`；否则只在调用模型时读取仓库根目录的 `apikey.txt`，兼容 raw、`KEY=value` 和简单 JSON。代码和报告不会输出或复制 key。
+模型固定为 `deepseek-flash`，请求 `https://api.deepseek.com/chat/completions`，无历史对话、thinking disabled、`max_tokens=192`、JSON 输出。API key 优先读取 `DEEPSEEK_API_KEY`；否则只在调用模型时读取仓库根目录的 `apikey.txt`，兼容 raw、`KEY=value` 和简单 JSON。代码和报告不会输出或复制 key。
 
 模型输出必须再次通过相同 registry validator；有本地候选时只能选择最高分 intent，且模型输出的每个 ID、名称和字段值都必须可在原始输入中找到（少量明确枚举映射除外）。敏感或可能写入的命令还要求最高分 intent 达到安全阈值；无本地候选不能生成敏感命令，LLM 生成的无参 `confirm` 永远被拒绝。Usage 三项必须是非负、有限、合理范围内且总数一致的原生整数，否则整个模型建议作废。因此已注册但语义错位的低排名命令、凭空增加的 ID、把“蓝色”翻译成 `blue` 等输出也会被拒绝。模型失败、网络失败、参数不足、多意图、类型错误或输出不安全时统一使用本地固定澄清文案，模型 message 不会展示。
 

@@ -24,15 +24,15 @@ enum ChekinanaIdolEnrichmentError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
-            "idol lookup failed: invalid API endpoint"
+            ChekinanaL10n.message("idol lookup failed: invalid API endpoint")
         case .network(let detail):
-            "idol lookup network error: \(detail)"
+            ChekinanaL10n.message("idol lookup network error: \(detail)")
         case .httpStatus(let statusCode):
-            "idol lookup failed: HTTP \(statusCode)"
+            ChekinanaL10n.message("idol lookup failed: HTTP \(statusCode)")
         case .invalidResponse:
-            "idol lookup failed: invalid JSON response"
+            ChekinanaL10n.message("idol lookup failed: invalid JSON response")
         case .notFound(let name):
-            "idol not found: \(name)"
+            ChekinanaL10n.message("idol not found: \(name)")
         }
     }
 }

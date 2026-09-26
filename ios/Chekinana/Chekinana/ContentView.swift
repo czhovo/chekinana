@@ -1,4 +1,3 @@
-import PhotosUI
 import OSLog
 import SwiftData
 import SwiftUI
@@ -41,11 +40,16 @@ struct ChekinanaRotatingActivityArc: View {
     }
 }
 
-fileprivate struct PendingNaturalLanguageRequest: Equatable, Sendable {
+struct PendingNaturalLanguageRequest: Equatable, Sendable {
+    let id = UUID()
     let input: String
     let draft: ChekinanaNLRequestDraft?
     let activeConfirmationCodes: Set<String>
     let selections: ChekinanaConversationSelections
+    var replyLanguage: ChekinanaAssistantReplyLanguage = .appLocalizationFallback
+    var context: ChekinanaNLContext? = nil
+    var isCorrection = false
+    var contextTarget: ChekinanaAssistantDialogue.Target? = nil
 }
 
 #if DEBUG
@@ -123,7 +127,9 @@ enum ChekinanaPromptSubmissionPolicy {
 }
 
 enum ChekinanaGreetingLanguage {
-    static let response = "你好！我是 Chekinana。我可以陪你用自然语言添加和查看 Idol、记录 Event，并在你选好照片后准备扫描和整理 Cheki。"
+    static var response: String {
+        ChekinanaL10n.message("Hello! I’m Chekinana. I can help you add and view Idols, record Events, and scan and organize Cheki after you select photos.")
+    }
 
     static func response(for input: String) -> String? {
         let normalized = input
@@ -259,6 +265,133 @@ enum ChekinanaDateOnly {
     }
 }
 
+/// Captures the Gregorian calendar and system time zone used when a date-only
+/// editor opens. Keeping this value for the editor session prevents a later
+/// system time-zone change from using different boundaries for display and
+/// persistence.
+struct ChekinanaDateOnlyEditorSession {
+    let calendar: Calendar
+    let userCalendar: Calendar
+
+    init(
+        systemCalendar: Calendar = .current,
+        initialCanonicalDate: Date? = nil
+    ) {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(identifier: systemCalendar.timeZone.identifier)
+            ?? systemCalendar.timeZone
+        userCalendar = calendar
+        if let canonical = initialCanonicalDate.flatMap(ChekinanaDateOnly.canonicalized) {
+            let projected = ChekinanaDateOnly.displayDate(
+                from: canonical, calendar: calendar
+            )
+            let roundTrip = projected.flatMap {
+                ChekinanaDateOnly.canonicalDate(from: $0, displayedIn: calendar)
+            }
+            if roundTrip != canonical {
+                // Some historical zones skipped an entire civil day. Keep
+                // that valid YMD in an exact, fixed picker calendar.
+                calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            }
+        }
+        self.calendar = calendar
+    }
+
+    func displayDate(from canonicalDate: Date) -> Date? {
+        guard let canonical = ChekinanaDateOnly.canonicalized(canonicalDate),
+              let displayed = ChekinanaDateOnly.displayDate(
+                from: canonical, calendar: calendar
+              ),
+              ChekinanaDateOnly.canonicalDate(
+                from: displayed, displayedIn: calendar
+              ) == canonical else { return nil }
+        return displayed
+    }
+
+    func displayDateForToday(now: Date = Date()) -> Date? {
+        ChekinanaDateOnly.canonicalDate(
+            from: now, displayedIn: userCalendar
+        ).flatMap { displayDate(from: $0) }
+    }
+
+    func canonicalDate(from displayedDate: Date) -> Date? {
+        ChekinanaPersistedContentDatePolicy.canonicalDate(
+            from: displayedDate,
+            displayedIn: calendar
+        )
+    }
+}
+
+/// Single source of truth for Event, MediaItem, and ChekiRecord dates.
+/// UI projections use the current system time zone while storage remains in
+/// the canonical date-only carrier.
+enum ChekinanaPersistedContentDatePolicy {
+    static let firstYear = 2_005
+    static let lastYear = 2_200
+
+    static var minimumCanonicalDate: Date {
+        ChekinanaDateOnly.canonicalDate(year: firstYear, month: 12, day: 8)!
+    }
+
+    static var maximumCanonicalDate: Date {
+        ChekinanaDateOnly.canonicalDate(year: lastYear, month: 12, day: 31)!
+    }
+
+    static func containsCanonical(_ date: Date) -> Bool {
+        guard let canonical = ChekinanaDateOnly.canonicalized(date) else {
+            return false
+        }
+        return canonical >= minimumCanonicalDate
+            && canonical <= maximumCanonicalDate
+    }
+
+    static func canonicalDate(
+        from selection: Date,
+        displayedIn calendar: Calendar = .current
+    ) -> Date? {
+        guard let canonical = ChekinanaDateOnly.canonicalDate(
+            from: selection,
+            displayedIn: calendar
+        ), containsCanonical(canonical) else { return nil }
+        return canonical
+    }
+
+    static func displayedRange(
+        calendar: Calendar = .current
+    ) -> ClosedRange<Date> {
+        let minimum = ChekinanaDateOnly.displayDate(
+            from: minimumCanonicalDate,
+            calendar: calendar
+        )!
+        let maximum = ChekinanaDateOnly.displayDate(
+            from: maximumCanonicalDate,
+            calendar: calendar
+        )!
+        return minimum...maximum
+    }
+
+    static func validatedCanonical(_ date: Date?) throws -> Date? {
+        guard let date else { return nil }
+        guard let canonical = ChekinanaDateOnly.canonicalized(date),
+              containsCanonical(canonical) else {
+            throw ChekinanaPersistedContentDateError.outsideSupportedRange
+        }
+        return canonical
+    }
+}
+
+enum ChekinanaPersistedContentDateError: LocalizedError, Equatable {
+    case outsideSupportedRange
+
+    var errorDescription: String? {
+        ChekinanaL10n.text(
+            "date.outside_supported_range",
+            fallback: "Choose a date from December 8, 2005 through December 31, 2200."
+        )
+    }
+}
+
 #if DEBUG
 @MainActor
 enum ChekinanaMediaUITestFixture {
@@ -372,29 +505,34 @@ struct ContentView: View {
 
     private let onClose: (() -> Void)?
     private let onShellAction: ((ChekinanaAssistantShellAction) -> Void)?
-    private let initialScannerLaunch: ChekinanaAssistantScanLaunch?
     private let session: ChekinanaAssistantSession
+    private let replyLanguageClient: any ChekinanaReplyLanguageClientProtocol
 
     @Environment(\.modelContext) private var modelContext
 
+    @State private var replacesPendingPreview = false
+    @State private var replacementEventBackup: ChekinanaEventCandidateFields?
+    @State private var plannedUserText: String?
+    @State private var plannedTarget: ChekinanaAssistantDialogue.Target?
+    @State private var pendingClarificationPlan: [ChekinanaNLOperation] = []
+    @State private var plannedRawTail: [ChekinanaNLOperation] = []
+    @State private var clarificationRawTail: [ChekinanaNLOperation] = []
+    @State private var plannedOperations: [ChekinanaNLOperation] = []
+    @State private var currentUserTurn = ""
+    @State private var replyLanguage: ChekinanaAssistantReplyLanguage?
     @State private var prompt = ""
-    @State private var selectedItems: [PhotosPickerItem] = []
-    @State private var albumAddChekiItems: [PhotosPickerItem] = []
-    @State private var albumAddChekiRequest: ChekinanaAlbumAddChekiRequest?
-    @State private var albumPickerState = ChekinanaAlbumPickerStateMachine()
-    @State private var albumPickerCancellationTask: Task<Void, Never>?
-    @State private var albumProcessingTask: Task<Void, Never>?
     @State private var commandExecutionTask: Task<Void, Never>?
     @State private var idolCandidateSelectionTask: Task<Void, Never>?
     @State private var idolCandidateSelectionGate = ChekinanaOwnedExecutionGate()
     @State private var idolConfirmationTask: Task<Void, Never>?
     @State private var idolConfirmationTimeoutTask: Task<Void, Never>?
     @State private var idolConfirmationGate = ChekinanaOwnedExecutionGate()
+    @State private var retainedEventFields: ChekinanaEventCandidateFields?
+    @State private var awaitsEventCity = false
     @State private var eventCandidateState = ChekinanaEventCandidateStateMachine()
     @State private var eventCandidateBusyOwner = ChekinanaEventCandidateBusyOwner()
     @State private var eventCandidateTask: Task<Void, Never>?
     @State private var activeEventCandidateRequest: EventCandidateRequest?
-    @State private var mediaLoadProgress = ""
     @State private var transcriptMessages: [TranscriptMessage]
     @State private var activeIdolCandidateTokens: Set<String>
     @State private var confirmedIdolCandidateTokens: Set<String>
@@ -406,17 +544,12 @@ struct ContentView: View {
     @State private var nlRequestGate = ChekinanaNLRequestGenerationGate()
     @State private var activeNLRequest: PendingNaturalLanguageRequest?
     @State private var pendingNLRetry: PendingNaturalLanguageRequest?
+    @State private var replyLanguageRequestTask: Task<Void, Never>?
+    @State private var replyLanguageRequestGate = ChekinanaNLRequestGenerationGate()
+    @State private var activeReplyLanguageInput: String?
     @State private var selectedChekiID: UUID?
     @State private var transcriptScrollRequest = ChekinanaTranscriptScrollRequest.none
     @State private var isClosing = false
-    @State private var isScannerDateRecognitionEnabled =
-        ChekinanaScannerRecognitionDefaults.dateIsEnabled
-    @State private var isScannerIdolRecognitionEnabled =
-        ChekinanaScannerRecognitionDefaults.idolIsEnabled
-    @State private var scannerDateBounds: ChekinanaScannerDateBounds?
-    @State private var scannerCandidateIDs: Set<UUID>?
-    @State private var scannerIncludesUnassignedCandidate = false
-    @State private var didHandleInitialScannerLaunch = false
     @State private var temporaryEditorDraft = TemporaryChekiEditorDraft()
     @State private var isTemporaryEditorPresented = false
     @FocusState private var isPromptFocused: Bool
@@ -425,14 +558,15 @@ struct ContentView: View {
         session: ChekinanaAssistantSession = ChekinanaAssistantSession(),
         onClose: (() -> Void)? = nil,
         onShellAction: ((ChekinanaAssistantShellAction) -> Void)? = nil,
-        initialScannerLaunch: ChekinanaAssistantScanLaunch? = nil,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        replyLanguageClient: any ChekinanaReplyLanguageClientProtocol = ChekinanaReplyLanguageClient()
     ) {
         self.session = session
         self.onClose = onClose
         self.onShellAction = onShellAction
-        self.initialScannerLaunch = initialScannerLaunch
-        _prompt = State(initialValue: initialPrompt ?? (initialScannerLaunch == nil ? session.prompt : "scancheki"))
+        self.replyLanguageClient = replyLanguageClient
+        _prompt = State(initialValue: initialPrompt ?? session.prompt)
+        _replyLanguage = State(initialValue: session.replyLanguage)
         _transcriptMessages = State(initialValue: session.transcriptMessages)
         _activeIdolCandidateTokens = State(initialValue: session.activeIdolCandidateTokens)
         _confirmedIdolCandidateTokens = State(initialValue: session.confirmedIdolCandidateTokens)
@@ -440,20 +574,7 @@ struct ContentView: View {
         _conversationState = State(initialValue: session.conversationState)
         _selectedChekiID = State(initialValue: session.selectedChekiID)
         _pendingNLRetry = State(initialValue: session.pendingNLRetry)
-        _selectedItems = State(initialValue: initialScannerLaunch?.items ?? [])
-        _isScannerDateRecognitionEnabled = State(
-            initialValue: initialScannerLaunch?.dateRecognitionEnabled
-                ?? ChekinanaScannerRecognitionDefaults.dateIsEnabled
-        )
-        _isScannerIdolRecognitionEnabled = State(
-            initialValue: initialScannerLaunch?.idolRecognitionEnabled
-                ?? ChekinanaScannerRecognitionDefaults.idolIsEnabled
-        )
-        _scannerDateBounds = State(initialValue: initialScannerLaunch?.dateBounds)
-        _scannerCandidateIDs = State(initialValue: initialScannerLaunch?.candidateIDs)
-        _scannerIncludesUnassignedCandidate = State(
-            initialValue: initialScannerLaunch?.includesUnassigned ?? false
-        )
+
     }
 
     var body: some View {
@@ -473,12 +594,6 @@ struct ContentView: View {
             composer
         }
         .statusBarHidden(false)
-        .photosPicker(
-            isPresented: albumPickerPresentationBinding,
-            selection: albumPickerSelectionBinding,
-            maxSelectionCount: 0,
-            matching: .images
-        )
         .sheet(isPresented: $isTemporaryEditorPresented) {
             let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
             TemporaryChekiEditorView(
@@ -507,24 +622,12 @@ struct ContentView: View {
                 installLongCandidateUITestFixture()
             }
 #endif
-            guard initialScannerLaunch != nil, !didHandleInitialScannerLaunch else {
-                return
-            }
-            didHandleInitialScannerLaunch = true
-            Task { @MainActor in
-                await Task.yield()
-                submitPrompt()
-            }
         }
         .onDisappear {
-            suspendAssistantSession()
-            captureAssistantSession()
+            exitAssistantSession()
         }
         .overlay(alignment: .topLeading) {
             uiTestLaunchMarker
-        }
-        .overlay(alignment: .topTrailing) {
-            initialScanLaunchMarker
         }
     }
 
@@ -539,25 +642,6 @@ struct ContentView: View {
                 .accessibilityLabel("UI test launch marker")
                 .accessibilityValue(launchID)
                 .accessibilityIdentifier("chekinana.launch-marker")
-                .allowsHitTesting(false)
-        }
-#else
-        EmptyView()
-#endif
-    }
-
-    @ViewBuilder
-    private var initialScanLaunchMarker: some View {
-#if DEBUG
-        if let launch = initialScannerLaunch {
-            Color.clear
-                .frame(width: 1, height: 1)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Initial scanner launch")
-                .accessibilityValue(
-                    "photos=\(launch.items.count);date=\(launch.dateRecognitionEnabled ? 1 : 0);idol=\(launch.idolRecognitionEnabled ? 1 : 0);candidates=\(launch.candidateIDs.count);unassigned=\(launch.includesUnassigned ? 1 : 0);handled=\(didHandleInitialScannerLaunch ? 1 : 0)"
-                )
-                .accessibilityIdentifier("chekinana.assistant.scan-launch")
                 .allowsHitTesting(false)
         }
 #else
@@ -652,7 +736,6 @@ struct ContentView: View {
                 isPromptFocused = false
             }
             .onChange(of: transcriptMessages.count) {
-                session.persistTextHistory(from: transcriptMessages)
                 guard let last = transcriptMessages.last else {
                     transcriptScrollRequest = .none
                     return
@@ -710,15 +793,21 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
-            transcriptAssistantContent(message.content)
+            transcriptAssistantContent(
+                message.content,
+                replyLanguage: message.replyLanguage ?? resolvedReplyLanguage
+            )
         }
     }
 
     @ViewBuilder
-    private func transcriptAssistantContent(_ content: TranscriptContent) -> some View {
+    private func transcriptAssistantContent(
+        _ content: TranscriptContent,
+        replyLanguage: ChekinanaAssistantReplyLanguage
+    ) -> some View {
         switch content {
         case .text(let text):
-            Text(text)
+            Text(replyLanguage.localized { ChekinanaCommandCopy.displayText(text) })
                 .font(.body)
                 .foregroundStyle(.black)
                 .textSelection(.enabled)
@@ -737,13 +826,14 @@ struct ContentView: View {
                     }
                 }
         case .idolCard(let idol):
-            IdolCardView(idol: idol)
+            IdolCardView(idol: idol, replyLanguage: replyLanguage)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .idolCards(let idols):
             IdolCardCollectionView(
                 idols: idols,
                 activeSelectionTokens: activeIdolCandidateTokens,
                 confirmedSelectionTokens: confirmedIdolCandidateTokens,
+                replyLanguage: replyLanguage,
                 isInteractionEnabled: !isSubmitting,
                 onSelectCandidate: selectIdolCandidate,
                 onCancelCandidates: cancelIdolCandidates
@@ -759,6 +849,7 @@ struct ContentView: View {
                     idols: idols,
                     activeSelectionTokens: activeIdolCandidateTokens,
                     confirmedSelectionTokens: confirmedIdolCandidateTokens,
+                    replyLanguage: replyLanguage,
                     isInteractionEnabled: !isSubmitting,
                     onSelectCandidate: selectIdolCandidate,
                     onCancelCandidates: cancelIdolCandidates
@@ -768,17 +859,18 @@ struct ContentView: View {
         case .idolSections(let sections):
             IdolSectionCollectionView(
                 sections: sections,
+                replyLanguage: replyLanguage,
                 selectedChekiID: selectedChekiID,
                 onSelectCheki: selectCheki
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         case .eventCard(let event):
-            EventCardView(event: event)
+            EventCardView(event: event, replyLanguage: replyLanguage)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .eventCards(let events):
             LazyVStack(alignment: .leading, spacing: 12) {
                 ForEach(events) { event in
-                    EventCardView(event: event)
+                    EventCardView(event: event, replyLanguage: replyLanguage)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -787,18 +879,24 @@ struct ContentView: View {
                 count: count,
                 warningCount: warningCount,
                 chekis: chekis,
+                replyLanguage: replyLanguage,
                 onEdit: beginEditingTemporaryCheki,
                 onDelete: deleteTemporaryCheki,
                 onDownload: downloadTemporaryCheki
             )
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .pendingChekiCards(let summary, let chekis):
-            PendingChekiTranscriptView(summary: summary, chekis: chekis)
+            PendingChekiTranscriptView(
+                summary: summary,
+                chekis: chekis,
+                replyLanguage: replyLanguage
+            )
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .chekiCards(let chekis):
             ChekiListTranscriptView(
                 chekis: chekis,
                 selectedChekiID: selectedChekiID,
+                replyLanguage: replyLanguage,
                 onSelectCheki: selectCheki
             )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -809,11 +907,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(isSubmitting)
         case .scanAllShortcut:
-            Button(ChekinanaL10n.text("assistant.scan_all", fallback: "Add details to all Cheki")) {
-                beginScanAllClarification()
-            }
-            .buttonStyle(.bordered)
-            .disabled(isSubmitting || conversationState.draft != nil)
+            EmptyView()
         }
     }
 
@@ -823,9 +917,13 @@ struct ContentView: View {
                 .accessibilityLabel(ChekinanaL10n.text("assistant.processing", fallback: "Processing request"))
                 .accessibilityIdentifier("chekinana.transcript.activity")
             Spacer(minLength: 8)
-            if activeNLRequest != nil {
+            if activeNLRequest != nil || activeReplyLanguageInput != nil {
                 Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
-                    cancelRemoteInterpretation()
+                    if activeReplyLanguageInput != nil {
+                        cancelReplyLanguageResolution()
+                    } else {
+                        cancelRemoteInterpretation()
+                    }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color(.secondaryLabel))
@@ -859,7 +957,7 @@ struct ContentView: View {
     }
 
     private var retryPreservedMessage: some View {
-        Text(ChekinanaL10n.text("assistant.input_preserved", fallback: "Your input was preserved"))
+        Text(resolvedReplyLanguage.text("assistant.input_preserved", fallback: "Your input was preserved"))
             .font(.footnote)
             .foregroundStyle(Color(.secondaryLabel))
             .fixedSize(horizontal: false, vertical: true)
@@ -937,191 +1035,56 @@ struct ContentView: View {
 
     @ViewBuilder
     private var eventCandidatePanel: some View {
-        switch eventCandidateState.phase {
-        case .idle:
-            EmptyView()
-        case .extracting:
-            // The transcript-wide activity indicator is the only in-flight UI.
-            EmptyView()
-        case .failed(_, let message):
-            VStack(alignment: .leading, spacing: 10) {
-                Text(message)
-                    .font(.subheadline)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("chekinana.event.candidate.error")
-                HStack(spacing: 8) {
-                    Button(ChekinanaL10n.text("action.retry", fallback: "Retry")) {
-                        if let activeEventCandidateRequest {
-                            startEventCandidateExtraction(
-                                request: activeEventCandidateRequest,
-                                echo: nil
-                            )
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .disabled(isSubmitting)
-                    .accessibilityIdentifier("chekinana.event.candidate.retry")
-                    .accessibilityHint(ChekinanaL10n.text("assistant.event_retry_hint", fallback: "Call the Event extraction service again"))
-                    Button(ChekinanaL10n.text("action.cancel", fallback: "Cancel")) {
-                        cancelEventCandidateFlow(announce: true)
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .disabled(isSubmitting)
-                    .accessibilityIdentifier("chekinana.event.candidate.cancel")
-                    .accessibilityHint(ChekinanaL10n.text("assistant.event_cancel_hint", fallback: "Close the candidate without creating an Event"))
-                }
-            }
-            .eventCandidatePanelStyle()
-        case .editing(let fields):
-            EventCandidateEditorView(
-                fields: eventCandidateFieldsBinding(fallback: fields),
-                blockers: ChekinanaEventCandidateValidator.blockers(for: fields),
-                isDisabled: isSubmitting,
-                onPrepare: prepareEventCandidateConfirmation,
-                onCancel: { cancelEventCandidateFlow(announce: true) }
-            )
+        if case .failed(_, let message) = eventCandidateState.phase {
+            Text(message).font(.footnote).foregroundStyle(.secondary)
         }
     }
 
     @ViewBuilder
     private var clarificationControls: some View {
-        if let localChoice = conversationState.draft?.localChoice {
-            FlowChoiceView(options: localChoice.options, selectedIDs: []) { id in
-                applyLocalChoice(id)
-            }
-        } else if let missing = conversationState.draft?.missing.first {
-            switch missing {
-            case .idol:
-                if conversationState.draft?.requiresFreeTextIdolName == true {
-                    Text(ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add."))
-                        .font(.footnote)
-                        .foregroundStyle(Color(.secondaryLabel))
-                } else {
-                    let choices = ChekinanaConversationCoordinator.idolChoices(modelContext: modelContext)
-                    if choices.isEmpty {
-                        Text(ChekinanaConversationMessage.idolNotFound.text)
-                            .font(.footnote)
-                            .foregroundStyle(Color(.secondaryLabel))
-                    } else {
-                        FlowChoiceView(
-                            options: choices,
-                            selectedIDs: Set(conversationState.draft?.selections.selectedIdolIDs ?? [])
-                        ) { id in
-                            toggleSelectedIdol(id)
-                        }
-                        Button(ChekinanaL10n.text("action.continue", fallback: "Continue")) {
-                            completeIdolSelection()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                        .accessibilityIdentifier("chekinana.clarification.continue")
-                        .disabled(conversationState.draft?.selections.selectedIdolIDs.isEmpty != false)
-                    }
-                }
-            case .eventOrDate:
-                let choices = ChekinanaConversationCoordinator.eventChoices(modelContext: modelContext)
-                if !choices.isEmpty {
-                    FlowChoiceView(options: choices, selectedIDs: []) { id in
-                        chooseEvent(id)
-                    }
-                }
-                Button(ChekinanaL10n.text("assistant.use_date", fallback: "Use date")) {
-                    chooseDateInsteadOfEvent()
-                }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.clarification.use-date")
-            case .eventName:
-                Text(ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved."))
-                    .font(.footnote)
-                    .foregroundStyle(Color(.secondaryLabel))
-            case .date:
-                DatePicker(
-                    ChekinanaL10n.text("assistant.date", fallback: "Date"),
-                    selection: $clarificationDate,
-                    displayedComponents: .date
-                )
-                .datePickerStyle(.compact)
-                Button(ChekinanaL10n.text("assistant.use_this_date", fallback: "Use this date")) {
-                    completeDateSelection()
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-                .accessibilityIdentifier("chekinana.clarification.confirm-date")
-            case .temporaryCheki:
-                let choices = confirmationLedger.availableTemporaryChekiChoices().enumerated().map { index, temporary in
-                    ChekinanaLocalChoice(
-                        id: temporary.id,
-                        title: ChekinanaL10n.format("assistant.scan_result_index", fallback: "Scan result %lld", Int64(index + 1)),
-                        subtitle: nil
-                    )
-                }
-                if choices.isEmpty {
-                    Text(ChekinanaL10n.text("assistant.no_scan_results", fallback: "No scan results are available. Select photos and scan first."))
-                        .font(.footnote)
-                        .foregroundStyle(Color(.secondaryLabel))
-                } else {
-                    FlowChoiceView(
-                        options: choices,
-                        selectedIDs: Set(conversationState.draft?.selections.selectedTemporaryIDs ?? [])
-                    ) { id in
-                        toggleSelectedTemporaryCheki(id)
-                    }
-                    HStack(spacing: 8) {
-                        Button(ChekinanaL10n.text("assistant.use_selected", fallback: "Use selected")) {
-                            completeTemporarySelection()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                        .accessibilityIdentifier("chekinana.clarification.use-selected")
-                        .disabled(conversationState.draft?.selections.selectedTemporaryIDs.isEmpty != false)
-
-                        Button(ChekinanaL10n.text("assistant.use_all", fallback: "All scan results")) {
-                            useAllTemporaryChekis()
-                        }
+        if let choice = conversationState.draft?.localChoice {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(choice.options.enumerated()), id: \.element.id) { index, option in
+                    Button("\(index + 1). \(option.title)") { applyLocalChoice(option.id) }
                         .buttonStyle(.bordered)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                        .accessibilityIdentifier("chekinana.clarification.use-all")
-                    }
                 }
             }
+        } else {
+            Text(resolvedReplyLanguage.text(
+                "assistant.dialog.reply_here",
+                fallback: "Reply in the conversation to fill in the missing information."
+            ))
+                .font(.footnote).foregroundStyle(.secondary)
         }
     }
 
     private var clarificationPromptText: String {
-        guard let draft = conversationState.draft else { return "" }
-        if let localChoice = draft.localChoice {
-            switch localChoice.kind {
-            case .idol:
-                return ChekinanaL10n.text("assistant.prompt.multiple_idol", fallback: "Multiple Idols matched. Choose one.")
-            case .event:
-                return ChekinanaL10n.text("assistant.prompt.multiple_event", fallback: "Multiple Events matched. Choose one.")
+        resolvedReplyLanguage.localized {
+            guard let draft = conversationState.draft else { return "" }
+            if let localChoice = draft.localChoice {
+                switch localChoice.kind {
+                case .idol:
+                    return ChekinanaL10n.text("assistant.prompt.multiple_idol", fallback: "Multiple Idols matched. Choose one.")
+                case .event:
+                    return ChekinanaL10n.text("assistant.prompt.multiple_event", fallback: "Multiple Events matched. Choose one.")
+                }
             }
-        }
-        switch draft.missing.first {
-        case .idol:
-            return draft.requiresFreeTextIdolName
-                ? ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add.")
-                : ChekinanaL10n.text("assistant.prompt.idol", fallback: "Choose at least one local Idol.")
-        case .eventOrDate:
-            return ChekinanaL10n.text("assistant.prompt.event_or_date", fallback: "Choose a local Event or use a date.")
-        case .eventName:
-            return ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved.")
-        case .date:
-            return ChekinanaL10n.text("assistant.prompt.date", fallback: "Choose a date.")
-        case .temporaryCheki:
-            return ChekinanaL10n.text("assistant.prompt.scan_result", fallback: "Choose the scan results to save.")
-        case nil:
-            return ChekinanaL10n.text("assistant.prompt.complete", fallback: "Complete this operation.")
+            switch draft.missing.first {
+            case .idol:
+                return draft.requiresFreeTextIdolName
+                    ? ChekinanaL10n.text("assistant.prompt.idol_name", fallback: "Enter the Idol name to add.")
+                    : ChekinanaL10n.text("assistant.prompt.idol", fallback: "Choose at least one local Idol.")
+            case .eventOrDate:
+                return ChekinanaL10n.text("assistant.prompt.event_or_date", fallback: "Choose a local Event or use a date.")
+            case .eventName:
+                return ChekinanaL10n.text("assistant.prompt.event_name", fallback: "Enter an Event name. The URL, if any, was preserved.")
+            case .date:
+                return ChekinanaL10n.text("assistant.prompt.date", fallback: "Choose a date.")
+            case .temporaryCheki:
+                return ChekinanaL10n.text("assistant.prompt.scan_result", fallback: "Choose the scan results to save.")
+            case nil:
+                return ChekinanaL10n.text("assistant.prompt.complete", fallback: "Complete this operation.")
+            }
         }
     }
 
@@ -1165,24 +1128,7 @@ struct ContentView: View {
                         }
                     }
 
-                if !selectedItems.isEmpty {
-                    selectedPhotosSummary
-                }
-
                 HStack {
-                    PhotosPicker(selection: $selectedItems, maxSelectionCount: 0, matching: .images) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 26, weight: .light))
-                            .foregroundStyle(ChekinanaDesignSystem.accent)
-                            .frame(width: 28, height: 28)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isSubmitting)
-                    .accessibilityLabel(ChekinanaL10n.text("assistant.choose_photos", fallback: "Choose photos"))
-                    .accessibilityIdentifier("chekinana.photos")
-
                     Spacer()
 
                     Button {
@@ -1224,113 +1170,506 @@ struct ContentView: View {
         .accessibilityIdentifier("chekinana.composer")
     }
 
-    private func applyQuickAction(_ action: ChekinanaQuickActionDefinition) {
-        guard !isSubmitting, ChekinanaQuickActions.shouldApply(to: prompt) else { return }
-        prompt = ChekinanaQuickActions.prefilledPrompt(
-            currentPrompt: prompt,
-            action: action,
-            hasSelectedPhotos: !selectedItems.isEmpty
-        )
-        isPromptFocused = true
+    private var resolvedReplyLanguage: ChekinanaAssistantReplyLanguage {
+        replyLanguage ?? ChekinanaAssistantReplyLanguage.interfaceFallback()
     }
 
-    private var selectedPhotosSummary: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "photo.on.rectangle")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color(.secondaryLabel))
-
-                Text(ChekinanaL10n.quantity(
-                    "assistant.photos_selected",
-                    count: selectedItems.count,
-                    one: "%lld photo selected",
-                    other: "%lld photos selected"
-                ))
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Color(.secondaryLabel))
-                    .lineLimit(2)
-                    .accessibilityLabel(ChekinanaL10n.text("assistant.photos_selected_label", fallback: "Selected photos"))
-                    .accessibilityValue("\(selectedItems.count)")
-                    .accessibilityIdentifier("chekinana.photos.summary")
-
-                Spacer(minLength: 8)
-
-                Button {
-                    selectedItems = []
-                    isScannerDateRecognitionEnabled =
-                        ChekinanaScannerRecognitionDefaults.dateIsEnabled
-                    isScannerIdolRecognitionEnabled =
-                        ChekinanaScannerRecognitionDefaults.idolIsEnabled
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(Color(.systemGray2))
-                        .frame(width: 24, height: 24)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(isSubmitting)
-                .accessibilityLabel(ChekinanaL10n.text("assistant.clear_photos", fallback: "Clear selected photos"))
-            }
-
-            Divider()
-                .padding(.horizontal, 10)
-
-            Toggle(isOn: $isScannerDateRecognitionEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(ChekinanaL10n.text("assistant.recognize_date", fallback: "Recognize handwritten dates"))
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.black)
-                    Text(ChekinanaL10n.text("assistant.recognize_date_detail", fallback: "Requests dates and bounding boxes; boxes are shown only in previews."))
-                        .font(.caption)
-                        .foregroundStyle(Color(.secondaryLabel))
-                }
-            }
-            .toggleStyle(.switch)
-            .disabled(isSubmitting)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .accessibilityHint(ChekinanaL10n.text("assistant.recognize_date_hint", fallback: "Does not modify or save images with boxes"))
-            .accessibilityIdentifier("chekinana.scanner.date-recognition")
-
-            Toggle(isOn: $isScannerIdolRecognitionEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(ChekinanaL10n.text("assistant.recognize_idol", fallback: "Recognize Idols"))
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.black)
-                    Text(ChekinanaL10n.text("assistant.recognize_idol_detail", fallback: "Uses the on-device encoder to compare existing Idol patterns."))
-                        .font(.caption)
-                        .foregroundStyle(Color(.secondaryLabel))
-                }
-            }
-            .toggleStyle(.switch)
-            .disabled(isSubmitting)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .accessibilityHint(ChekinanaL10n.text("assistant.recognize_idol_hint", fallback: "Uses all valid local patterns and the Unassigned candidate"))
-            .accessibilityIdentifier("chekinana.scanner.idol-recognition")
+    private func assistantMessage(_ key: String, _ fallback: String) {
+        let language = resolvedReplyLanguage
+        let text = language.localized {
+            ChekinanaL10n.text(key, fallback: fallback)
         }
-        .frame(minHeight: 44)
-        .background(Color(.systemGray6))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        transcriptMessages.append(TranscriptMessage(content: .text(text), replyLanguage: language))
+    }
+
+    private func assistantText(_ makeText: () -> String) {
+        let language = resolvedReplyLanguage
+        transcriptMessages.append(TranscriptMessage(
+            content: .text(language.localized(makeText)),
+            replyLanguage: language
+        ))
+    }
+
+    private func isPendingAssistantResponse(_ response: ChekinanaCommandResponse) -> Bool {
+        !ChekinanaConversationCoordinator.confirmationCodes(in: response).isEmpty
+    }
+
+    private func removeConfirmationActions(_ codes: [String]) {
+        let invalidated = Set(codes)
+        transcriptMessages = transcriptMessages.compactMap { message in
+            guard case .confirmationActions(let existing) = message.content else { return message }
+            let remaining = existing.filter { !invalidated.contains($0) }
+            guard !remaining.isEmpty else { return nil }
+            return TranscriptMessage(
+                id: message.id,
+                role: message.role,
+                content: .confirmationActions(remaining),
+                replyLanguage: message.replyLanguage
+            )
+        }
+    }
+
+    private func adoptAssistantReplacement(_ ledger: ChekinanaConfirmationLedger) -> Bool {
+        guard !confirmationLedger.activeConfirmationCodes.contains(where: { confirmationLedger.cancellationRequiresRecovery($0) }) else {
+            assistantMessage("assistant.dialog.recovery_first", "This operation still needs file recovery. Use its existing confirmation to finish recovery before changing it.")
+            return false
+        }
+        let oldCodes = session.dialogue.pendingCodes
+        let result = confirmationLedger.cancelAll()
+        guard result.retainedForRecovery == 0 else { return false }
+        confirmationLedger.invalidateIdolCandidates()
+        session.dialogue.consumedConfirmationCodes.formUnion(oldCodes)
+        removeConfirmationActions(oldCodes)
+        removeIdolCandidateMessages()
+        activeIdolCandidateTokens = []
+        confirmedIdolCandidateTokens = []
+        confirmationLedger = ledger
+        session.dialogue.localIdolDraft = nil
+        session.dialogue.pendingCodes = []
+        assistantMessage("assistant.dialog.corrected", "The previous confirmation is now inactive. Review this corrected preview before confirming.")
+        return true
+    }
+
+    private func cancelAssistantPending(announcing: Bool = true) -> Bool {
+        guard !isSubmitting else { return false }
+        let dialogue = session.dialogue
+        if dialogue.pendingCodes.contains(where: { confirmationLedger.cancellationRequiresRecovery($0) }) {
+            assistantMessage("assistant.dialog.recovery_first", "This operation still needs file recovery. Use its existing confirmation to finish recovery before changing it.")
+            return false
+        }
+        for code in dialogue.pendingCodes {
+            if code != dialogue.localIdolDraft?.token { _ = confirmationLedger.cancel(code) }
+            dialogue.consumedConfirmationCodes.insert(code)
+        }
+        removeConfirmationActions(dialogue.pendingCodes)
+        confirmationLedger.invalidateIdolCandidates()
+        activeIdolCandidateTokens.removeAll()
+        removeIdolCandidateMessages()
+        dialogue.clearPlan()
+        dialogue.lastSubmittedText = nil
+        invalidateEventCandidateFlow()
+        retainedEventFields = nil
+        awaitsEventCity = false
+        conversationState.clearDraft()
+        pendingClarificationPlan = []
+        clarificationRawTail = []
+        plannedOperations = []
+        plannedRawTail = []
+        if announcing { assistantMessage("assistant.dialog.cancelled", "Cancelled. No further changes will be made.") }
+        return true
+    }
+
+    private func handleAssistantControl(
+        _ input: String,
+        userMessageAlreadyAppended: Bool = false
+    ) -> Bool {
+        guard let control = ChekinanaAssistantInput.control(input) else { return false }
+        prompt = ""
+        if !userMessageAlreadyAppended { appendUserMessage(input) }
+        switch control {
+        case .help:
+            assistantMessage("assistant.dialog.help", "Tell me which Idol, Cheki, or Event to add, find, change, or delete. For example: ‘I took 3 Cheki with Alice yesterday’ or ‘Who did I take Cheki with from September 1 to September 10?’ I will preview writes before asking you to confirm.")
+        case .unsupportedReduction:
+            assistantMessage("assistant.dialog.no_partial_undo", "I will not guess which existing Cheki to subtract. Select the record and tell me its intended remaining quantity, or explicitly ask to delete that whole record.")
+        case .cancel:
+            _ = cancelAssistantPending()
+        case .confirm:
+            if let code = session.dialogue.pendingCodes.first, session.dialogue.pendingCodes.count == 1 {
+                submitExplicitCommand("confirm \(code)")
+            } else if case .code(let code) = confirmationLedger.implicitConfirmation() {
+                submitExplicitCommand("confirm \(code)")
+            } else {
+                assistantMessage("assistant.dialog.choose_confirmation", "Select the matching candidate or confirmation first. Nothing was saved.")
+            }
+        case .choose(let index):
+            let candidates = transcriptMessages.reversed().compactMap { message -> [ChekinanaIdolCard]? in
+                switch message.content {
+                case .idolCards(let cards), .idolCardsWithNotice(let cards, _):
+                    let active = cards.filter { $0.selectionToken.map(activeIdolCandidateTokens.contains) == true }
+                    return active.isEmpty ? nil : active
+                default: return nil
+                }
+            }.first ?? []
+            let source = ChekinanaAssistantChoicePolicy.route(index, source: session.dialogue.choiceSource,
+                libraryCount: session.dialogue.choices.count, catalogueCount: candidates.count,
+                clarificationCount: conversationState.draft?.localChoice?.options.count ?? 0)
+            if source == .clarification, let choice = conversationState.draft?.localChoice {
+                applyLocalChoice(choice.options[index].id)
+                return true
+            }
+            if source == .catalogue, let token = candidates[index].selectionToken {
+                plannedOperations = session.dialogue.pendingOperation.map { [$0] } ?? []
+                plannedRawTail = session.dialogue.remainingOperations
+                plannedTarget = session.dialogue.remainingTarget
+                plannedUserText = session.dialogue.pendingUserText
+                session.dialogue.remainingOperations = []
+                activeIdolCandidateTokens = []
+                removeIdolCandidateMessages()
+                executeCommands(["selectidolcandidate \(token)"], batchesIdolAdds: false)
+                return true
+            }
+            guard source == .library else {
+                assistantMessage("assistant.dialog.unclear_reference", "I cannot tell which item you mean. Give its name or a result number. The pending preview is unchanged.")
+                return true
+            }
+            let choice = session.dialogue.choices[index]
+            guard session.dialogue.capture(choice.reference, in: modelContext) == choice else {
+                assistantMessage("assistant.dialog.stale", "The selected item or library changed. Cancel this preview and ask again.")
+                return true
+            }
+            session.dialogue.target = choice
+            selectedChekiID = choice.reference.kind == .cheki ? choice.reference.id : nil
+            assistantMessage("assistant.dialog.selected", "Selected. Tell me what to view, change, or delete for this item.")
+        }
+        return true
+    }
+
+    private func acceptAssistantInterpretation(_ interpretation: ChekinanaNLInterpretation, request: PendingNaturalLanguageRequest) throws {
+        guard !session.dialogue.interpretedTurns.contains(request.id) else { isSubmitting = false; return }
+        var rawOperations: [ChekinanaNLOperation]
+        switch interpretation {
+        case .plan(let operations): rawOperations = operations
+        case .clarify(let operation, _): rawOperations = [operation]
+        case .reject:
+            isSubmitting = false
+            assistantMessage("assistant.dialog.unsupported", "I could not safely match that request. Specify the Idol, Cheki record, Event, or date range. Nothing was changed.")
+            return
+        }
+        guard ChekinanaAssistantScope.allows(rawOperations) else {
+            isSubmitting = false
+            assistantMessage("assistant.dialog.unsupported", "I could not safely match that request. Specify the Idol, Cheki record, Event, or date range. Nothing was changed.")
+            return
+        }
+        if case .plan = interpretation, !request.isCorrection {
+            let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+            let idolNames = try modelContext.fetch(FetchDescriptor<Idol>()).filter {
+                ChekinanaVisibilityPolicy.includesIdol($0.id, hiddenIDs: hiddenIDs)
+            }.map(\.name)
+            let eventNames = try modelContext.fetch(FetchDescriptor<Event>()).map(\.name)
+            do {
+                rawOperations = try ChekinanaAssistantMultiTarget.expand(
+                    rawOperations, utterance: request.input,
+                    idolNames: idolNames, eventNames: eventNames
+                )
+            } catch {
+                isSubmitting = false
+                assistantMessage("assistant.dialog.multiple_targets_unclear", "I could not unambiguously identify every requested name. Specify each full name and whether you want separate results or one combined result. Nothing was changed.")
+                return
+            }
+        }
+        let reads: Set<ChekinanaNLIntent> = [.listidol, .showidol, .listevent, .showevent, .listcheki, .showcheki, .listrecord, .showrecord, .statscheki]
+        let hasWrite = rawOperations.contains { !reads.contains($0.intent) }
+        if hasWrite, !request.isCorrection, !ChekinanaAssistantInput.isExplicitRepeat(request.input, excluding: rawOperations.flatMap { [$0.slots.note, $0.slots.name, $0.slots.group, $0.slots.idol, $0.slots.target, $0.slots.event].compactMap { $0 } + ($0.slots.idols ?? []) }),
+           session.dialogue.completedWrites.contains(request.input, generation: try ChekinanaLibraryGenerationStore.current(in: modelContext)) {
+            isSubmitting = false
+            assistantMessage("assistant.dialog.duplicate", "That request already has a preview or was completed. Confirm the existing preview, or explicitly ask to add more.")
+            return
+        }
+        if hasWrite, session.dialogue.pendingOperation != nil, !request.isCorrection {
+            isSubmitting = false
+            assistantMessage("assistant.dialog.pending_first", "A change is still awaiting confirmation. Confirm or cancel it before starting another change. You can still ask read-only questions.")
+            return
+        }
+        if request.isCorrection, session.dialogue.pendingCodes.contains(where: { code in
+            guard let entry = confirmationLedger.entry(for: code), case .deleteIdol(let payload) = entry.action else { return false }
+            return (payload.cascadeAuthorization?.selectedIdolIDs.count ?? 0) > 1
+        }) {
+            isSubmitting = false
+            assistantMessage("assistant.dialog.batch_delete_correction", "Cancel this deletion preview before requesting a different group. Nothing was changed.")
+            return
+        }
+        let batchCount = request.isCorrection ? 1 : ChekinanaConversationCoordinator.leadingBatchCount(rawOperations)
+        let originalTarget = session.dialogue.target
+        if rawOperations.contains(where: { $0.slots.contextRef == "last_target" }) { session.dialogue.target = request.contextTarget }
+        let resolved: [ChekinanaNLOperation]
+        do {
+            resolved = try rawOperations.prefix(batchCount).map { operation in
+                if request.isCorrection, let previous = session.dialogue.pendingOperation {
+                    return try session.dialogue.resolveCorrection(operation, previous: previous,
+                        allowsTargetChange: ChekinanaAssistantInput.explicitlyChangesTarget(request.input,
+                            from: previous.slots.target ?? session.dialogue.pendingTarget?.name, to: operation.slots.target,
+                            excluding: [operation.slots.note, operation.slots.bio, operation.slots.name, operation.slots.group, operation.slots.city, operation.slots.livehouse].compactMap { $0 }), in: modelContext)
+                }
+                return try session.dialogue.resolveBound(operation, to: request.contextTarget, in: modelContext)
+            }
+        }
+        catch { session.dialogue.target = originalTarget; throw error }
+        session.dialogue.target = originalTarget
+        if let fields = try ChekinanaAssistantEventFlow.continuedCandidate(
+            for: interpretation, retained: retainedEventFields,
+            resolvedOperation: resolved.first, isCorrection: request.isCorrection
+        ) {
+            isSubmitting = false
+            replacesPendingPreview = request.isCorrection
+            replacementEventBackup = retainedEventFields
+            retainedEventFields = fields
+            let generation = eventCandidateState.begin(url: fields.weiboURL)
+            _ = eventCandidateState.complete(fields, generation: generation)
+            prepareEventCandidateConfirmation()
+            return
+        }
+        let result: ChekinanaConversationCompileResult
+        switch interpretation {
+        case .plan:
+            result = ChekinanaConversationCoordinator.compile(resolved, selections: request.selections, modelContext: modelContext)
+        case .clarify(_, let missing):
+            result = ChekinanaConversationCoordinator.compile(.clarify(draft: resolved[0], missing: missing), selections: request.selections, modelContext: modelContext)
+        case .reject: return
+        }
+        isSubmitting = false
+        if request.isCorrection {
+            guard case .commands = result else {
+                assistantMessage("assistant.dialog.correction_incomplete", "That correction is not ready yet. The previous preview is still pending; include the exact new value.")
+                return
+            }
+            replacesPendingPreview = true
+        }
+        session.dialogue.interpretedTurns.insert(request.id)
+        plannedUserText = request.isCorrection ? session.dialogue.pendingUserText : request.input
+        plannedOperations = Array(rawOperations.prefix(batchCount))
+        plannedRawTail = Array(rawOperations.dropFirst(batchCount))
+        plannedTarget = request.contextTarget
+        if case .clarification = result {
+            pendingClarificationPlan = Array(rawOperations.prefix(batchCount))
+            clarificationRawTail = Array(rawOperations.dropFirst(batchCount))
+        }
+        processConversationResult(result, originalUtterance: request.input)
+    }
+
+    private func rememberAssistantResponse(_ response: ChekinanaCommandResponse) {
+        guard !isPendingAssistantResponse(response) else { return }
+        let references: [ChekinanaAssistantTargetReference]
+        switch response {
+        case .idolCard(let card) where card.selectionToken == nil: references = [.init(kind: .idol, id: card.id)]
+        case .eventCard(let card): references = [.init(kind: .event, id: card.id)]
+        case .eventCards(let cards): references = cards.map { .init(kind: .event, id: $0.id) }
+        case .chekiCards(let cards): references = cards.map { .init(kind: .cheki, id: $0.id) }
+        default: return
+        }
+        session.dialogue.choiceSource = .library
+        session.dialogue.choices = references.compactMap { session.dialogue.capture($0, in: modelContext) }
+        session.dialogue.target = session.dialogue.choices.count == 1 ? session.dialogue.choices.first : nil
+    }
+
+    private func prepareLocalIdol(name: String, operation: ChekinanaNLOperation) {
+        guard let normalized = try? ChekinanaManualIdolInput.normalizedName(name) else { return }
+        let id = UUID()
+        let token = "local-\(id.uuidString.lowercased())"
+        session.dialogue.lastSubmittedText = currentUserTurn
+        session.dialogue.localIdolDraft = (token, normalized, try? ChekinanaLibraryGenerationStore.current(in: modelContext))
+        session.dialogue.pendingCodes = [token]
+        session.dialogue.pendingOperation = operation
+        session.dialogue.pendingUserText = plannedUserText ?? currentUserTurn
+        assistantText {
+            ChekinanaL10n.format(
+                "assistant.dialog.local_idol",
+                fallback: "No catalogue entry was found. Create a local Idol named %@? You can add more details afterward.",
+                normalized
+            )
+        }
+        transcriptMessages.append(TranscriptMessage(
+            content: .confirmationActions([token]),
+            replyLanguage: resolvedReplyLanguage
+        ))
+    }
+
+    private func confirmLocalIdol() {
+        guard !isSubmitting, let draft = session.dialogue.localIdolDraft,
+              !session.dialogue.consumedConfirmationCodes.contains(draft.token),
+              let id = UUID(uuidString: String(draft.token.dropFirst("local-".count))) else { return }
+        isSubmitting = true
+        do {
+            guard try ChekinanaLibraryGenerationStore.current(in: modelContext) == draft.generation else { throw ChekinanaAssistantLibrary.ReadError.missing }
+            let idols = try modelContext.fetch(FetchDescriptor<Idol>())
+            if !idols.contains(where: { $0.id == id }) {
+                guard !idols.contains(where: { ChekinanaLocalEntityMatch.equal($0.name, draft.name) }) else { throw ChekinanaAssistantLibrary.ReadError.ambiguous }
+                let idol = try ChekinanaManualIdolInput.makeNameOnlyIdol(name: draft.name)
+                idol.id = id
+                modelContext.insert(idol)
+                try modelContext.save()
+            }
+            session.dialogue.target = session.dialogue.capture(.init(kind: .idol, id: id), in: modelContext)
+            session.dialogue.consumedConfirmationCodes.insert(draft.token)
+            session.dialogue.completedWrites.complete(session.dialogue.pendingUserText, generation: try? ChekinanaLibraryGenerationStore.current(in: modelContext))
+            removeConfirmationActions([draft.token])
+            session.dialogue.pendingCodes = []
+            session.dialogue.pendingOperation = nil
+            session.dialogue.localIdolDraft = nil
+            assistantText {
+                ChekinanaL10n.format("assistant.idol.added", fallback: "Added %@.", draft.name)
+            }
+            isSubmitting = false
+            resumeAssistantPlan()
+        } catch {
+            modelContext.rollback()
+            isSubmitting = false
+            assistantText { error.localizedDescription }
+        }
+    }
+
+    private func resumeAssistantPlan() {
+        guard !isSubmitting else { return }
+        let commands = session.dialogue.remainingCommands
+        let operations = session.dialogue.remainingOperations
+        guard !commands.isEmpty || !operations.isEmpty else { return }
+        plannedTarget = session.dialogue.remainingTarget
+        plannedUserText = session.dialogue.remainingUserText
+        session.dialogue.remainingCommands = []
+        session.dialogue.remainingOperations = []
+        if !commands.isEmpty {
+            plannedOperations = []
+            plannedRawTail = operations
+            executeCommands(commands, batchesIdolAdds: false)
+            return
+        }
+        let batch = Array(operations.prefix(ChekinanaConversationCoordinator.leadingBatchCount(operations)))
+        guard !batch.isEmpty else { return }
+        do {
+            let resolved = try batch.map { try session.dialogue.resolveBound($0, to: plannedTarget, in: modelContext) }
+            let result = ChekinanaConversationCoordinator.compile(resolved, modelContext: modelContext)
+            plannedOperations = batch
+            plannedRawTail = Array(operations.dropFirst(batch.count))
+            if case .clarification = result { pendingClarificationPlan = batch; clarificationRawTail = plannedRawTail }
+            processConversationResult(result)
+        } catch {
+            assistantMessage("assistant.dialog.step_paused", "The next step could not be prepared. Earlier confirmed changes were kept; ask again for the remaining step.")
+        }
     }
 
     private func submitPrompt() {
-        let input = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty, !isSubmitting else {
+        let submittedText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !submittedText.isEmpty, !isSubmitting else { return }
+        let fallback = replyLanguage ?? ChekinanaAssistantReplyLanguage.interfaceFallback()
+        let activeCodes = confirmationLedger.activeConfirmationCodes
+            .union(session.dialogue.pendingCodes)
+
+        if ChekinanaAssistantInput.isExactLocalConfirmationCommand(
+            submittedText,
+            activeCodes: activeCodes
+        ) {
+            replyLanguage = fallback
+            session.replyLanguage = fallback
+            fallback.localized {
+                prompt = ""
+                currentUserTurn = submittedText
+                isPromptFocused = false
+                appendUserMessage(redactedCommandEcho(
+                    for: submittedText,
+                    activeConfirmationCodes: activeCodes
+                ))
+                submitExplicitCommand(submittedText)
+            }
             return
         }
 
+        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            submittedText,
+            activeConfirmationCodes: activeCodes
+        ) else {
+            replyLanguage = fallback
+            session.replyLanguage = fallback
+            fallback.localized {
+                submitResolvedPrompt(submittedText, language: fallback)
+            }
+            return
+        }
+
+        startReplyLanguageResolution(
+            submittedText,
+            currentLanguage: replyLanguage,
+            interfaceFallback: ChekinanaAssistantReplyLanguage.interfaceFallback(),
+            activeConfirmationCodes: activeCodes
+        )
+    }
+
+    private func startReplyLanguageResolution(
+        _ submittedText: String,
+        currentLanguage: ChekinanaAssistantReplyLanguage?,
+        interfaceFallback: ChekinanaAssistantReplyLanguage,
+        activeConfirmationCodes: Set<String>
+    ) {
+        replyLanguageRequestTask?.cancel()
+        let generation = replyLanguageRequestGate.begin()
+        prompt = ""
+        currentUserTurn = submittedText
+        isPromptFocused = false
+        activeReplyLanguageInput = submittedText
+        isSubmitting = true
+        appendUserMessage(redactedCommandEcho(for: submittedText))
+        let client = replyLanguageClient
+        let task = Task { @MainActor in
+            let resolution = await ChekinanaReplyLanguageResolver.resolve(
+                utterance: submittedText,
+                currentLanguage: currentLanguage,
+                interfaceFallback: interfaceFallback,
+                activeConfirmationCodes: activeConfirmationCodes,
+                client: client
+            )
+            guard replyLanguageRequestGate.accepts(
+                generation,
+                isCancelled: Task.isCancelled
+            ), !isClosing else { return }
+            replyLanguageRequestTask = nil
+            activeReplyLanguageInput = nil
+            isSubmitting = false
+            replyLanguage = resolution.language
+            session.replyLanguage = resolution.language
+
+            resolution.language.localized {
+                if resolution.switchRequested {
+                    assistantText { resolution.language.switchConfirmation }
+                    if let businessUtterance = resolution.businessUtterance {
+                        submitResolvedPrompt(
+                            businessUtterance,
+                            language: resolution.language,
+                            userMessageAlreadyAppended: true
+                        )
+                    }
+                } else if let businessUtterance = resolution.businessUtterance {
+                    submitResolvedPrompt(
+                        businessUtterance,
+                        language: resolution.language,
+                        userMessageAlreadyAppended: true
+                    )
+                }
+            }
+        }
+        replyLanguageRequestTask = task
+    }
+
+    private func submitResolvedPrompt(
+        _ input: String,
+        language: ChekinanaAssistantReplyLanguage,
+        userMessageAlreadyAppended: Bool = false
+    ) {
+        prompt = ""
+        currentUserTurn = input
+        isPromptFocused = false
+        if !userMessageAlreadyAppended {
+            appendUserMessage(redactedCommandEcho(for: input))
+        }
+
+        if handleAssistantControl(input, userMessageAlreadyAppended: true) { return }
+        if awaitsEventCity, input.count <= 200,
+           input.range(of: #"(?:查看|统计|統計|查询|查詢|删除|刪除|添加|新增|show|list|delete|add|how|見せ|削除|追加)"#, options: [.regularExpression, .caseInsensitive]) == nil,
+           var fields = retainedEventFields {
+            fields.city = input
+            retainedEventFields = fields
+            awaitsEventCity = false
+            let generation = eventCandidateState.begin(url: fields.weiboURL)
+            _ = eventCandidateState.complete(fields, generation: generation)
+            prepareEventCandidateConfirmation()
+            return
+        }
+        if session.dialogue.pendingOperation != nil, input == session.dialogue.lastSubmittedText {
+            assistantMessage("assistant.dialog.duplicate", "That request already has a preview or was completed. Confirm the existing preview, or explicitly ask to add more.")
+            return
+        }
         // Keep request, retry, and media controls above the software keyboard.
         // The user can tap the retained input to continue editing at any time.
-        isPromptFocused = false
 
         guard !ChekinanaNLPrivacyGuard.containsCredentialedHTTPURL(input) else {
-            prompt = ""
-            appendUserMessage(redactedCommandEcho(for: input))
-            transcriptMessages.append(TranscriptMessage(content: .text(ChekinanaConversationMessage.privacyProtected.text)))
+            assistantText { ChekinanaConversationMessage.privacyProtected.text }
             return
         }
 
@@ -1339,26 +1678,34 @@ struct ContentView: View {
             input,
             activeConfirmationCodes: activeConfirmationCodes
         ) else {
-            prompt = ""
-            appendUserMessage(redactedCommandEcho(for: input))
-            transcriptMessages.append(
-                TranscriptMessage(content: .text(ChekinanaConversationMessage.privacyProtected.text))
-            )
+            assistantText { ChekinanaConversationMessage.privacyProtected.text }
             return
         }
 
-        appendUserMessage(redactedCommandEcho(for: input))
-        prompt = ""
-        let requestDraft = conversationState.draft.map {
-            ChekinanaNLRequestDraft(operation: $0.operation, missing: $0.missing)
-        }
+        let correcting = session.dialogue.pendingOperation != nil && ChekinanaAssistantInput.isCorrection(input)
+        let requestDraft = correcting
+            ? session.dialogue.pendingOperation.map { ChekinanaNLRequestDraft(operation: $0, missing: []) }
+            : conversationState.draft.map { ChekinanaNLRequestDraft(operation: $0.operation, missing: $0.missing) }
         var selections = conversationState.draft?.selections ?? .init()
         selections.selectedChekiID = selectedChekiID
+        let originalTarget = session.dialogue.target
+        if correcting, let pendingTarget = session.dialogue.pendingTarget { session.dialogue.target = pendingTarget }
+        let previousStatistics = session.dialogue.statistics
+        let requestContext = session.dialogue.safeContext(in: modelContext, codes: activeConfirmationCodes)
+        if !correcting, (ChekinanaAssistantInput.usesTargetReference(input) && requestContext?.lastTarget == nil)
+            || (previousStatistics != nil && requestContext?.lastStatistics == nil && input.range(of: #"^(?:那|那么|那麼|では|じゃあ|then|what about)"#, options: [.regularExpression, .caseInsensitive]) != nil) {
+            session.dialogue.target = originalTarget
+            assistantMessage("assistant.dialog.unclear_reference", "I cannot tell which item you mean. Give its name or a result number. The pending preview is unchanged.")
+            return
+        }
+        let contextTarget = session.dialogue.validatedTarget(in: modelContext)
+        session.dialogue.target = originalTarget
         startRemoteInterpretation(.init(
-            input: input,
-            draft: requestDraft,
-            activeConfirmationCodes: activeConfirmationCodes,
-            selections: selections
+            input: input, draft: requestDraft, activeConfirmationCodes: activeConfirmationCodes,
+            selections: selections,
+            replyLanguage: language,
+            context: requestContext,
+            isCorrection: correcting, contextTarget: contextTarget
         ))
     }
 
@@ -1369,6 +1716,7 @@ struct ContentView: View {
         pendingNLRetry = nil
         isSubmitting = true
         let task = Task { @MainActor in
+            await request.replyLanguage.localized {
 #if DEBUG
             let interpretationStartedAt = DispatchTime.now().uptimeNanoseconds
 #endif
@@ -1378,7 +1726,8 @@ struct ContentView: View {
                     localDate: ChekinanaNLInterpretClient.localDateString(),
                     timezone: TimeZone.current.identifier,
                     draft: request.draft,
-                    activeConfirmationCodes: request.activeConfirmationCodes
+                    activeConfirmationCodes: request.activeConfirmationCodes,
+                    context: request.context
                 )
 #if DEBUG
                 let operationCount: Int
@@ -1399,15 +1748,7 @@ struct ContentView: View {
                 nlRequestTask = nil
                 activeNLRequest = nil
                 pendingNLRetry = nil
-                processConversationResult(
-                    ChekinanaConversationCoordinator.compile(
-                        interpretation,
-                        continuingIntent: request.draft?.intent,
-                        selections: request.selections,
-                        modelContext: modelContext
-                    ),
-                    originalUtterance: request.input
-                )
+                try acceptAssistantInterpretation(interpretation, request: request)
             } catch {
 #if DEBUG
                 ChekinanaNLTimingLog.failed(startedAt: interpretationStartedAt)
@@ -1418,11 +1759,14 @@ struct ContentView: View {
                 ) else { return }
                 nlRequestTask = nil
                 activeNLRequest = nil
+                if let referenceError = error as? ChekinanaAssistantReferenceError {
+                    assistantText { referenceError.localizedDescription }
+                    isSubmitting = false
+                    return
+                }
                 let clientError = error as? ChekinanaNLClientError
                 let message = clientError.map(ChekinanaConversationMessage.forClientError) ?? .networkUnavailable
-                transcriptMessages.append(
-                    TranscriptMessage(content: .text(message.text))
-                )
+                assistantText { message.text }
                 if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     prompt = request.input
                 }
@@ -1430,6 +1774,7 @@ struct ContentView: View {
                     pendingNLRetry = request
                 }
                 isSubmitting = false
+            }
             }
         }
         nlRequestTask = task
@@ -1469,13 +1814,15 @@ struct ContentView: View {
             return
         }
         isSubmitting = true
+        let language = resolvedReplyLanguage
         let task = Task { @MainActor in
+            await language.localized {
             do {
                 let client = ChekinanaEventCandidateClient()
                 let fields: ChekinanaEventCandidateFields
                 switch request {
                 case .weiboURL(let url):
-                    fields = try await client.fetch(weiboURL: url)
+                    fields = try await ChekinanaAssistantEventFlow.extract(url: url) { try await client.fetch(weiboURL: $0) }
                 case .text(let text):
                     fields = try await client.parse(text: text)
                 }
@@ -1487,14 +1834,11 @@ struct ContentView: View {
                     return
                 }
                 eventCandidateTask = nil
-                guard eventCandidateState.complete(fields, generation: generation) else { return }
+                let merged = ChekinanaAssistantEventFlow.merge(fields, operation: plannedOperations.first)
+                retainedEventFields = merged
+                guard eventCandidateState.complete(merged, generation: generation) else { return }
                 guard releaseEventCandidateBusy(generation: generation) else { return }
-                transcriptMessages.append(TranscriptMessage(content: .text(
-                    ChekinanaL10n.text(
-                        "assistant.event.extracted",
-                        fallback: "Event details were extracted. Review every field; nothing has been saved yet."
-                    )
-                )))
+                prepareEventCandidateConfirmation()
             } catch is CancellationError {
                 guard eventCandidateState.accepts(generation, isCancelled: Task.isCancelled),
                       eventCandidateBusyOwner.owns(
@@ -1526,6 +1870,7 @@ struct ContentView: View {
                 }
                 _ = releaseEventCandidateBusy(generation: generation)
             }
+            }
         }
         eventCandidateTask = task
     }
@@ -1547,24 +1892,57 @@ struct ContentView: View {
 
     @MainActor
     private func prepareEventCandidateConfirmation() {
-        guard !isSubmitting,
-              case .editing(let fields) = eventCandidateState.phase,
-              ChekinanaEventCandidateValidator.blockers(for: fields).isEmpty else {
+        guard !isSubmitting, case .editing(let fields) = eventCandidateState.phase else { return }
+        retainedEventFields = fields
+        let operation = ChekinanaAssistantEventFlow.operation(for: fields)
+        switch ChekinanaAssistantEventFlow.nextStep(for: fields) {
+        case .missing(let missing):
+            conversationState.draft = .init(operation: operation, missing: missing)
+            assistantMessage("assistant.dialog.event_missing", "The extracted Event needs a name and a date. Reply with the missing information; the candidate is preserved.")
             return
-        }
-        let executor = ChekinanaCommandExecutor(
-            modelContext: modelContext,
-            confirmationLedger: confirmationLedger
-        )
-        let output = executor.prepareEventCandidate(fields)
-        if case .text(let text) = output, text.hasPrefix("error:") {
-            handleCommandResponse(output)
+        case .city:
+            awaitsEventCity = true
+            assistantMessage("assistant.dialog.event_city", "Which city is this Event in? Reply with the city name; the other extracted details are preserved.")
             return
+        case .invalid(let blockers):
+            assistantText { blockers.map(\.message).joined(separator: "\n") }
+            return
+        case .ready: break
         }
-        eventCandidateTask = nil
-        eventCandidateState.invalidate()
-        activeEventCandidateRequest = nil
+        let replacing = replacesPendingPreview
+        replacesPendingPreview = false
+        let ledger = replacing ? ChekinanaConfirmationLedger() : confirmationLedger
+        let executor = ChekinanaCommandExecutor(modelContext: modelContext, confirmationLedger: ledger)
+        let output = resolvedReplyLanguage.localized {
+            executor.prepareEventCandidate(fields)
+        }
+        if replacing {
+            guard isPendingAssistantResponse(output), adoptAssistantReplacement(ledger) else {
+                _ = ledger.cancelAll()
+                retainedEventFields = replacementEventBackup
+                handleCommandResponse(output)
+                return
+            }
+        }
         handleCommandResponse(output)
+        if isPendingAssistantResponse(output) {
+            session.dialogue.pendingOperation = operation
+            session.dialogue.pendingCodes = ChekinanaConversationCoordinator.confirmationCodes(in: output)
+            if !replacing {
+                session.dialogue.remainingOperations = plannedRawTail
+                session.dialogue.remainingTarget = plannedTarget
+                session.dialogue.remainingUserText = plannedUserText ?? currentUserTurn
+                session.dialogue.pendingUserText = plannedUserText ?? currentUserTurn
+                plannedRawTail = []
+                plannedOperations = []
+                plannedUserText = nil
+            }
+            session.dialogue.lastSubmittedText = session.dialogue.pendingUserText
+            if session.dialogue.pendingUserText.isEmpty { session.dialogue.pendingUserText = currentUserTurn }
+            conversationState.clearDraft()
+            eventCandidateState.invalidate()
+            activeEventCandidateRequest = nil
+        }
     }
 
     @MainActor
@@ -1578,12 +1956,12 @@ struct ContentView: View {
             _ = releaseEventCandidateBusy(generation: ownedGeneration)
         }
         if announce {
-            transcriptMessages.append(TranscriptMessage(content: .text(
+            assistantText {
                 ChekinanaL10n.text(
                     "assistant.event.cancelled",
                     fallback: "The Event candidate was cancelled. No Event was saved."
                 )
-            )))
+            }
         }
     }
 
@@ -1602,8 +1980,9 @@ struct ContentView: View {
     }
 
     private func retryRemoteInterpretation() {
-        guard let request = pendingNLRetry, !isSubmitting else { return }
+        guard var request = pendingNLRetry, !isSubmitting else { return }
         prompt = ""
+        request.replyLanguage = resolvedReplyLanguage
         startRemoteInterpretation(request)
     }
 
@@ -1616,28 +1995,53 @@ struct ContentView: View {
         if let request, prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             prompt = request.input
         }
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.text(
                 "assistant.interpretation.cancelled",
                 fallback: "The request was cancelled. Your input and current selections were preserved."
             )
-        )))
+        }
+    }
+
+    private func cancelReplyLanguageResolution() {
+        guard let input = activeReplyLanguageInput else { return }
+        invalidateReplyLanguageRequest()
+        isSubmitting = false
+        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            prompt = input
+        }
+        let language = replyLanguage ?? ChekinanaAssistantReplyLanguage.interfaceFallback()
+        language.localized {
+            assistantText {
+                ChekinanaL10n.text(
+                    "assistant.interpretation.cancelled",
+                    fallback: "The request was cancelled. Your input and current selections were preserved."
+                )
+            }
+        }
     }
 
     private func cancelPendingRetry() {
         pendingNLRetry = nil
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.text(
                 "assistant.retry.cancelled",
                 fallback: "Retry was cancelled. Your input remains in the composer."
             )
-        )))
+        }
     }
 
     private func invalidateRemoteRequest() {
         nlRequestTask?.cancel()
         nlRequestTask = nil
         nlRequestGate.invalidate()
+    }
+
+    private func invalidateReplyLanguageRequest() {
+        replyLanguageRequestTask?.cancel()
+        replyLanguageRequestTask = nil
+        replyLanguageRequestGate.invalidate()
+        activeReplyLanguageInput = nil
     }
 
     private func invalidateIdolRunners() {
@@ -1661,121 +2065,212 @@ struct ContentView: View {
         confirmationLedger.invalidateIdolCandidates()
         activeIdolCandidateTokens.removeAll()
         conversationState.clearDraft()
+        pendingClarificationPlan = []
+        clarificationRawTail = []
+        plannedOperations = []
+        plannedRawTail = []
         isSubmitting = false
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.text("assistant.conversation.cancelled", fallback: "The conversation was cancelled.")
-        )))
+        }
     }
 
     private func submitExplicitCommand(_ command: String) {
         guard !isSubmitting else { return }
-        let actionText = commandName(from: command) == "cancel"
-            ? ChekinanaL10n.text("assistant.action.cancelled", fallback: "Cancelled")
-            : ChekinanaL10n.text("assistant.action.confirmed", fallback: "Confirmed")
-        transcriptMessages.append(
-            TranscriptMessage(role: .user, content: .text(actionText))
-        )
-        executeCommands([command], announceSingle: false)
+        let parts = command.split(separator: " ").map(String.init)
+        let action = parts.first ?? ""
+        let code = parts.dropFirst().first
+        if action == "cancel" { _ = cancelAssistantPending(); return }
+        guard action == "confirm", let code else { return }
+        if session.dialogue.localIdolDraft?.token == code { confirmLocalIdol(); return }
+        guard !session.dialogue.consumedConfirmationCodes.contains(code), confirmationLedger.entry(for: code) != nil else {
+            assistantMessage("assistant.dialog.already_confirmed", "This confirmation is no longer active. Nothing was added again.")
+            return
+        }
+        executeCommands([command], announceSingle: false, batchesIdolAdds: false)
     }
 
     private func executeCommands(
-        _ commands: [String],
-        announceSingle: Bool = true,
-        continuesAfterOperationFailure: Bool = false,
-        batchesIdolAdds: Bool = true
+        _ commands: [String], announceSingle: Bool = true,
+        continuesAfterOperationFailure: Bool = false, batchesIdolAdds: Bool = true
     ) {
         guard !commands.isEmpty, !isSubmitting else { return }
-        if batchesIdolAdds, commands.allSatisfy({ commandName(from: $0) == "addidol" }) {
-            isSubmitting = true
-            commandExecutionTask = Task { @MainActor in
-                defer {
-                    commandExecutionTask = nil
-                    isSubmitting = false
-                }
-                let executor = ChekinanaCommandExecutor(
-                    modelContext: modelContext,
-                    confirmationLedger: confirmationLedger
-                )
-                let output = await executor.addIdols(commands)
-                guard !Task.isCancelled else { return }
-                handleCommandResponse(output)
-            }
-            return
-        }
-        if commands.count == 1,
-           let command = commands.first,
-           isAddIdolConfirmationCommand(command) {
-            executeAddIdolConfirmation(command)
-            return
-        }
-        if commands.contains(where: invalidatesVisibleIdolCandidates) {
-            activeIdolCandidateTokens.removeAll()
-        }
+        let initialOperations = plannedOperations
+        let initialRawTail = plannedRawTail
+        plannedRawTail = []
+        let initialTarget = plannedTarget
+        let replacing = replacesPendingPreview
+        replacesPendingPreview = false
+        let ledger = replacing ? ChekinanaConfirmationLedger() : confirmationLedger
+        let replacementTail = replacing ? session.dialogue.remainingCommands : []
+        let replacementTailOperations = replacing ? session.dialogue.remainingOperations : []
+        let originalText = plannedUserText ?? currentUserTurn
+        plannedUserText = nil
+        plannedOperations = []
         isSubmitting = true
-
-        let task = Task { @MainActor in
-            defer { commandExecutionTask = nil }
-            let executor = ChekinanaCommandExecutor(
-                modelContext: modelContext,
-                confirmationLedger: confirmationLedger
-            )
-            for (index, command) in commands.enumerated() {
-                guard !Task.isCancelled else {
-                    isSubmitting = false
-                    return
-                }
-                let output: ChekinanaCommandResponse
-                do {
-                    let pendingImages = try await loadPendingChekiImages(for: command)
-                    output = await executor.execute(command, pendingChekiImages: pendingImages)
-                } catch ChekinanaAsyncDeadlineError.cancelled {
-                    isSubmitting = false
-                    return
-                } catch {
-                    output = .text(ChekinanaL10n.format(
-                        "assistant.photo.load_failed",
-                        fallback: "error: The selected photos could not be loaded. Keep them selected and try again. %@",
-                        error.localizedDescription
-                    ))
-                }
-                guard !Task.isCancelled else {
-                    isSubmitting = false
-                    return
-                }
-                handleCommandResponse(output)
-
-                if ChekinanaConversationCoordinator.responseStopsPlan(output) {
-                    if index + 1 < commands.count {
-                        if continuesAfterOperationFailure,
-                           case .text(let text) = output,
-                           text.hasPrefix("error:") {
-                            continue
-                        }
-                        transcriptMessages.append(TranscriptMessage(content: .text(
-                            ChekinanaL10n.text(
-                                "assistant.plan.stopped",
-                                fallback: "Later operations were stopped safely. Complete the current choice or correct the error first."
-                            )
-                        )))
-                    }
-                    if case .requestAddChekiPhoto = output {
+        let language = resolvedReplyLanguage
+        commandExecutionTask = Task { @MainActor in
+            await language.localized {
+            defer { commandExecutionTask = nil; isSubmitting = false }
+            guard !Task.isCancelled, !isClosing else { return }
+            var queue: [(String, ChekinanaNLOperation?)] = commands.enumerated().map {
+                ($0.element, $0.offset < initialOperations.count ? initialOperations[$0.offset] : nil)
+            }
+            var executor = ChekinanaCommandExecutor(modelContext: modelContext, confirmationLedger: ledger)
+            executor.assistantDialogue = session.dialogue
+            var rawTail = initialRawTail
+            var executionTarget = initialTarget
+            var executionText = originalText
+            var replacementAdopted = false
+            defer {
+                if Task.isCancelled { session.retainRequiredRecovery(from: ledger) }
+                else if replacing && !replacementAdopted { _ = ledger.cancelAll() }
+            }
+            while !queue.isEmpty || !rawTail.isEmpty {
+                if queue.isEmpty {
+                    let batch = Array(rawTail.prefix(ChekinanaConversationCoordinator.leadingBatchCount(rawTail)))
+                    let next = batch[0]
+                    rawTail.removeFirst(batch.count)
+                    let previousTarget = session.dialogue.target
+                    if next.slots.contextRef == "last_target" { session.dialogue.target = executionTarget }
+                    let resolved: [ChekinanaNLOperation]
+                    do { resolved = try batch.map { try session.dialogue.resolveBound($0, to: executionTarget, in: modelContext) } }
+                    catch {
+                        session.dialogue.target = previousTarget
+                        assistantMessage("assistant.dialog.step_paused", "The next step could not be prepared. Earlier confirmed changes were kept; ask again for the remaining step.")
                         return
                     }
-                    isSubmitting = false
+                    session.dialogue.target = previousTarget
+                    let result = ChekinanaConversationCoordinator.compile(resolved, modelContext: modelContext)
+                    if case .commands(let ready) = result {
+                        queue = ready.map { ($0, next) }
+                    } else {
+                        plannedOperations = batch
+                        plannedRawTail = rawTail
+                        plannedTarget = executionTarget
+                        plannedUserText = executionText
+                        if case .clarification = result { pendingClarificationPlan = batch; clarificationRawTail = rawTail }
+                        isSubmitting = false
+                        processConversationResult(result)
+                        return
+                    }
+                }
+                let (command, operation) = queue.removeFirst()
+                guard !Task.isCancelled else { return }
+                guard ChekinanaAssistantScope.allowsCommand(commandName(from: command)) else {
+                    assistantMessage("assistant.dialog.text_only", "Assistant accepts text only. You can manage Idols, existing Cheki, Events, and Cheki quantity records without photos.")
+                    return
+                }
+                session.dialogue.executingOperation = operation
+                session.dialogue.catalogueLookupHadNoResults = false
+                session.dialogue.executingTarget = executionTarget
+                let parts = command.split(separator: " ").map(String.init)
+                let confirmingCode = parts.first == "confirm" ? parts.dropFirst().first : nil
+                if let code = confirmingCode {
+                    guard !session.dialogue.consumedConfirmationCodes.contains(code), confirmationLedger.entry(for: code) != nil else {
+                        assistantMessage("assistant.dialog.already_confirmed", "This confirmation is no longer active. Nothing was added again.")
+                        return
+                    }
+                    if !confirmationLedger.cancellationRequiresRecovery(code), let snapshot = session.dialogue.pendingTarget,
+                       session.dialogue.capture(snapshot.reference, in: modelContext) != snapshot {
+                        assistantMessage("assistant.dialog.stale", "The selected item or library changed. Cancel this preview and ask again.")
+                        return
+                    }
+                }
+                let preparedTarget = session.dialogue.captureWriteTarget(command, in: modelContext)
+                    ?? (operation?.slots.contextRef == "last_target" ? executionTarget : nil)
+                let output = await executor.execute(command)
+                guard !Task.isCancelled else { return }
+                if let operation, operation.intent == .addidol,
+                   session.dialogue.catalogueLookupHadNoResults,
+                   let name = operation.slots.name {
+                    if replacing {
+                        guard adoptAssistantReplacement(ledger) else { return }
+                        replacementAdopted = true
+                        queue += replacementTail.map { ($0, nil) }
+                        rawTail += replacementTailOperations
+                    }
+                    prepareLocalIdol(name: name, operation: operation)
+                    session.dialogue.pendingUserText = executionText
+                    session.dialogue.remainingUserText = executionText
+                    session.dialogue.remainingTarget = executionTarget
+                    session.dialogue.remainingCommands = queue.map { $0.0 }
+                    session.dialogue.remainingOperations = rawTail
+                    return
+                }
+                if replacing && !replacementAdopted {
+                    let candidateReady: Bool
+                    switch output {
+                    case .idolCards(let cards), .idolCardsWithNotice(let cards, _): candidateReady = cards.contains { $0.selectionToken != nil }
+                    default: candidateReady = false
+                    }
+                    guard isPendingAssistantResponse(output) || candidateReady else {
+                        if case .text = output { handleCommandResponse(output) }
+                        assistantMessage("assistant.dialog.preview_kept", "The correction could not be prepared. Your previous preview and its confirmation are still available.")
+                        return
+                    }
+                    guard adoptAssistantReplacement(ledger) else { return }
+                    replacementAdopted = true
+                    queue += replacementTail.map { ($0, nil) }
+                        rawTail += replacementTailOperations
+                }
+                handleCommandResponse(output)
+                guard !Task.isCancelled, !isClosing else { return }
+                rememberAssistantResponse(output)
+                if ChekinanaConversationCoordinator.responseStopsPlan(output) {
+                    return
+                }
+                if let code = confirmingCode, confirmationLedger.entry(for: code) == nil {
+                    session.dialogue.consumedConfirmationCodes.insert(code)
+                    session.dialogue.completedWrites.complete(session.dialogue.pendingUserText, generation: try? ChekinanaLibraryGenerationStore.current(in: modelContext))
+                    removeConfirmationActions([code])
+                    var group = ChekinanaAssistantConfirmationGroup(session.dialogue.pendingCodes)
+                    group.recordSuccess(code)
+                    session.dialogue.pendingCodes = group.pendingCodes
+                    guard group.isComplete else { return }
+                    session.dialogue.pendingOperation = nil
+                    session.dialogue.pendingTarget = nil
+                    retainedEventFields = nil
+                    let following = session.dialogue.remainingCommands
+                    let followingOps = session.dialogue.remainingOperations
+                    executionTarget = session.dialogue.remainingTarget
+                    executionText = session.dialogue.remainingUserText
+                    session.dialogue.remainingCommands = []
+                    session.dialogue.remainingOperations = []
+                    queue += following.map { ($0, nil) }
+                    rawTail += followingOps
+                }
+                if isPendingAssistantResponse(output) || (operation?.intent == .addidol && !activeIdolCandidateTokens.isEmpty) {
+                    session.dialogue.lastSubmittedText = executionText
+                    session.dialogue.pendingUserText = executionText
+                    session.dialogue.remainingUserText = executionText
+                    session.dialogue.pendingOperation = operation ?? session.dialogue.pendingOperation
+                    session.dialogue.pendingCodes = ChekinanaConversationCoordinator.confirmationCodes(in: output)
+                    if let preparedTarget,
+                       let refreshed = session.dialogue.capture(preparedTarget.reference, in: modelContext),
+                       refreshed.fingerprint == preparedTarget.fingerprint {
+                        // Preparing media can initialize the library generation marker.
+                        // Refresh only that witness, never the target identity or changed fields.
+                        session.dialogue.pendingTarget = refreshed
+                    } else { session.dialogue.pendingTarget = preparedTarget }
+                    session.dialogue.remainingTarget = executionTarget
+                    session.dialogue.remainingCommands = queue.map { $0.0 }
+                    session.dialogue.remainingOperations = rawTail
                     return
                 }
             }
-            isSubmitting = false
+            }
         }
-        commandExecutionTask = task
     }
 
     private func executeAddIdolConfirmation(_ command: String) {
         guard !isSubmitting else { return }
         isSubmitting = true
         let executionID = idolConfirmationGate.begin()
+        let language = resolvedReplyLanguage
 
         let operationTask = Task { @MainActor in
+            await language.localized {
             guard idolConfirmationGate.accepts(
                 executionID,
                 isCancelled: Task.isCancelled
@@ -1803,10 +2298,12 @@ struct ContentView: View {
                 isCancelled: Task.isCancelled
             ) else { return }
             finishAddIdolConfirmation(executionID: executionID, output: output)
+            }
         }
         idolConfirmationTask = operationTask
 
         idolConfirmationTimeoutTask = Task { @MainActor in
+            await language.localized {
             do {
                 try await Task.sleep(nanoseconds: Self.idolConfirmationTimeoutNanoseconds)
             } catch {
@@ -1818,12 +2315,13 @@ struct ContentView: View {
             idolConfirmationTask = nil
             idolConfirmationTimeoutTask = nil
             isSubmitting = false
-            handleCommandResponse(.text(
+            handleCommandResponse(.text(ChekinanaCommandCopy.errorDetail(
                 ChekinanaL10n.text(
                     "assistant.idol.confirmation_timeout",
-                    fallback: "error: Idol confirmation timed out before saving. No Idol was saved, and the confirmation can be retried."
+                    fallback: "Idol confirmation timed out before saving. No Idol was saved, and the confirmation can be retried."
                 )
-            ))
+            )))
+            }
         }
     }
 
@@ -1840,9 +2338,9 @@ struct ContentView: View {
         isSubmitting = false
         handleCommandResponse(output)
         if case .idolCard(let idol) = output {
-            transcriptMessages.append(TranscriptMessage(content: .text(
+            assistantText {
                 ChekinanaL10n.format("assistant.idol.added", fallback: "Added %@.", idol.name)
-            )))
+            }
         }
     }
 
@@ -1887,26 +2385,6 @@ struct ContentView: View {
         }
     }
 
-    private func cancelMediaProcessing() {
-        commandExecutionTask?.cancel()
-        commandExecutionTask = nil
-        albumProcessingTask?.cancel()
-        albumProcessingTask = nil
-        if let sessionID = albumPickerState.activeSessionID {
-            _ = albumPickerState.cancelProcessing(sessionID: sessionID)
-        }
-        albumAddChekiRequest = nil
-        albumAddChekiItems = []
-        mediaLoadProgress = ""
-        isSubmitting = false
-        transcriptMessages.append(TranscriptMessage(content: .text(
-            ChekinanaL10n.text(
-                "assistant.photo_processing.cancelled",
-                fallback: "Photo processing was cancelled. No new Cheki was created."
-            )
-        )))
-    }
-
     @MainActor
     private func processConversationResult(
         _ result: ChekinanaConversationCompileResult,
@@ -1924,9 +2402,7 @@ struct ContentView: View {
                 result,
                 originalUtterance: originalUtterance
             ) else {
-                transcriptMessages.append(TranscriptMessage(content: .text(
-                    ChekinanaConversationMessage.invalidPlan.text
-                )))
+                assistantText { ChekinanaConversationMessage.invalidPlan.text }
                 return
             }
             startEventCandidateExtraction(url: routedURL, echo: nil)
@@ -1937,65 +2413,37 @@ struct ContentView: View {
                 result,
                 originalUtterance: originalUtterance
             ) else {
-                transcriptMessages.append(TranscriptMessage(content: .text(
-                    ChekinanaConversationMessage.invalidPlan.text
-                )))
+                assistantText { ChekinanaConversationMessage.invalidPlan.text }
                 return
             }
             startEventCandidateExtraction(request: .text(text), echo: nil)
         case .clarification(let draft):
+            session.dialogue.choiceSource = .clarification
             conversationState.draft = draft
             clarificationDate = Date()
-            transcriptMessages.append(
-                TranscriptMessage(content: .text(clarificationPrompt(for: draft)))
-            )
+            assistantText { clarificationPrompt(for: draft) }
             isSubmitting = false
         case .message(let message):
             conversationState.clearDraft()
-            transcriptMessages.append(TranscriptMessage(content: .text(message.text)))
+            assistantText { message.text }
             isSubmitting = false
         }
     }
 
     private func executeTypedCommands(_ commands: [String]) {
-        let idolCandidateIDs = (
-            try? modelContext.fetch(FetchDescriptor<Idol>())
-        )?
-            .filter {
-                $0.hasRecognitionPatterns
-                    && ChekinanaVisibilityPolicy.includesIdol(
-                        $0.id,
-                        hiddenIDs: ChekinanaHiddenIdolPersistence.load()
-                    )
-            }
-            .map(\.id) ?? []
-        let selectedCandidateIDs = scannerCandidateIDs.map { selected in
-            idolCandidateIDs.filter(selected.contains)
-        } ?? idolCandidateIDs
-        switch ChekinanaScannerConfiguration.prepareTypedCommands(
-            commands,
-            baseURLResolution: ChekinanaScannerConfiguration.configuredBaseURL(),
-            dateRecognitionEnabled: isScannerDateRecognitionEnabled,
-            dateBounds: scannerDateBounds,
-            idolRecognitionEnabled: isScannerIdolRecognitionEnabled,
-            idolCandidateIDs: selectedCandidateIDs,
-            includeUnassignedCandidate: scannerIncludesUnassignedCandidate
-        ) {
-        case .ready(let preparedCommands):
-            executeCommands(
-                preparedCommands,
-                continuesAfterOperationFailure: true,
-                batchesIdolAdds: false
-            )
-        case .rejected(let failure):
-            transcriptMessages.append(
-                TranscriptMessage(content: .text(failure.userMessage))
-            )
+        guard commands.allSatisfy({ ChekinanaAssistantScope.allowsCommand(commandName(from: $0)) }) else {
+            assistantMessage("assistant.dialog.text_only", "Assistant accepts text only. You can manage Idols, existing Cheki, Events, and Cheki quantity records without photos.")
+            return
         }
+        executeCommands(commands, continuesAfterOperationFailure: false, batchesIdolAdds: false)
     }
 
     @MainActor
-    private func handleCommandResponse(_ output: ChekinanaCommandResponse) {
+    private func handleCommandResponse(_ originalOutput: ChekinanaCommandResponse) {
+        let output: ChekinanaCommandResponse
+        if case .text(let text) = originalOutput, text.hasPrefix("error:") {
+            output = .text(ChekinanaAssistantInput.sanitizedError(text, privateCodes: confirmationLedger.activeConfirmationCodes.union(session.dialogue.pendingCodes)))
+        } else { output = originalOutput }
         switch output {
         case .clearTranscript:
             invalidateRemoteRequest()
@@ -2007,77 +2455,74 @@ struct ContentView: View {
             conversationState.clearDraft()
             selectedChekiID = nil
             pendingNLRetry = nil
-        case .requestAddChekiPhoto(let request):
-            albumPickerCancellationTask?.cancel()
-            albumPickerCancellationTask = nil
-            albumAddChekiRequest = request
-            albumAddChekiItems = []
-            albumPickerState.begin()
-        case .shellAction(let action, let message):
+        case .requestAddChekiPhoto:
+            assistantMessage("assistant.dialog.text_only", "Assistant accepts text only. You can manage Idols, existing Cheki, Events, and Cheki quantity records without photos.")
+        case .shellAction(let action, _):
             if let onShellAction {
+                exitAssistantSession()
                 onShellAction(action)
-                transcriptMessages.append(TranscriptMessage(content: .text(message)))
             } else {
-                transcriptMessages.append(TranscriptMessage(content: .text(
+                assistantText {
                     ChekinanaL10n.text(
                         "assistant.navigation.unavailable",
                         fallback: "This navigation action is not available from the current presentation."
                     )
-                )))
+                }
             }
         default:
             if case .idolCards(let cards) = output {
                 removeIdolCandidateMessages()
                 activeIdolCandidateTokens = Set(cards.compactMap(\.selectionToken))
+                if !activeIdolCandidateTokens.isEmpty { session.dialogue.choiceSource = .catalogue }
                 confirmedIdolCandidateTokens.removeAll()
             } else if case .idolCardsWithNotice(let cards, _) = output {
                 removeIdolCandidateMessages()
                 activeIdolCandidateTokens = Set(cards.compactMap(\.selectionToken))
+                if !activeIdolCandidateTokens.isEmpty { session.dialogue.choiceSource = .catalogue }
                 confirmedIdolCandidateTokens.removeAll()
             }
-            transcriptMessages.append(TranscriptMessage(content: .commandResponse(output)))
+            let language = resolvedReplyLanguage
+            transcriptMessages.append(TranscriptMessage(
+                content: .commandResponse(output, replyLanguage: language),
+                replyLanguage: language
+            ))
             let codes = ChekinanaConversationCoordinator.confirmationCodes(in: output)
             if !codes.isEmpty {
-                transcriptMessages.append(TranscriptMessage(content: .confirmationActions(codes)))
+                if session.dialogue.pendingOperation != nil { session.dialogue.pendingCodes = codes }
+                transcriptMessages.append(TranscriptMessage(
+                    content: .confirmationActions(codes),
+                    replyLanguage: language
+                ))
             }
             if case .chekiScannedCards = output {
                 transcriptMessages.append(TranscriptMessage(content: .scanAllShortcut))
             }
-            if output.consumesSelectedPhotos {
-                selectedItems = []
-                isScannerDateRecognitionEnabled =
-                    ChekinanaScannerRecognitionDefaults.dateIsEnabled
-                isScannerIdolRecognitionEnabled =
-                    ChekinanaScannerRecognitionDefaults.idolIsEnabled
-            }
-            if case .text(let text) = output, text.hasPrefix("已删除这张切") {
+            if ChekinanaConfirmationResponseValidator.isDeleteChekiSuccess(output) {
                 selectedChekiID = nil
             }
         }
     }
 
     private func selectCheki(_ card: ChekinanaChekiCard) {
+        session.dialogue.target = session.dialogue.capture(.init(kind: .cheki, id: card.id), in: modelContext)
         selectedChekiID = card.id
-        let title = card.idx.map {
-            ChekinanaL10n.format("assistant.cheki.index", fallback: "Cheki #%lld", Int64($0))
-        } ?? ChekinanaL10n.text("assistant.cheki.this", fallback: "this Cheki")
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.format(
                 "assistant.cheki.selected",
                 fallback: "Selected %@. You can now ask to view, edit, or delete it.",
-                title
+                ChekinanaL10n.text("assistant.cheki.this", fallback: "this Cheki")
             )
-        )))
+        }
     }
 
     private func beginEditingTemporaryCheki(_ card: ChekinanaChekiCard) {
         guard let temporary = confirmationLedger.temporaryCheki(card.id) else {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.temporary.invalid",
                     fallback: "This temporary Cheki is no longer available."
-                ))
-            ))
+                )
+            }
             return
         }
         temporaryEditorDraft = TemporaryChekiEditorDraft(
@@ -2107,12 +2552,12 @@ struct ContentView: View {
                 from: draft.date,
                 displayedIn: .current
             ) else {
-                transcriptMessages.append(TranscriptMessage(
-                    content: .text(ChekinanaL10n.text(
+                assistantText {
+                    ChekinanaL10n.text(
                         "assistant.temporary.invalid_date",
                         fallback: "The selected date could not be read. Choose it again."
-                    ))
-                ))
+                    )
+                }
                 return
             }
             normalizedDate = date
@@ -2125,15 +2570,17 @@ struct ContentView: View {
         let idx: Int?
         if normalizedIdxText.isEmpty {
             idx = nil
-        } else if let parsed = Int(normalizedIdxText), parsed > 0 {
-            idx = parsed
+        } else if let parsed = Int(normalizedIdxText),
+                  parsed != 0, parsed != Int.min {
+            let magnitude = abs(parsed)
+            idx = draft.isFavorite ? -magnitude : magnitude
         } else {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.temporary.invalid_index",
-                    fallback: "The index must be empty or a positive integer."
-                ))
-            ))
+                    fallback: "The index must be empty or a non-zero integer."
+                )
+            }
             return
         }
         let group = ChekinanaChekiGroupKey(
@@ -2141,38 +2588,39 @@ struct ContentView: View {
             date: normalizedDate
         )
         if idx != nil, group == nil {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.temporary.index_requires_group",
                     fallback: "A positive index requires a date and at least one Idol."
-                ))
-            ))
+                )
+            }
             return
         }
         if normalizedIdxText != draft.initialIdxText,
            let idx, let group,
-           ((try? modelContext.fetch(FetchDescriptor<Cheki>())) ?? []).contains(where: {
+           ((try? modelContext.fetch(FetchDescriptor<MediaItem>())) ?? []).contains(where: {
+               $0.kind == .cheki &&
                ChekinanaChekiGroupKey(
-                   idolIDs: $0.idols.map(\.id),
+                   idolIDs: $0.idolIDs,
                    date: $0.date
                ) == group && $0.idx == idx
            }) {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.format(
+            assistantText {
+                ChekinanaL10n.format(
                     "assistant.temporary.index_conflict",
                     fallback: "Index #%lld is already used by this Idol/date group.",
                     Int64(idx)
-                ))
-            ))
+                )
+            }
             return
         }
         guard let currentTemporary = confirmationLedger.temporaryCheki(draft.id) else {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.temporary.update_failed",
                     fallback: "This temporary Cheki could not be updated; it may have expired."
-                ))
-            ))
+                )
+            }
             return
         }
         let validEventID = ChekinanaChekiEventSelectionPolicy.validatedEventID(
@@ -2195,12 +2643,12 @@ struct ContentView: View {
             existingChekiID: currentTemporary.existingChekiID,
             existingSelectionIsManual: currentTemporary.existingSelectionIsManual
         ) else {
-            transcriptMessages.append(TranscriptMessage(
-                content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.temporary.update_unavailable",
                     fallback: "This temporary Cheki could not be updated; it may have expired or entered confirmation."
-                ))
-            ))
+                )
+            }
             isTemporaryEditorPresented = false
             return
         }
@@ -2210,21 +2658,21 @@ struct ContentView: View {
 
     private func deleteTemporaryCheki(_ card: ChekinanaChekiCard) {
         guard confirmationLedger.discardTemporaryCheki(id: card.id) else {
-            transcriptMessages.append(TranscriptMessage(content: .text(
+            assistantText {
                 ChekinanaL10n.text(
                     "assistant.temporary.delete_failed",
                     fallback: "This temporary Cheki could not be deleted. Cancel its confirmation first if needed."
                 )
-            )))
+            }
             return
         }
         refreshTemporaryChekiCard(card.id)
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.text(
                 "assistant.temporary.deleted",
                 fallback: "The temporary Cheki was deleted without changing the database or image storage."
             )
-        )))
+        }
     }
 
     private func downloadTemporaryCheki(_ card: ChekinanaChekiCard) {
@@ -2287,7 +2735,8 @@ struct ContentView: View {
                     count: updatedCards.count,
                     warningCount: warningCount,
                     chekis: updatedCards
-                )
+                ),
+                replyLanguage: transcriptMessages[index].replyLanguage
             )
         }
     }
@@ -2300,8 +2749,10 @@ struct ContentView: View {
         guard !isSubmitting, activeIdolCandidateTokens.contains(token) else { return }
         isSubmitting = true
         let executionID = idolCandidateSelectionGate.begin()
+        let language = resolvedReplyLanguage
 
         let task = Task { @MainActor in
+            await language.localized {
             guard idolCandidateSelectionGate.accepts(
                 executionID,
                 isCancelled: Task.isCancelled
@@ -2320,6 +2771,7 @@ struct ContentView: View {
                 token: token,
                 output: output
             )
+            }
         }
         idolCandidateSelectionTask = task
     }
@@ -2333,8 +2785,15 @@ struct ContentView: View {
         idolCandidateSelectionTask = nil
         isSubmitting = false
         if case .idolCard(let idol) = output {
-            activeIdolCandidateTokens.remove(token)
+            activeIdolCandidateTokens.removeAll()
+            confirmationLedger.invalidateIdolCandidates()
             confirmedIdolCandidateTokens.insert(token)
+            rememberAssistantResponse(output)
+            handleCommandResponse(output)
+            session.dialogue.completedWrites.complete(session.dialogue.pendingUserText, generation: try? ChekinanaLibraryGenerationStore.current(in: modelContext))
+            session.dialogue.pendingOperation = nil
+            session.dialogue.pendingCodes = []
+            resumeAssistantPlan()
             // Candidate success is represented by the in-place checkmark.
             // Appending a new transcript row would trigger the normal
             // assistant-text bottom scroll and move a long candidate list
@@ -2358,12 +2817,12 @@ struct ContentView: View {
         activeIdolCandidateTokens.removeAll()
         confirmedIdolCandidateTokens.removeAll()
         removeIdolCandidateMessages()
-        transcriptMessages.append(TranscriptMessage(content: .text(
+        assistantText {
             ChekinanaL10n.text(
                 "assistant.idol_candidates.cancelled",
                 fallback: "The Idol candidates were cancelled. Their previous buttons are no longer active."
             )
-        )))
+        }
     }
 
     private func removeIdolCandidateMessages(containing token: String? = nil) {
@@ -2416,9 +2875,7 @@ struct ContentView: View {
             draft.missing.insert(.date, at: 0)
         }
         conversationState.draft = draft
-        transcriptMessages.append(
-            TranscriptMessage(content: .text(clarificationPrompt(for: draft)))
-        )
+        assistantText { clarificationPrompt(for: draft) }
     }
 
     private func completeDateSelection() {
@@ -2477,24 +2934,47 @@ struct ContentView: View {
     private func advanceConversationDraft() {
         guard let draft = conversationState.draft else { return }
         if !draft.missing.isEmpty || draft.localChoice != nil {
-            transcriptMessages.append(
-                TranscriptMessage(content: .text(clarificationPrompt(for: draft)))
-            )
+            assistantText { clarificationPrompt(for: draft) }
             return
         }
-        processConversationResult(
-            ChekinanaConversationCoordinator.resume(draft, modelContext: modelContext)
-        )
+        if !pendingClarificationPlan.isEmpty {
+            plannedOperations = pendingClarificationPlan
+            plannedRawTail = clarificationRawTail
+            let result: ChekinanaConversationCompileResult
+            do {
+                let resolved = try pendingClarificationPlan.map {
+                    try session.dialogue.resolveBound($0, to: plannedTarget, in: modelContext)
+                }
+                result = resolvedReplyLanguage.localized {
+                    ChekinanaConversationCoordinator.compile(
+                        resolved,
+                        selections: draft.selections,
+                        modelContext: modelContext
+                    )
+                }
+            } catch {
+                assistantMessage("assistant.dialog.stale", "The selected item or library changed. Cancel this preview and ask again.")
+                return
+            }
+            if case .commands = result { pendingClarificationPlan = [] }
+            processConversationResult(result)
+        } else {
+            plannedOperations = [draft.operation]
+            let result = resolvedReplyLanguage.localized {
+                ChekinanaConversationCoordinator.resume(draft, modelContext: modelContext)
+            }
+            processConversationResult(result)
+        }
     }
 
     private func beginScanAllClarification() {
         guard !confirmationLedger.availableTemporaryChekiChoices().isEmpty else {
-            transcriptMessages.append(
-                TranscriptMessage(content: .text(ChekinanaL10n.text(
+            assistantText {
+                ChekinanaL10n.text(
                     "assistant.no_scan_results",
                     fallback: "No scan results are available. Select photos and scan first."
-                )))
-            )
+                )
+            }
             return
         }
         conversationState.clearDraft()
@@ -2528,206 +3008,6 @@ struct ContentView: View {
         }
     }
 
-    private var albumPickerPresentationBinding: Binding<Bool> {
-        let sessionID = albumPickerState.activeSessionID
-        return Binding(
-            get: {
-                guard sessionID == albumPickerState.activeSessionID else { return false }
-                return albumPickerState.isPresented
-            },
-            set: { isPresented in
-                guard let sessionID else { return }
-                if !isPresented {
-                    scheduleAlbumPickerCancellation(sessionID: sessionID)
-                }
-            }
-        )
-    }
-
-    private var albumPickerSelectionBinding: Binding<[PhotosPickerItem]> {
-        let sessionID = albumPickerState.activeSessionID
-        return Binding(
-            get: {
-                guard sessionID == albumPickerState.activeSessionID else { return [] }
-                return albumAddChekiItems
-            },
-            set: { items in
-                guard let sessionID, !items.isEmpty else { return }
-                handleAlbumAddChekiSelection(items, sessionID: sessionID)
-            }
-        )
-    }
-
-    @MainActor
-    private func scheduleAlbumPickerCancellation(sessionID: UUID) {
-        guard albumPickerState.markAwaitingSelection(sessionID: sessionID) else { return }
-        albumPickerCancellationTask?.cancel()
-        albumPickerCancellationTask = Task { @MainActor in
-            do {
-                // PhotosPicker can dismiss before its selection binding is
-                // updated. Give that binding a short, cancellable window to
-                // settle before treating dismissal as a real cancellation.
-                try await Task.sleep(for: .milliseconds(500))
-            } catch {
-                return
-            }
-
-            guard albumPickerState.cancel(sessionID: sessionID) else { return }
-            albumAddChekiRequest = nil
-            albumAddChekiItems = []
-            albumPickerCancellationTask = nil
-            transcriptMessages.append(TranscriptMessage(content: .text(
-                ChekinanaL10n.text("assistant.album.cancelled", fallback: "Album selection was cancelled.")
-            )))
-            isSubmitting = false
-        }
-    }
-
-    @MainActor
-    private func handleAlbumAddChekiSelection(_ items: [PhotosPickerItem], sessionID: UUID) {
-        guard let request = albumAddChekiRequest,
-              isSubmitting,
-              albumPickerState.beginProcessing(sessionID: sessionID) else {
-            return
-        }
-
-        albumPickerCancellationTask?.cancel()
-        albumPickerCancellationTask = nil
-        albumAddChekiItems = items
-
-        let task = Task { @MainActor in
-            defer {
-                albumProcessingTask = nil
-                mediaLoadProgress = ""
-            }
-            var prepared: [ChekinanaPreparedAlbumCheki] = []
-            var failedCount = 0
-            // Process a bounded batch sequentially. This avoids decoding and
-            // copying several full-resolution Photos assets at once.
-            let boundedItems = items
-            for (index, item) in boundedItems.enumerated() {
-                guard !Task.isCancelled else { return }
-                mediaLoadProgress = ChekinanaL10n.format(
-                    "assistant.photo.reading",
-                    fallback: "Reading photo %1$lld/%2$lld…",
-                    Int64(index + 1),
-                    Int64(boundedItems.count)
-                )
-                do {
-                    let image = try await loadPendingChekiImage(from: item)
-                    prepared.append(await ChekinanaCommandExecutor.prepareAlbumAddCheki(
-                        request,
-                        image: image
-                    ))
-                } catch ChekinanaAsyncDeadlineError.cancelled {
-                    return
-                } catch {
-                    failedCount += 1
-                }
-            }
-            guard !prepared.isEmpty else {
-                guard albumPickerState.failProcessing(sessionID: sessionID) else { return }
-                albumAddChekiRequest = nil
-                albumAddChekiItems = []
-                handleCommandResponse(.text(ChekinanaL10n.text(
-                    "assistant.photo.batch_failed",
-                    fallback: "error: The selected photos could not be loaded. No Cheki was prepared."
-                )))
-                isSubmitting = false
-                return
-            }
-
-            do {
-                let executor = ChekinanaCommandExecutor(
-                    modelContext: modelContext,
-                    confirmationLedger: confirmationLedger
-                )
-                // `finalize` checks the session and executes the synchronous
-                // ledger transaction without any await between those steps.
-                guard let output = try albumPickerState.finalize(sessionID: sessionID, operation: {
-                    try executor.finalizeAlbumAddChekis(prepared, failedCount: failedCount)
-                }) else { return }
-                albumAddChekiRequest = nil
-                albumAddChekiItems = []
-                handleCommandResponse(output)
-                isSubmitting = false
-            } catch {
-                albumAddChekiRequest = nil
-                albumAddChekiItems = []
-                handleCommandResponse(.text(ChekinanaL10n.format(
-                    "assistant.photo.prepare_failed",
-                    fallback: "error: A selected photo could not be prepared. No Cheki was prepared. %@",
-                    error.localizedDescription
-                )))
-                isSubmitting = false
-            }
-        }
-        albumProcessingTask = task
-    }
-
-    private func loadPendingChekiImages(for command: String) async throws -> [ChekinanaPendingChekiImage] {
-        guard commandName(from: command) == "scancheki" else {
-            return []
-        }
-
-#if DEBUG
-        if ProcessInfo.processInfo.environment["CHEKINANA_MEDIA_UI_STUB"] == "fixture" {
-            return ChekinanaMediaUITestFixture.pendingChekiImages()
-        }
-#endif
-        var pendingImages: [ChekinanaPendingChekiImage] = []
-
-        for (index, item) in selectedItems.enumerated() {
-            guard !Task.isCancelled else { throw ChekinanaAsyncDeadlineError.cancelled }
-            mediaLoadProgress = ChekinanaL10n.format(
-                "assistant.photo.reading",
-                fallback: "Reading photo %1$lld/%2$lld…",
-                Int64(index + 1),
-                Int64(selectedItems.count)
-            )
-            pendingImages.append(try await loadPendingChekiImage(from: item))
-        }
-
-        return pendingImages
-    }
-
-    private func loadPendingChekiImage(from item: PhotosPickerItem) async throws -> ChekinanaPendingChekiImage {
-        try await ChekinanaAsyncDeadline.run(nanoseconds: 5_000_000_000) {
-            try await loadPendingChekiImageWithoutDeadline(from: item)
-        }
-    }
-
-    private func loadPendingChekiImageWithoutDeadline(from item: PhotosPickerItem) async throws -> ChekinanaPendingChekiImage {
-#if DEBUG
-        if ProcessInfo.processInfo.environment["CHEKINANA_MEDIA_UI_STUB"] == "hang" {
-            try await Task.sleep(nanoseconds: 30_000_000_000)
-        }
-#endif
-        if let imageData = try? await item.loadTransferable(type: ChekinanaTransferableImageData.self),
-           !imageData.data.isEmpty {
-            return ChekinanaPendingChekiImage(
-                data: imageData.data,
-                filenameExtension: filenameExtension(for: item)
-            )
-        }
-
-        if let data = try? await item.loadTransferable(type: Data.self),
-           !data.isEmpty {
-            return ChekinanaPendingChekiImage(
-                data: data,
-                filenameExtension: filenameExtension(for: item)
-            )
-        }
-
-        if let fallbackImage = try? await item.loadTransferable(type: ChekinanaTransferableFallbackImageData.self),
-           let data = await ChekinanaImageWorker.reencodedJPEGData(from: fallbackImage.data),
-           !data.isEmpty {
-            return ChekinanaPendingChekiImage(data: data, filenameExtension: "jpg")
-        }
-
-        throw PendingChekiImageLoadError.unreadableImage
-    }
-
     private func commandName(from command: String) -> String? {
         command
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2736,7 +3016,10 @@ struct ContentView: View {
             .lowercased()
     }
 
-    private func redactedCommandEcho(for command: String) -> String {
+    private func redactedCommandEcho(
+        for command: String,
+        activeConfirmationCodes: Set<String> = []
+    ) -> String {
         if ChekinanaNLPrivacyGuard.containsCredentialedHTTPURL(command) {
             return ChekinanaL10n.text(
                 "assistant.redacted_url",
@@ -2749,7 +3032,10 @@ struct ContentView: View {
                 fallback: "[Input containing credentials hidden]"
             )
         }
-        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(command) else {
+        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            command,
+            activeConfirmationCodes: activeConfirmationCodes
+        ) else {
             return ChekinanaL10n.text(
                 "assistant.redacted_input",
                 fallback: "[Input containing credentials hidden]"
@@ -2766,35 +3052,18 @@ struct ContentView: View {
 
     private func requestClose() {
         guard !isClosing else { return }
-        isClosing = true
-#if DEBUG
-        let startedAt = DispatchTime.now().uptimeNanoseconds
-#endif
-        isPromptFocused = false
-        // SwiftUI owns focus dismissal. Forcing UIKit to resign a stale
-        // responder during cover dismissal generated invalid-session and
-        // keyboard-snapshot work on the main thread.
-        suspendAssistantSession()
-        captureAssistantSession()
-#if DEBUG
-        ChekinanaAssistantTimingLog.completed(
-            stage: "close-ready",
-            messageCount: transcriptMessages.count,
-            cardCount: session.candidateCardCount,
-            startedAt: startedAt
-        )
-#endif
+        exitAssistantSession()
         onClose?()
     }
 
-    private func suspendAssistantSession() {
-        if let activeNLRequest,
-           prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            prompt = activeNLRequest.input
-        }
-        if pendingNLRetry == nil { pendingNLRetry = activeNLRequest }
+    // Back, system dismissal, and a shell action all leave through this path.
+    // Set the flag before cancellation so late callbacks cannot publish again.
+    private func exitAssistantSession() {
+        guard !isClosing else { return }
+        isClosing = true
+        isPromptFocused = false
+        invalidateReplyLanguageRequest()
         invalidateRemoteRequest()
-        activeNLRequest = nil
         commandExecutionTask?.cancel()
         commandExecutionTask = nil
         idolCandidateSelectionGate.invalidate()
@@ -2806,22 +3075,38 @@ struct ContentView: View {
         idolConfirmationTimeoutTask?.cancel()
         idolConfirmationTimeoutTask = nil
         invalidateEventCandidateFlow()
-        albumProcessingTask?.cancel()
-        albumProcessingTask = nil
-        isSubmitting = false
-    }
 
-    private func captureAssistantSession() {
-        session.capture(
-            prompt: prompt,
-            transcriptMessages: transcriptMessages,
-            activeIdolCandidateTokens: activeIdolCandidateTokens,
-            confirmedIdolCandidateTokens: confirmedIdolCandidateTokens,
-            confirmationLedger: confirmationLedger,
-            conversationState: conversationState,
-            selectedChekiID: selectedChekiID,
-            pendingNLRetry: pendingNLRetry
-        )
+        session.clearForExit(confirmationLedger: confirmationLedger)
+        confirmationLedger = session.confirmationLedger
+        prompt = ""
+        transcriptMessages = []
+        activeIdolCandidateTokens = []
+        confirmedIdolCandidateTokens = []
+        conversationState = ChekinanaConversationState()
+        selectedChekiID = nil
+        activeNLRequest = nil
+        pendingNLRetry = nil
+        activeReplyLanguageInput = nil
+        replacesPendingPreview = false
+        replacementEventBackup = nil
+        plannedUserText = nil
+        plannedTarget = nil
+        pendingClarificationPlan = []
+        plannedRawTail = []
+        clarificationRawTail = []
+        plannedOperations = []
+        currentUserTurn = ""
+        replyLanguage = nil
+        retainedEventFields = nil
+        awaitsEventCity = false
+        eventCandidateState = ChekinanaEventCandidateStateMachine()
+        eventCandidateBusyOwner = ChekinanaEventCandidateBusyOwner()
+        activeEventCandidateRequest = nil
+        clarificationDate = Date()
+        transcriptScrollRequest = .none
+        temporaryEditorDraft = TemporaryChekiEditorDraft()
+        isTemporaryEditorPresented = false
+        isSubmitting = false
     }
 
 #if DEBUG
@@ -2881,11 +3166,7 @@ struct ContentView: View {
     }
 #endif
 
-    private func filenameExtension(for item: PhotosPickerItem) -> String {
-        item.supportedContentTypes
-            .first { $0.conforms(to: .image) }?
-            .preferredFilenameExtension ?? "jpg"
-    }
+
 }
 
 enum ChekinanaTranscriptRole: String, Codable, Equatable {
@@ -2897,15 +3178,18 @@ struct TranscriptMessage: Identifiable {
     let id: UUID
     let role: ChekinanaTranscriptRole
     let content: TranscriptContent
+    let replyLanguage: ChekinanaAssistantReplyLanguage?
 
     init(
         id: UUID = UUID(),
         role: ChekinanaTranscriptRole = .assistant,
-        content: TranscriptContent
+        content: TranscriptContent,
+        replyLanguage: ChekinanaAssistantReplyLanguage? = nil
     ) {
         self.id = id
         self.role = role
         self.content = content
+        self.replyLanguage = replyLanguage
     }
 }
 
@@ -2923,15 +3207,16 @@ enum TranscriptContent {
     case confirmationActions([String])
     case scanAllShortcut
 
-    static func commandResponse(_ response: ChekinanaCommandResponse) -> TranscriptContent {
-        switch response {
+    static func commandResponse(
+        _ response: ChekinanaCommandResponse,
+        replyLanguage: ChekinanaAssistantReplyLanguage = .interfaceFallback()
+    ) -> TranscriptContent {
+        replyLanguage.localized {
+            switch response {
         case .text(let text):
             return .text(text)
-        case .confirmationText:
-            return .text(ChekinanaL10n.text(
-                "assistant.confirmation.ready",
-                fallback: "This change is ready. Use the buttons below to confirm or cancel."
-            ))
+        case .confirmationText(let summary, _):
+            return .text(summary)
         case .chekiAdded(let count):
             return .text(ChekinanaL10n.quantity(
                 "assistant.cheki.added_count",
@@ -2975,13 +3260,14 @@ enum TranscriptContent {
             return .eventCards(events)
         case .requestAddChekiPhoto:
             return .text(ChekinanaL10n.text(
-                "assistant.choose_photo_request",
-                fallback: "Choose one or more photos. The Cheki will be previewed before saving."
+                "assistant.dialog.text_only",
+                fallback: "Assistant accepts text only. You can manage Idols, existing Cheki, Events, and Cheki quantity records without photos."
             ))
         case .shellAction(_, let message):
             return .text(message)
         case .clearTranscript:
             return .text("")
+            }
         }
     }
 }
@@ -3045,7 +3331,7 @@ struct ChekinanaPersistedTranscriptRecord: Codable, Equatable, Sendable {
     let text: String
 }
 
-private enum ChekinanaAssistantHistoryWriteQueue {
+enum ChekinanaAssistantHistoryWriteQueue {
     private static let queue = DispatchQueue(
         label: "app.chekinana.ios.assistant-history",
         qos: .utility
@@ -3058,6 +3344,11 @@ private enum ChekinanaAssistantHistoryWriteQueue {
         queue.async {
             ChekinanaAssistantHistoryStore.save(records, to: url)
         }
+    }
+    // This barrier runs after every previously submitted write. Assistant no
+    // longer queues new history saves, so an old write cannot recreate the file.
+    static func clear(at url: URL) {
+        queue.sync { ChekinanaAssistantHistoryStore.save([], to: url) }
     }
 }
 
@@ -3226,31 +3517,27 @@ enum ChekinanaAssistantHistoryStore {
 
 @MainActor
 final class ChekinanaAssistantSession {
-    fileprivate var prompt: String
-    fileprivate var transcriptMessages: [TranscriptMessage]
-    fileprivate var activeIdolCandidateTokens: Set<String>
-    fileprivate var confirmedIdolCandidateTokens: Set<String>
-    fileprivate var confirmationLedger: ChekinanaConfirmationLedger
-    fileprivate var conversationState: ChekinanaConversationState
-    fileprivate var selectedChekiID: UUID?
-    fileprivate var pendingNLRetry: PendingNaturalLanguageRequest?
+    private(set) var dialogue = ChekinanaAssistantDialogue()
+    var replyLanguage: ChekinanaAssistantReplyLanguage? = nil
+    var prompt = ""
+    var transcriptMessages: [TranscriptMessage] = []
+    var activeIdolCandidateTokens: Set<String> = []
+    var confirmedIdolCandidateTokens: Set<String> = []
+    var confirmationLedger = ChekinanaConfirmationLedger()
+    var conversationState = ChekinanaConversationState()
+    var selectedChekiID: UUID?
+    var pendingNLRetry: PendingNaturalLanguageRequest?
     private let historyURL: URL
+    // Recovery entries are not conversation history or new confirmations.
+    // Their durable deletion journal remains owned by the existing recovery
+    // coordinator, including startup recovery after process termination.
+    private var recoveryLedgers: [ChekinanaConfirmationLedger] = []
 
     init(historyURL: URL = ChekinanaAssistantHistoryStore.defaultURL()) {
         self.historyURL = historyURL
-        if ProcessInfo.processInfo.environment["CHEKINANA_UI_RESET_STORE"] == "1" {
-            try? FileManager.default.removeItem(at: historyURL)
-        }
-        prompt = ""
-        activeIdolCandidateTokens = []
-        confirmedIdolCandidateTokens = []
-        confirmationLedger = ChekinanaConfirmationLedger()
-        conversationState = ChekinanaConversationState()
-        selectedChekiID = nil
-        pendingNLRetry = nil
-        transcriptMessages = ChekinanaAssistantHistoryStore.load(from: historyURL).map {
-            TranscriptMessage(role: $0.role, content: .text($0.text))
-        }
+        // Conversations are ephemeral. Remove legacy history without restoring
+        // it, also draining any saves submitted before this session was made.
+        ChekinanaAssistantHistoryWriteQueue.clear(at: historyURL)
     }
 
     var messageCount: Int { transcriptMessages.count }
@@ -3266,32 +3553,28 @@ final class ChekinanaAssistantSession {
         }
     }
 
-    fileprivate func capture(
-        prompt: String,
-        transcriptMessages: [TranscriptMessage],
-        activeIdolCandidateTokens: Set<String>,
-        confirmedIdolCandidateTokens: Set<String>,
-        confirmationLedger: ChekinanaConfirmationLedger,
-        conversationState: ChekinanaConversationState,
-        selectedChekiID: UUID?,
-        pendingNLRetry: PendingNaturalLanguageRequest?
-    ) {
-        self.prompt = prompt
-        self.transcriptMessages = transcriptMessages
-        self.activeIdolCandidateTokens = activeIdolCandidateTokens
-        self.confirmedIdolCandidateTokens = confirmedIdolCandidateTokens
-        self.confirmationLedger = confirmationLedger
-        self.conversationState = conversationState
-        self.selectedChekiID = selectedChekiID
-        self.pendingNLRetry = pendingNLRetry
-        persistTextHistory(from: transcriptMessages)
+    func retainRequiredRecovery(from ledger: ChekinanaConfirmationLedger) {
+        // cancelAll intentionally refuses entries whose file recovery must
+        // finish. Never confirm them automatically while clearing a chat.
+        let retained = ledger.cancelAll().retainedForRecovery
+        if retained > 0, !recoveryLedgers.contains(where: { $0 === ledger }) {
+            recoveryLedgers.append(ledger)
+        }
     }
 
-    fileprivate func persistTextHistory(from messages: [TranscriptMessage]) {
-        let records = ChekinanaAssistantHistoryStore.persistableRecords(from: messages)
-        // Keep message publication, keyboard transitions, and dismissal off
-        // the atomic filesystem write path while preserving write order.
-        ChekinanaAssistantHistoryWriteQueue.save(records, to: historyURL)
+    func clearForExit(confirmationLedger ledger: ChekinanaConfirmationLedger) {
+        retainRequiredRecovery(from: ledger)
+        replyLanguage = nil
+        prompt = ""
+        transcriptMessages = []
+        activeIdolCandidateTokens = []
+        confirmedIdolCandidateTokens = []
+        confirmationLedger = ChekinanaConfirmationLedger()
+        conversationState = ChekinanaConversationState()
+        selectedChekiID = nil
+        pendingNLRetry = nil
+        dialogue = ChekinanaAssistantDialogue()
+        ChekinanaAssistantHistoryWriteQueue.clear(at: historyURL)
     }
 }
 
@@ -3343,7 +3626,7 @@ private struct EventCandidateEditorView: View {
             candidateField(
                 ChekinanaL10n.text(
                     "assistant.event.field.weibo_required",
-                    fallback: "Weibo URL *"
+                    fallback: "Weibo / X URL *"
                 ),
                 text: $fields.weiboURL,
                 identifier: "weibo-url",
@@ -3418,7 +3701,7 @@ private struct EventCandidateEditorView: View {
     ) -> some View {
         let pasteTitle = ChekinanaL10n.text(
             "product.events.paste_weibo",
-            fallback: "Paste Weibo URL"
+            fallback: "Paste Weibo / X URL"
         )
         let visiblePrompt = offersDirectPaste ? pasteTitle : prompt
         return VStack(alignment: .leading, spacing: 5) {
@@ -3469,24 +3752,25 @@ private struct EventCandidateEditorView: View {
 
 private struct EventCardView: View {
     let event: ChekinanaEventCard
+    let replyLanguage: ChekinanaAssistantReplyLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(event.confirmationCode == nil
-                ? ChekinanaL10n.text("assistant.event.title", fallback: "Event")
-                : ChekinanaL10n.text("assistant.event.pending", fallback: "Pending Event"))
+                ? replyLanguage.text("assistant.event.title", fallback: "Event")
+                : replyLanguage.text("assistant.event.pending", fallback: "Pending Event"))
                 .font(.footnote.weight(.semibold).monospaced())
                 .foregroundStyle(event.confirmationCode == nil ? Color(.secondaryLabel) : .orange)
-            value(ChekinanaL10n.text("assistant.event.field.name", fallback: "Name"), event.name)
+            value(replyLanguage.text("assistant.event.field.name", fallback: "Name"), event.name)
             value(
-                ChekinanaL10n.text("assistant.event.field.date", fallback: "Date"),
+                replyLanguage.text("assistant.event.field.date", fallback: "Date"),
                 event.date.isEmpty
-                    ? ChekinanaL10n.text("assistant.event.date_undetermined", fallback: "Undetermined")
-                    : ChekinanaDisplayFormat.date(event.date)
+                    ? replyLanguage.text("assistant.event.date_undetermined", fallback: "Undetermined")
+                    : replyLanguage.localized { ChekinanaDisplayFormat.date(event.date) }
             )
-            value(ChekinanaL10n.text("assistant.event.field.city", fallback: "City"), emptyFallback(event.city))
-            value(ChekinanaL10n.text("assistant.event.field.livehouse", fallback: "Livehouse"), emptyFallback(event.livehouse))
-            value(ChekinanaL10n.text("assistant.event.field.price", fallback: "Price"), emptyFallback(event.price))
+            value(replyLanguage.text("assistant.event.field.city", fallback: "City"), emptyFallback(event.city))
+            value(replyLanguage.text("assistant.event.field.livehouse", fallback: "Livehouse"), emptyFallback(event.livehouse))
+            value(replyLanguage.text("assistant.event.field.price", fallback: "Price"), emptyFallback(event.price))
             if let schedule = ChekinanaEventTime.summary(
                 openTime: event.openTime,
                 startTime: event.startTime
@@ -3494,9 +3778,9 @@ private struct EventCardView: View {
                 Text(schedule)
                     .font(.subheadline.monospacedDigit())
             }
-            value(ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo"), emptyFallback(event.weiboURL))
-            value(ChekinanaL10n.text("assistant.event.field.ticket_short", fallback: "Tickets"), emptyFallback(event.ticketURL))
-            value(ChekinanaL10n.text("assistant.note", fallback: "Note"), emptyFallback(event.note))
+            value(replyLanguage.text("assistant.event.field.weibo", fallback: "Weibo / X URL"), emptyFallback(event.weiboURL))
+            value(replyLanguage.text("assistant.event.field.ticket_short", fallback: "Tickets"), emptyFallback(event.ticketURL))
+            value(replyLanguage.text("assistant.note", fallback: "Note"), emptyFallback(event.note))
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3510,7 +3794,7 @@ private struct EventCardView: View {
     }
 
     private func value(_ label: String, _ value: String) -> some View {
-        Text(ChekinanaL10n.format("assistant.field_value", fallback: "%1$@: %2$@", label, value))
+        Text(replyLanguage.format("assistant.field_value", fallback: "%1$@: %2$@", label, value))
             .font(.subheadline)
             .foregroundStyle(.black)
             .textSelection(.enabled)
@@ -3519,7 +3803,7 @@ private struct EventCardView: View {
 
     private func emptyFallback(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? ChekinanaL10n.text("assistant.not_set", fallback: "Not set")
+            ? replyLanguage.text("assistant.not_set", fallback: "Not set")
             : value
     }
 }
@@ -3609,6 +3893,7 @@ private struct FlowChoiceView: View {
 private struct ChekiListTranscriptView: View {
     let chekis: [ChekinanaChekiCard]
     let selectedChekiID: UUID?
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let onSelectCheki: (ChekinanaChekiCard) -> Void
 
     var body: some View {
@@ -3618,6 +3903,7 @@ private struct ChekiListTranscriptView: View {
                     ChekiCardView(
                         cheki: cheki,
                         isSelected: cheki.id == selectedChekiID,
+                        replyLanguage: replyLanguage,
                         onSelect: { onSelectCheki(cheki) }
                     )
                 }
@@ -3631,29 +3917,30 @@ private struct ScannedChekiTranscriptView: View {
     let count: Int
     let warningCount: Int
     let chekis: [ChekinanaChekiCard]
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let onEdit: (ChekinanaChekiCard) -> Void
     let onDelete: (ChekinanaChekiCard) -> Void
     let onDownload: (ChekinanaChekiCard) -> Void
 
     private var summaryText: String {
         var lines = [
-            ChekinanaL10n.quantity(
+            replyLanguage.quantity(
                 "assistant.scan.recognized",
                 count: count,
                 one: "Recognized %lld Cheki.",
                 other: "Recognized %lld Cheki."
             ),
-            ChekinanaL10n.text(
+            replyLanguage.text(
                 "assistant.scan.edit_help",
                 fallback: "Edit each result's Idol, date, Event, and other details, or delete it and save its clean image."
             ),
-            ChekinanaL10n.text(
+            replyLanguage.text(
                 "assistant.scan.unsaved",
                 fallback: "These results are not saved yet. Each needs a date before confirmation."
             ),
         ]
         if warningCount > 0 {
-            lines.append(ChekinanaL10n.quantity(
+            lines.append(replyLanguage.quantity(
                 "assistant.scan.warnings",
                 count: warningCount,
                 one: "The scan produced %lld warning, such as a count mismatch or an earlier unused result being released.",
@@ -3675,7 +3962,7 @@ private struct ScannedChekiTranscriptView: View {
                     LazyHStack(spacing: 8) {
                         ForEach(chekis) { cheki in
                             VStack(spacing: 6) {
-                                ChekiCardView(cheki: cheki)
+                                ChekiCardView(cheki: cheki, replyLanguage: replyLanguage)
                                 Button(ChekinanaL10n.text("assistant.edit", fallback: "Edit")) { onEdit(cheki) }
                                     .buttonStyle(.bordered)
                                     .chekinanaMinimumTouchTarget()
@@ -3711,10 +3998,11 @@ private struct ScannedChekiTranscriptView: View {
 private struct PendingChekiTranscriptView: View {
     let summary: String
     let chekis: [ChekinanaChekiCard]
+    let replyLanguage: ChekinanaAssistantReplyLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(summary)\n\(ChekinanaL10n.text("assistant.confirm_below", fallback: "Use the buttons below to confirm or cancel."))")
+            Text("\(summary)\n\(replyLanguage.text("assistant.confirm_below", fallback: "Use the buttons below to confirm or cancel."))")
                 .font(.subheadline)
                 .foregroundStyle(.black)
                 .textSelection(.enabled)
@@ -3722,7 +4010,7 @@ private struct PendingChekiTranscriptView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 8) {
                     ForEach(chekis) { cheki in
-                        ChekiCardView(cheki: cheki)
+                        ChekiCardView(cheki: cheki, replyLanguage: replyLanguage)
                     }
                 }
                 .padding(.vertical, 1)
@@ -3732,13 +4020,13 @@ private struct PendingChekiTranscriptView: View {
 }
 
 private struct TemporaryChekiEditorView: View {
+    @Environment(\.chekinanaIdolOrdering) private var idolOrdering
+    @Query private var customChekiSizes: [CustomChekiSize]
     @Binding var draft: TemporaryChekiEditorDraft
     let idols: [Idol]
     let events: [Event]
     let onSave: () -> Void
     let onCancel: () -> Void
-    @FocusState private var isIndexFocused: Bool
-
     var body: some View {
         NavigationStack {
             Form {
@@ -3747,7 +4035,7 @@ private struct TemporaryChekiEditorView: View {
                         Text(ChekinanaL10n.text("assistant.no_local_idol", fallback: "No local Idols"))
                             .foregroundStyle(Color(.secondaryLabel))
                     }
-                    ForEach(idols.sorted(by: { $0.name < $1.name })) { idol in
+                    ForEach(idolOrdering.ordered(idols)) { idol in
                         Toggle(
                             idol.name,
                             isOn: Binding(
@@ -3770,13 +4058,14 @@ private struct TemporaryChekiEditorView: View {
                         DatePicker(
                             ChekinanaL10n.text("assistant.date", fallback: "Date"),
                             selection: $draft.date,
+                            in: ChekinanaPersistedContentDatePolicy.displayedRange(),
                             displayedComponents: .date
                         )
                         .datePickerStyle(.compact)
                     }
                 }
 
-                Section(ChekinanaL10n.text("assistant.temporary.event", fallback: "Event (optional; does not affect index)")) {
+                Section(ChekinanaL10n.text("assistant.event.title", fallback: "Event")) {
                     Picker(ChekinanaL10n.text("assistant.event.title", fallback: "Event"), selection: $draft.eventID) {
                         Text(ChekinanaL10n.text("assistant.none", fallback: "None")).tag(UUID?.none)
                         ForEach(selectableEvents.sorted(by: { $0.name < $1.name })) { event in
@@ -3786,24 +4075,24 @@ private struct TemporaryChekiEditorView: View {
                 }
 
                 Section(ChekinanaL10n.text("assistant.temporary.other", fallback: "Other details")) {
-                    TextField(ChekinanaL10n.text("assistant.index_optional", fallback: "Index (optional)"), text: $draft.idxText)
-                        .keyboardType(.numberPad)
-                        .focused($isIndexFocused)
                     Picker(ChekinanaL10n.text("assistant.temporary.size", fallback: "Size"), selection: $draft.size) {
-                        Text(ChekinanaL10n.text("assistant.not_set", fallback: "Not set")).tag(ChekiSize?.none)
-                        ForEach(ChekiSize.allCases) { size in
-                            Text(size == .mini
+                        ForEach(ChekinanaChekiSizeCatalog.options(customSizes: customChekiSizes)) { option in
+                            Text(option.size == .mini
                                 ? ChekinanaL10n.text("assistant.size.mini", fallback: "Mini")
-                                : ChekinanaL10n.text("assistant.size.wide", fallback: "Wide"))
-                                .tag(Optional(size))
+                                : option.size == .wide
+                                    ? ChekinanaL10n.text("assistant.size.wide", fallback: "Wide")
+                                    : option.title)
+                                .tag(Optional(option.size))
                         }
                     }
                     Toggle(ChekinanaL10n.text("assistant.temporary.favorite", fallback: "Favorite"), isOn: $draft.isFavorite)
                     Toggle(ChekinanaL10n.text("assistant.temporary.posted", fallback: "Posted to SNS"), isOn: $draft.hasPostedToSNS)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(ChekinanaL10n.text("assistant.note", fallback: "Note"))
-                        TextEditor(text: $draft.note)
-                            .frame(minHeight: 90)
+                        ChekinanaSingleLineNoteField(
+                            ChekinanaL10n.text("assistant.note", fallback: "Note"),
+                            text: $draft.note
+                        )
                     }
                 }
             }
@@ -3822,12 +4111,6 @@ private struct TemporaryChekiEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(ChekinanaL10n.text("assistant.save", fallback: "Save"), action: onSave)
-                }
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button(ChekinanaL10n.text("action.done", fallback: "Done")) {
-                        isIndexFocused = false
-                    }
                 }
             }
         }
@@ -3870,6 +4153,7 @@ private struct IdolCardCollectionView: View {
     let idols: [ChekinanaIdolCard]
     let activeSelectionTokens: Set<String>
     let confirmedSelectionTokens: Set<String>
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let isInteractionEnabled: Bool
     let onSelectCandidate: (String) -> Void
     let onCancelCandidates: () -> Void
@@ -3879,6 +4163,7 @@ private struct IdolCardCollectionView: View {
             ForEach(idols) { idol in
                 IdolCardView(
                     idol: idol,
+                    replyLanguage: replyLanguage,
                     onSelectCandidate: selectionAction(for: idol),
                     isCandidateConfirmed: idol.selectionToken.map(confirmedSelectionTokens.contains) ?? false,
                     isCandidateInteractionEnabled: isInteractionEnabled
@@ -3911,6 +4196,7 @@ private struct IdolCardCollectionView: View {
 
 private struct IdolSectionCollectionView: View {
     let sections: [ChekinanaIdolSection]
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let selectedChekiID: UUID?
     let onSelectCheki: (ChekinanaChekiCard) -> Void
     @State private var visibleCount = ChekinanaCardBatching.initialCount
@@ -3920,6 +4206,7 @@ private struct IdolSectionCollectionView: View {
             ForEach(sections.prefix(visibleCount)) { section in
                 IdolSectionView(
                     section: section,
+                    replyLanguage: replyLanguage,
                     selectedChekiID: selectedChekiID,
                     onSelectCheki: onSelectCheki
                 )
@@ -3943,12 +4230,13 @@ private struct IdolSectionCollectionView: View {
 
 private struct IdolSectionView: View {
     let section: ChekinanaIdolSection
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let selectedChekiID: UUID?
     let onSelectCheki: (ChekinanaChekiCard) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            IdolCardView(idol: section.idol)
+            IdolCardView(idol: section.idol, replyLanguage: replyLanguage)
 
             if !section.chekis.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -3957,6 +4245,7 @@ private struct IdolSectionView: View {
                             ChekiCardView(
                                 cheki: cheki,
                                 isSelected: cheki.id == selectedChekiID,
+                                replyLanguage: replyLanguage,
                                 onSelect: { onSelectCheki(cheki) }
                             )
                         }
@@ -4186,6 +4475,7 @@ private struct ChekinanaChekiDateOverlay: View {
 private struct ChekiCardView: View {
     let cheki: ChekinanaChekiCard
     let isSelected: Bool
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let onSelect: (() -> Void)?
     @State private var renderedThumbnail: ChekinanaRenderedImage?
     @State private var previewState = ChekinanaChekiPreviewPresentationState()
@@ -4193,25 +4483,24 @@ private struct ChekiCardView: View {
     init(
         cheki: ChekinanaChekiCard,
         isSelected: Bool = false,
+        replyLanguage: ChekinanaAssistantReplyLanguage,
         onSelect: (() -> Void)? = nil
     ) {
         self.cheki = cheki
         self.isSelected = isSelected
+        self.replyLanguage = replyLanguage
         self.onSelect = onSelect
     }
 
     private var title: String {
         if cheki.confirmationCode != nil {
-            return ChekinanaL10n.text("assistant.cheki.pending", fallback: "Pending")
+            return replyLanguage.text("assistant.cheki.pending", fallback: "Pending")
         }
-        if let idx = cheki.idx {
-            return ChekinanaL10n.format("assistant.cheki.index", fallback: "Cheki #%lld", Int64(idx))
-        }
-        return ChekinanaL10n.text("assistant.cheki.scan_result", fallback: "Scan result")
+        return replyLanguage.text("assistant.cheki.scan_result", fallback: "Scan result")
     }
 
     private var associationText: String? {
-        let idols = cheki.idolNames.joined(separator: ChekinanaL10n.text("assistant.list_separator", fallback: ", "))
+        let idols = cheki.idolNames.joined(separator: replyLanguage.text("assistant.list_separator", fallback: ", "))
         let occasion = cheki.eventName ?? cheki.eventDateText
         let parts = [idols.isEmpty ? nil : idols, occasion].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -4230,15 +4519,15 @@ private struct ChekiCardView: View {
         case .notRequested:
             nil
         case .detected(let annotation):
-            ChekinanaL10n.format(
+            replyLanguage.format(
                 "assistant.cheki.detected_date",
                 fallback: "Date: %@",
-                ChekinanaDisplayFormat.date(annotation.text)
+                replyLanguage.localized { ChekinanaDisplayFormat.date(annotation.text) }
             )
         case .notDetected:
-            ChekinanaL10n.text("assistant.cheki.date_not_detected", fallback: "No date detected")
+            replyLanguage.text("assistant.cheki.date_not_detected", fallback: "No date detected")
         case .unavailable:
-            ChekinanaL10n.text("assistant.cheki.date_unavailable", fallback: "Date recognition unavailable")
+            replyLanguage.text("assistant.cheki.date_unavailable", fallback: "Date recognition unavailable")
         }
     }
 
@@ -4252,17 +4541,17 @@ private struct ChekiCardView: View {
     private var dateAnnotationAccessibilityValue: String {
         switch cheki.dateAnnotationState {
         case .notRequested:
-            return ChekinanaL10n.text("assistant.cheki.date_not_requested", fallback: "Handwritten date recognition was not requested")
+            return replyLanguage.text("assistant.cheki.date_not_requested", fallback: "Handwritten date recognition was not requested")
         case .detected(let annotation):
-            return ChekinanaL10n.format(
+            return replyLanguage.format(
                 "assistant.cheki.date_detected_accessibility",
                 fallback: "Detected handwritten date %@",
-                ChekinanaDisplayFormat.date(annotation.text)
+                replyLanguage.localized { ChekinanaDisplayFormat.date(annotation.text) }
             )
         case .notDetected:
-            return ChekinanaL10n.text("assistant.cheki.date_not_detected_accessibility", fallback: "No handwritten date was detected")
+            return replyLanguage.text("assistant.cheki.date_not_detected_accessibility", fallback: "No handwritten date was detected")
         case .unavailable:
-            return ChekinanaL10n.text("assistant.cheki.date_unavailable_accessibility", fallback: "Handwritten date recognition was unavailable; the image can still be used")
+            return replyLanguage.text("assistant.cheki.date_unavailable_accessibility", fallback: "Handwritten date recognition was unavailable; the image can still be used")
         }
     }
 
@@ -4335,7 +4624,7 @@ private struct ChekiCardView: View {
             }
 
             if let note = cheki.note, !note.isEmpty {
-                Text(ChekinanaL10n.format("assistant.cheki.note", fallback: "Note: %@", note))
+                Text(replyLanguage.format("assistant.cheki.note", fallback: "Note: %@", note))
                     .font(.caption)
                     .foregroundStyle(Color(.secondaryLabel))
                     .lineLimit(3)
@@ -4537,7 +4826,10 @@ struct ChekinanaIdolCardPresentation: Equatable {
     let lines: [String]
     let thirdLineKind: ThirdLineKind
 
-    init(idol: ChekinanaIdolCard) {
+    init(
+        idol: ChekinanaIdolCard,
+        replyLanguage: ChekinanaAssistantReplyLanguage = .interfaceFallback()
+    ) {
         let thirdLine: String
         switch idol.detail {
         case .addCandidate:
@@ -4551,10 +4843,10 @@ struct ChekinanaIdolCardPresentation: Equatable {
             }
         case .deleteCandidate:
             thirdLineKind = .chekiCount
-            thirdLine = ChekinanaRecordKind.cheki.countLabel(0)
+            thirdLine = replyLanguage.localized { ChekinanaRecordKind.cheki.countLabel(0) }
         case .chekiCount(let count):
             thirdLineKind = .chekiCount
-            thirdLine = ChekinanaRecordKind.cheki.countLabel(count)
+            thirdLine = replyLanguage.localized { ChekinanaRecordKind.cheki.countLabel(count) }
         }
         lines = [
             Self.nonempty(idol.name),
@@ -4575,6 +4867,7 @@ struct ChekinanaIdolCardPresentation: Equatable {
 
 private struct IdolCardView: View {
     let idol: ChekinanaIdolCard
+    let replyLanguage: ChekinanaAssistantReplyLanguage
     let onSelectCandidate: (() -> Void)?
     let isCandidateConfirmed: Bool
     let isCandidateInteractionEnabled: Bool
@@ -4583,11 +4876,13 @@ private struct IdolCardView: View {
 
     init(
         idol: ChekinanaIdolCard,
+        replyLanguage: ChekinanaAssistantReplyLanguage,
         onSelectCandidate: (() -> Void)? = nil,
         isCandidateConfirmed: Bool = false,
         isCandidateInteractionEnabled: Bool = true
     ) {
         self.idol = idol
+        self.replyLanguage = replyLanguage
         self.onSelectCandidate = onSelectCandidate
         self.isCandidateConfirmed = isCandidateConfirmed
         self.isCandidateInteractionEnabled = isCandidateInteractionEnabled
@@ -4637,7 +4932,10 @@ private struct IdolCardView: View {
     }
 
     var body: some View {
-        let presentation = ChekinanaIdolCardPresentation(idol: idol)
+        let presentation = ChekinanaIdolCardPresentation(
+            idol: idol,
+            replyLanguage: replyLanguage
+        )
         HStack(alignment: .center, spacing: 12) {
             avatar
 
@@ -4845,38 +5143,22 @@ private extension Color {
     }
 
     private static func chekinanaIdolColor(_ value: String) -> Color {
-        if let preset = ChekinanaIdolPalette.presetName(hex: value) {
-            // Keep legacy RGB imports aligned with the product shell's exact
-            // preset table without duplicating the table here.
-            return chekinanaIdolColor(preset)
+        if let rgb = ChekinanaIdolPalette.rgb(for: value) {
+            return Color(
+                red: Double(rgb.red) / 255,
+                green: Double(rgb.green) / 255,
+                blue: Double(rgb.blue) / 255
+            )
         }
         switch value {
         case "棕", "棕色": return Color(red: 0.49, green: 0.30, blue: 0.20)
-        case "橙", "橙色": return .orange
-        case "水", "水色": return Color(red: 129 / 255, green: 212 / 255, blue: 250 / 255)
         case "灰", "灰色": return .gray
-        case "白", "白色": return Color(red: 224 / 255, green: 224 / 255, blue: 224 / 255)
-        case "粉", "粉色": return Color(red: 1.0, green: 0.42, blue: 0.68)
-        case "紫", "紫色": return .purple
-        case "红", "红色": return .red
-        case "绿", "绿色": return .green
-        case "蓝", "蓝色": return .blue
         case "黑", "黑色": return .black
-        case "黄", "黄色": return .yellow
         case "金", "金色": return Color(red: 0.83, green: 0.64, blue: 0.10)
-        case "青", "青色", "薄青色": return .cyan
+        case "薄青色": return .cyan
         default: break
         }
-
-        let hex = value.hasPrefix("#") ? String(value.dropFirst()) : value
-        guard hex.count == 6, let rawValue = UInt64(hex, radix: 16) else {
-            return Color(red: 1.0, green: 0.824, blue: 0.118)
-        }
-
-        let red = Double((rawValue & 0xFF0000) >> 16) / 255.0
-        let green = Double((rawValue & 0x00FF00) >> 8) / 255.0
-        let blue = Double(rawValue & 0x0000FF) / 255.0
-        return Color(red: red, green: green, blue: blue)
+        return Color(uiColor: .systemGray3)
     }
 }
 
@@ -4887,9 +5169,9 @@ private extension Color {
                 Idol.self,
                 Event.self,
                 EventSchedule.self,
-                Cheki.self,
-                Shame.self,
-                Douga.self,
+                MediaItem.self,
+                MediaItem.self,
+                MediaItem.self,
             ],
             inMemory: true
         )

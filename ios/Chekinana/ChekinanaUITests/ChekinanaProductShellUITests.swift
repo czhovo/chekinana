@@ -48,7 +48,10 @@ final class ChekinanaProductShellUITests: XCTestCase {
     }
 
     func testAppLanguageSwitchesImmediatelyPersistsAndCalendarDaysStayNumeric() {
-        launch(fixture: "data")
+        launch(
+            fixture: "data", runtimeFixture: "closed",
+            extraArguments: ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        )
         tapTab("Calendar")
         let selectedDate = element("chekinana.calendar.selected-date")
         XCTAssertTrue(selectedDate.waitForExistence(timeout: 4))
@@ -69,10 +72,11 @@ final class ChekinanaProductShellUITests: XCTestCase {
         let chineseOption = element("chekinana.settings.language.option.zh-Hans")
         XCTAssertTrue(japaneseOption.waitForExistence(timeout: 4))
         XCTAssertTrue(chineseOption.exists)
-        XCTAssertFalse(element("chekinana.settings.language.option.en").exists)
+        XCTAssertTrue(element("chekinana.settings.language.option.en").exists)
+        XCTAssertTrue(element("chekinana.settings.language.option.zh-Hant").exists)
         japaneseOption.tap()
         XCTAssertTrue(waitUntil(timeout: 4) {
-            self.element("chekinana.settings.language.picker").value as? String == "ja"
+            self.element("chekinana.settings.language.picker").value as? String == "日本語"
         })
         XCTAssertTrue(waitUntil(timeout: 4) {
             self.app.buttons["chekinana.settings.done"].label == "完了"
@@ -90,10 +94,10 @@ final class ChekinanaProductShellUITests: XCTestCase {
 
         let expectedJapaneseTabs: [(String, String)] = [
             ("scan", "スキャン"),
-            ("idols", "Idol"),
+            ("idols", "アイドル"),
+            ("gallery", "ギャラリー"),
             ("calendar", "カレンダー"),
             ("events", "イベント"),
-            ("gallery", "ギャラリー"),
         ]
         for (rawValue, label) in expectedJapaneseTabs {
             XCTAssertEqual(
@@ -116,14 +120,29 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertTrue(element("chekinana.settings.page").waitForExistence(timeout: 4))
         XCTAssertEqual(
             element("chekinana.settings.language.picker").value as? String,
-            "ja"
+            "日本語"
         )
         XCTAssertEqual(app.buttons["chekinana.settings.done"].label, "完了")
 
+        for (language, settingsTitle, calendarTitle, doneTitle) in [
+            ("zh-Hant", "設定", "月曆", "完成"),
+            ("zh-Hans", "设置", "日历", "完成"),
+            ("en", "Settings", "Calendar", "Done"),
+        ] {
+            selectAppLanguage(language)
+            XCTAssertTrue(app.navigationBars[settingsTitle].exists)
+            XCTAssertEqual(app.buttons["chekinana.settings.done"].label, doneTitle)
+            app.buttons["chekinana.settings.done"].tap()
+            XCTAssertTrue(app.navigationBars[calendarTitle].waitForExistence(timeout: 4))
+            XCTAssertEqual(element("chekinana.calendar.selected-date").value as? String, "2026-07-31")
+            openDrawer()
+            app.buttons["chekinana.shell.drawer.settings"].tap()
+            XCTAssertTrue(element("chekinana.settings.page").waitForExistence(timeout: 4))
+        }
         selectAppLanguage("system")
         XCTAssertEqual(
             element("chekinana.settings.language.picker").value as? String,
-            "system"
+            "Follow System"
         )
         app.buttons["chekinana.settings.done"].tap()
     }
@@ -314,21 +333,9 @@ final class ChekinanaProductShellUITests: XCTestCase {
         launch(fixture: "data")
         tapTab("Idols")
 
-        let search = app.textFields["chekinana.idols.search"]
-        XCTAssertTrue(search.waitForExistence(timeout: 4))
-        search.tap()
-        search.typeText("Rin")
-        let searchKey = app.keyboards.buttons["Search"].firstMatch
-        if searchKey.waitForExistence(timeout: 2) { searchKey.tap() }
-
-        let idolCard = app.descendants(matching: .any).matching(
-            NSPredicate(
-                format: "identifier BEGINSWITH %@",
-                "chekinana.idols.card."
-            )
-        ).firstMatch
-        XCTAssertTrue(idolCard.waitForExistence(timeout: 4))
-        idolCard.tap()
+        let rin = app.staticTexts["Rin"]
+        XCTAssertTrue(rin.waitForExistence(timeout: 4))
+        rin.tap()
         XCTAssertTrue(element("chekinana.idols.detail").waitForExistence(timeout: 4))
 
         let chekiType = app.buttons["chekinana.idols.detail.type.cheki"]
@@ -431,28 +438,33 @@ final class ChekinanaProductShellUITests: XCTestCase {
 
     func testEmptyShellNavigationDrawerAndSettings() {
         launch(fixture: nil)
+        let idolsPageAppeared = element("chekinana.idols.page").waitForExistence(timeout: 8)
+        if !idolsPageAppeared { dumpHierarchy("empty-idols-page-missing") }
+        XCTAssertTrue(idolsPageAppeared)
+
+        tapTab("Scan")
         let scanPageAppeared = element("chekinana.scan.page").waitForExistence(timeout: 8)
         if !scanPageAppeared { dumpHierarchy("empty-scan-page-missing") }
         XCTAssertTrue(scanPageAppeared)
-        let calendarTab = app.buttons["chekinana.shell.tab.calendar"]
-        XCTAssertTrue(calendarTab.waitForExistence(timeout: 3))
+        let galleryTab = app.buttons["chekinana.shell.tab.gallery"]
+        XCTAssertTrue(galleryTab.waitForExistence(timeout: 3))
         XCTAssertLessThan(
-            abs(calendarTab.frame.midX - app.windows.firstMatch.frame.midX),
+            abs(galleryTab.frame.midX - app.windows.firstMatch.frame.midX),
             12,
-            "Calendar must be the middle tab"
+            "Gallery must be the middle tab"
         )
         capture("iphone-empty-scan")
 
         let choosePhotos = app.buttons["chekinana.scan.photos"]
         XCTAssertTrue(choosePhotos.exists)
-        XCTAssertTrue(element("chekinana.scan.gpu.status").exists)
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.refresh"].exists)
-        XCTAssertTrue(app.staticTexts["GPU · Unknown"].exists)
+        XCTAssertFalse(element("chekinana.scan.gpu.status").exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.refresh"].exists)
+        XCTAssertFalse(app.staticTexts["GPU · Unknown"].exists)
         XCTAssertFalse(app.buttons["chekinana.scan.gpu.start"].exists)
         XCTAssertFalse(app.switches["chekinana.scan.sleeves"].exists)
 
-        let dateToggle = app.switches["chekinana.scan.date-recognition"]
-        let idolToggle = app.switches["chekinana.scan.idol-recognition"]
+        let dateMode = app.segmentedControls["chekinana.scan.date-recognition"]
+        let idolMode = app.segmentedControls["chekinana.scan.idol-recognition"]
         let importCheki = app.buttons["chekinana.scan.import-cheki"]
         XCTAssertTrue(importCheki.exists)
         XCTAssertGreaterThan(
@@ -460,20 +472,15 @@ final class ChekinanaProductShellUITests: XCTestCase {
             app.windows.firstMatch.frame.maxX,
             "Import Cheki remains the third horizontally scrolled input"
         )
-        XCTAssertEqual(dateToggle.value as? String, "1")
-        XCTAssertEqual(idolToggle.value as? String, "1")
+        XCTAssertTrue(dateMode.buttons["Enabled"].isSelected)
+        XCTAssertTrue(idolMode.buttons["Enabled"].isSelected)
 
-        let candidates = app.buttons["chekinana.scan.candidates"]
+        let candidates = element("chekinana.scan.candidates")
         XCTAssertTrue(candidates.waitForExistence(timeout: 3))
         scrollAboveTabBar(candidates)
-        XCTAssertTrue(waitUntil(timeout: 3) { candidates.isHittable })
-        candidates.tap()
         let unassignedCandidate = app.switches["chekinana.scan.candidate.unassigned"]
         XCTAssertTrue(unassignedCandidate.waitForExistence(timeout: 3))
         XCTAssertEqual(unassignedCandidate.value as? String, "Not selected")
-        let candidateDone = app.buttons["chekinana.scan.candidates.done"]
-        candidateDone.tap()
-        XCTAssertTrue(waitUntil(timeout: 5) { !candidateDone.exists })
 
         openDrawer()
         capture("iphone-empty-drawer")
@@ -505,8 +512,8 @@ final class ChekinanaProductShellUITests: XCTestCase {
         app.buttons["chekinana.events.editor.cancel"].tap()
 
         tapTab("Scan")
-        XCTAssertEqual(dateToggle.value as? String, "1")
-        XCTAssertEqual(idolToggle.value as? String, "1")
+        XCTAssertTrue(dateMode.buttons["Enabled"].isSelected)
+        XCTAssertTrue(idolMode.buttons["Enabled"].isSelected)
 
         tapTab("Gallery")
         XCTAssertTrue(element("chekinana.gallery.empty").waitForExistence(timeout: 4))
@@ -533,14 +540,12 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertTrue((selectedDate.value as? String)?.hasSuffix("-01") == true)
     }
 
-    func testCandidatePickerSeparatesUnassignedAndSupportsIndependentIdolSelection() {
+    func testInlineCandidatesSeparateUnassignedAndSupportIndependentIdolSelection() {
         launch(fixture: "data")
 
-        let candidates = app.buttons["chekinana.scan.candidates"]
+        let candidates = element("chekinana.scan.candidates")
         XCTAssertTrue(candidates.waitForExistence(timeout: 3))
         scrollAboveTabBar(candidates)
-        XCTAssertTrue(waitUntil(timeout: 3) { candidates.isHittable })
-        candidates.tap()
 
         let unassigned = app.switches["chekinana.scan.candidate.unassigned"]
         XCTAssertTrue(unassigned.waitForExistence(timeout: 3))
@@ -574,31 +579,29 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertEqual(first.value as? String, toggledFirstValue)
         XCTAssertEqual(second.value as? String, toggledSecondValue)
 
-        app.buttons["chekinana.scan.candidates.done"].tap()
-        XCTAssertTrue(waitUntil(timeout: 5) {
-            !self.app.buttons["chekinana.scan.candidates.done"].exists
-        })
     }
 
-    func testGPUClosedShowsStartAndRefreshControls() {
+    func testGPUStatusControlsStayHiddenWhenRuntimeIsOfflineReady() {
         launch(fixture: nil, runtimeFixture: "offline-ready")
 
-        let status = element("chekinana.scan.gpu.status")
-        XCTAssertTrue(status.waitForExistence(timeout: 4))
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.start"].exists)
+        XCTAssertTrue(element("chekinana.scan.page").waitForExistence(timeout: 4))
+        XCTAssertFalse(element("chekinana.scan.gpu.status").exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.start"].exists)
         XCTAssertFalse(app.buttons["chekinana.scan.gpu.terminate"].exists)
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.refresh"].exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.refresh"].exists)
         XCTAssertFalse(app.buttons["chekinana.scan.camera"].isEnabled)
         XCTAssertFalse(app.buttons["chekinana.scan.photos"].isEnabled)
     }
 
-    func testGPUClosedFixtureExposesStart() {
+    func testGPUStatusControlsStayHiddenWhenRuntimeIsClosed() {
         launch(fixture: nil, runtimeFixture: "closed")
 
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.start"].waitForExistence(timeout: 4))
+        XCTAssertTrue(element("chekinana.scan.page").waitForExistence(timeout: 4))
+        XCTAssertFalse(element("chekinana.scan.gpu.status").exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.start"].exists)
     }
 
-    func testDataFixturePagesSearchFilterDetailsAndCalendar() {
+    func testDataFixturePagesDetailsAndCalendar() {
         launch(fixture: "data")
 
         tapTab("Idols")
@@ -614,19 +617,11 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(favoriteButtons.count, 3)
         capture("iphone-data-idols")
 
-        let idolSearch = app.textFields["chekinana.idols.search"]
-        XCTAssertTrue(idolSearch.waitForExistence(timeout: 3))
-        XCTAssertTrue(idolSearch.isHittable)
-        idolSearch.tap()
-        idolSearch.typeText("Rin")
-        XCTAssertTrue(waitUntil(timeout: 3) { idolCards.count == 1 })
-        let idolSearchKey = app.keyboards.buttons["Search"].firstMatch
-        if idolSearchKey.waitForExistence(timeout: 2) {
-            idolSearchKey.tap()
-            XCTAssertTrue(waitUntil(timeout: 4) { !self.app.keyboards.firstMatch.exists })
-        }
-        XCTAssertTrue(idolCards.firstMatch.isHittable)
-        idolCards.firstMatch.tap()
+        XCTAssertFalse(app.textFields["chekinana.idols.search"].exists)
+        let rin = app.staticTexts["Rin"]
+        XCTAssertTrue(rin.waitForExistence(timeout: 3))
+        XCTAssertTrue(rin.isHittable)
+        rin.tap()
         XCTAssertTrue(element("chekinana.idols.detail").waitForExistence(timeout: 4))
         XCTAssertTrue(app.buttons["chekinana.idols.detail.edit"].exists)
         XCTAssertFalse(app.buttons["chekinana.idols.detail.assistant"].exists)
@@ -674,10 +669,6 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertTrue(element("chekinana.idols.detail").waitForExistence(timeout: 4))
         app.buttons["chekinana.idols.detail.done"].tap()
         XCTAssertTrue(element("chekinana.idols.page").waitForExistence(timeout: 4))
-        let clearIdolSearch = app.buttons["chekinana.idols.search.clear"]
-        XCTAssertTrue(clearIdolSearch.waitForExistence(timeout: 3))
-        XCTAssertTrue(clearIdolSearch.isHittable)
-        clearIdolSearch.tap()
         XCTAssertTrue(waitUntil(timeout: 5) { idolCards.count >= 3 })
 
         tapTab("Events")
@@ -996,11 +987,7 @@ final class ChekinanaProductShellUITests: XCTestCase {
         tapTab("Calendar")
         tapTab("Idols")
         XCTAssertLessThan(mina.frame.minY, airi.frame.minY)
-
-        let search = app.textFields["chekinana.idols.search"]
-        search.tap()
-        search.typeText("Mina")
-        XCTAssertTrue(element("chekinana.idols.reorder.search-disabled").waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["chekinana.idols.search"].exists)
     }
 
     func testDeletingAnIdolPatternPersistsAfterSavingAndReopening() {
@@ -1145,9 +1132,33 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertEqual(secondRotate.value as? String, secondRotationState)
         XCTAssertFalse(element("chekinana.scan.review.editor").exists)
         XCTAssertGreaterThanOrEqual(annotationButtons.count, 2)
-        XCTAssertEqual(app.buttons.matching(
+        let favoriteButtons = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.scan.review.favorite.")
-        ).count, 0)
+        )
+        XCTAssertEqual(
+            favoriteButtons.count,
+            reviewCards.count,
+            "Every visible Review card must expose exactly one favorite button."
+        )
+        let firstFavorite = firstCard.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "chekinana.scan.review.favorite."
+            )
+        ).firstMatch
+        XCTAssertTrue(firstFavorite.exists)
+        XCTAssertTrue(firstFavorite.isHittable)
+        let initialFavoriteValue = firstFavorite.value as? String
+        XCTAssertFalse(initialFavoriteValue?.isEmpty ?? true)
+        let rotationBeforeFavorite = firstRotate.value as? String
+        let shotTypeBeforeFavorite = firstShotType.value as? String
+        firstFavorite.tap()
+        XCTAssertTrue(waitUntil(timeout: 3) {
+            (firstFavorite.value as? String) != initialFavoriteValue
+        })
+        XCTAssertEqual(firstRotate.value as? String, rotationBeforeFavorite)
+        XCTAssertEqual(firstShotType.value as? String, shotTypeBeforeFavorite)
+        XCTAssertFalse(element("chekinana.scan.review.editor").exists)
         XCTAssertEqual(app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "chekinana.scan.review.edit.")
         ).count, 0)
@@ -1329,8 +1340,15 @@ final class ChekinanaProductShellUITests: XCTestCase {
         capture("iphone-idols-fixed-rows")
     }
 
-    func testScanDateRangeCanScrollToStartWithLargeSourceButtons() {
-        launch(fixture: nil)
+    func testScanSpecifiedDateWheelExpandsChangesAndRetainsSelection() {
+        launch(
+            fixture: nil,
+            extraArguments: [
+                "-AppleLanguages", "(en)",
+                "-AppleLocale", "en_US",
+            ]
+        )
+        tapTab("Scan")
         let camera = app.buttons["chekinana.scan.camera"]
         let photos = app.buttons["chekinana.scan.photos"]
         XCTAssertTrue(camera.waitForExistence(timeout: 3))
@@ -1340,20 +1358,42 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Take a photo"].exists)
         XCTAssertTrue(app.staticTexts["Choose from library"].exists)
 
-        let range = app.switches["chekinana.scan.date-scope.range"]
-        scrollAboveTabBar(range)
-        XCTAssertTrue(range.waitForExistence(timeout: 3))
-        range.tap()
-        XCTAssertTrue(element("chekinana.scan.date-range-from").waitForExistence(timeout: 3))
-        XCTAssertTrue(element("chekinana.scan.date-range-to").exists)
-        let start = app.buttons["chekinana.scan.start"]
-        scrollAboveTabBar(start)
-        XCTAssertTrue(start.waitForExistence(timeout: 3))
-        XCTAssertLessThanOrEqual(
-            start.frame.maxY,
-            element("chekinana.shell.tabbar").frame.minY
-        )
-        capture("iphone-scan-expanded-date-range")
+        XCTAssertFalse(element("chekinana.scan.date-scope.range").exists)
+        XCTAssertFalse(element("chekinana.scan.date-range-from").exists)
+        XCTAssertFalse(element("chekinana.scan.date-range-to").exists)
+
+        let dateMode = app.segmentedControls["chekinana.scan.date-recognition"]
+        scrollAboveTabBar(dateMode)
+        XCTAssertTrue(dateMode.waitForExistence(timeout: 3))
+        let specified = dateMode.buttons["Specified"]
+        XCTAssertTrue(specified.waitForExistence(timeout: 3))
+        specified.tap()
+        XCTAssertTrue(waitUntil(timeout: 3) { specified.isSelected })
+
+        let dateRow = app.buttons["chekinana.scan.date-fixed"]
+        scrollAboveTabBar(dateRow)
+        XCTAssertTrue(dateRow.waitForExistence(timeout: 3))
+        let initialValue = dateRow.value as? String
+        XCTAssertFalse(element("chekinana.scan.date-fixed.wheel").exists)
+
+        dateRow.tap()
+        let dateWheel = element("chekinana.scan.date-fixed.wheel")
+        XCTAssertTrue(dateWheel.waitForExistence(timeout: 3))
+        let pickerWheels = dateWheel.pickerWheels
+        XCTAssertGreaterThanOrEqual(pickerWheels.count, 3)
+        let dayWheel = pickerWheels.element(boundBy: 1)
+        XCTAssertTrue(dayWheel.waitForExistence(timeout: 3))
+        let initialDay = dayWheel.value as? String
+        let replacementDay = initialDay == "1" ? "2" : "1"
+        dayWheel.adjust(toPickerWheelValue: replacementDay)
+        XCTAssertTrue(waitUntil(timeout: 3) {
+            (dateRow.value as? String) != initialValue
+        })
+        let changedValue = dateRow.value as? String
+
+        dateRow.tap()
+        XCTAssertTrue(waitUntil(timeout: 3) { !dateWheel.exists })
+        XCTAssertEqual(dateRow.value as? String, changedValue)
     }
 
     func testScanInputPhotosExposeCompactPerSourceRotateAndDeleteControls() {
@@ -1363,6 +1403,7 @@ final class ChekinanaProductShellUITests: XCTestCase {
         app.launchEnvironment["CHEKINANA_NATIVE_SCAN_UI_INPUT_FIXTURE"] = "1"
         app.launch()
 
+        tapTab("Scan")
         XCTAssertTrue(element("chekinana.scan.page").waitForExistence(timeout: 8))
         let rotateButtons = app.buttons.matching(NSPredicate(
             format: "identifier BEGINSWITH %@",
@@ -1417,13 +1458,15 @@ final class ChekinanaProductShellUITests: XCTestCase {
         XCTAssertEqual(inputImages.count, 1)
     }
 
-    func testGPUManagementControlsPersistAfterPageReentry() {
+    func testGPUStatusControlsStayHiddenAfterPageReentry() {
         launch(fixture: nil, runtimeFixture: "closed")
         tapTab("Idols")
         tapTab("Scan")
 
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.start"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.buttons["chekinana.scan.gpu.refresh"].exists)
+        XCTAssertTrue(element("chekinana.scan.page").waitForExistence(timeout: 8))
+        XCTAssertFalse(element("chekinana.scan.gpu.status").exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.start"].exists)
+        XCTAssertFalse(app.buttons["chekinana.scan.gpu.refresh"].exists)
     }
 
     func testGallerySeparatesThreeMediaPagesIntoThreeColumns() {
@@ -1781,14 +1824,22 @@ final class ChekinanaProductShellUITests: XCTestCase {
     private func selectAppLanguage(_ rawValue: String) {
         let picker = element("chekinana.settings.language.picker")
         XCTAssertTrue(picker.waitForExistence(timeout: 4))
-        if picker.value as? String == rawValue { return }
+        let titles = [
+            "system": "Follow System", "zh-Hans": "简体中文", "zh-Hant": "繁體中文",
+            "ja": "日本語", "en": "English",
+        ]
+        guard let expectedTitle = titles[rawValue] else {
+            XCTFail("Unexpected app language: \(rawValue)")
+            return
+        }
+        if picker.value as? String == expectedTitle { return }
         picker.tap()
         let option = element("chekinana.settings.language.option.\(rawValue)")
         XCTAssertTrue(option.waitForExistence(timeout: 4), rawValue)
         XCTAssertTrue(waitUntil(timeout: 4) { option.isHittable }, rawValue)
         option.tap()
         XCTAssertTrue(waitUntil(timeout: 4) {
-            self.element("chekinana.settings.language.picker").value as? String == rawValue
+            self.element("chekinana.settings.language.picker").value as? String == expectedTitle
         }, rawValue)
     }
 

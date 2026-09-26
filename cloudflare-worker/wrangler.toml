@@ -7,9 +7,9 @@ routes = [
 ]
 
 [vars]
-NL_LLM_MODEL = "deepseek-v4-flash"
+NL_LLM_MODEL = "deepseek-flash"
 NL_LLM_ENDPOINT = "https://api.deepseek.com/chat/completions"
-CHEKI_DATE_QWEN_MODEL = "qwen3.7-flash"
+CHEKI_DATE_QWEN_MODEL = "qwen3.7-plus"
 SCANNER_ACTIVE_TASK_CHECK_CONCURRENCY = "4"
 SCANNER_TIMING_LOGS = "true"
 

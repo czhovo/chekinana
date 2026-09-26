@@ -16,6 +16,7 @@ enum ChekinanaNLIntent: String, Codable, CaseIterable, Sendable {
     case addcheki
     case addscancheki
     case listcheki
+    case statscheki
     case showidol
     case showevent
     case showcheki
@@ -70,6 +71,10 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
     var livehouse: String?
     var price: String?
     var ticketURL: String?
+    var count: Int?
+    var contextRef: String?
+    // Never decoded or encoded; only set after resolving a validated local snapshot.
+    var isLocallyResolved = false
 
     init(
         name: String? = nil,
@@ -104,7 +109,9 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         city: String? = nil,
         livehouse: String? = nil,
         price: String? = nil,
-        ticketURL: String? = nil
+        ticketURL: String? = nil,
+        count: Int? = nil,
+        contextRef: String? = nil
     ) {
         self.name = name
         self.url = url
@@ -139,6 +146,8 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         self.livehouse = livehouse
         self.price = price
         self.ticketURL = ticketURL
+        self.count = count
+        self.contextRef = contextRef
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -175,6 +184,8 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         case livehouse
         case price
         case ticketURL = "ticket_url"
+        case count
+        case contextRef = "context_ref"
     }
 
     init(from decoder: Decoder) throws {
@@ -216,6 +227,8 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         livehouse = try container.decodeIfPresent(String.self, forKey: .livehouse)
         price = try container.decodeIfPresent(String.self, forKey: .price)
         ticketURL = try container.decodeIfPresent(String.self, forKey: .ticketURL)
+        count = try container.decodeIfPresent(Int.self, forKey: .count)
+        contextRef = try container.decodeIfPresent(String.self, forKey: .contextRef)
     }
 
     var presentKeys: Set<String> {
@@ -253,6 +266,8 @@ struct ChekinanaNLSlots: Codable, Equatable, Sendable {
         if livehouse != nil { result.insert("livehouse") }
         if price != nil { result.insert("price") }
         if ticketURL != nil { result.insert("ticket_url") }
+        if count != nil { result.insert("count") }
+        if contextRef != nil { result.insert("context_ref") }
         return result
     }
 }
@@ -321,18 +336,21 @@ struct ChekinanaNLInterpretRequest: Codable, Equatable, Sendable {
     let localDate: String
     let timezone: String
     let draft: ChekinanaNLRequestDraft?
+    let context: ChekinanaNLContext?
 
     init(
         utterance: String,
         localDate: String,
         timezone: String,
-        draft: ChekinanaNLRequestDraft? = nil
+        draft: ChekinanaNLRequestDraft? = nil,
+        context: ChekinanaNLContext? = nil
     ) {
         version = 1
         self.utterance = utterance
         self.localDate = localDate
         self.timezone = timezone
         self.draft = draft
+        self.context = context
     }
 }
 
@@ -525,6 +543,305 @@ struct ChekinanaNLRequestGenerationGate: Equatable, Sendable {
     }
 }
 
+enum ChekinanaReplyLanguagePhase: String, Codable, Equatable, Sendable {
+    case initial
+    case continuation
+}
+
+enum ChekinanaReplyLanguageCode: String, Codable, Equatable, Sendable {
+    case simplifiedChinese = "zh-Hans"
+    case traditionalChinese = "zh-Hant"
+    case japanese = "ja"
+    case english = "en"
+    case undetermined
+
+    var assistantLanguage: ChekinanaAssistantReplyLanguage? {
+        switch self {
+        case .simplifiedChinese: .simplifiedChinese
+        case .traditionalChinese: .traditionalChinese
+        case .japanese: .japanese
+        case .english: .english
+        case .undetermined: nil
+        }
+    }
+}
+
+extension ChekinanaAssistantReplyLanguage {
+    var replyLanguageCode: ChekinanaReplyLanguageCode {
+        switch self {
+        case .simplifiedChinese: .simplifiedChinese
+        case .traditionalChinese: .traditionalChinese
+        case .japanese: .japanese
+        case .english, .appLocalizationFallback: .english
+        }
+    }
+}
+
+struct ChekinanaReplyLanguageRequest: Encodable, Equatable, Sendable {
+    let version: Int
+    let utterance: String
+    let phase: ChekinanaReplyLanguagePhase
+    let currentLanguage: ChekinanaReplyLanguageCode?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case utterance
+        case phase
+        case currentLanguage = "current_language"
+    }
+
+    init(utterance: String, currentLanguage: ChekinanaAssistantReplyLanguage?) {
+        version = 1
+        self.utterance = utterance
+        if let currentLanguage {
+            phase = .continuation
+            self.currentLanguage = currentLanguage.replyLanguageCode
+        } else {
+            phase = .initial
+            self.currentLanguage = nil
+        }
+    }
+}
+
+struct ChekinanaReplyLanguageDecision: Decodable, Equatable, Sendable {
+    let version: Int
+    let language: ChekinanaReplyLanguageCode
+    let switchRequested: Bool
+    let directiveOnly: Bool
+    let businessUtterance: String?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case version
+        case language
+        case switchRequested = "switch_requested"
+        case directiveOnly = "directive_only"
+        case businessUtterance = "business_utterance"
+    }
+
+    init(
+        version: Int = 1,
+        language: ChekinanaReplyLanguageCode,
+        switchRequested: Bool,
+        directiveOnly: Bool,
+        businessUtterance: String? = nil
+    ) {
+        self.version = version
+        self.language = language
+        self.switchRequested = switchRequested
+        self.directiveOnly = directiveOnly
+        self.businessUtterance = businessUtterance
+    }
+
+    init(from decoder: Decoder) throws {
+        try ChekinanaNLStrictCoding.rejectUnknownKeys(
+            decoder,
+            allowed: Set(CodingKeys.allCases.map(\.rawValue))
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        language = try container.decode(ChekinanaReplyLanguageCode.self, forKey: .language)
+        switchRequested = try container.decode(Bool.self, forKey: .switchRequested)
+        directiveOnly = try container.decode(Bool.self, forKey: .directiveOnly)
+        businessUtterance = try container.decodeIfPresent(String.self, forKey: .businessUtterance)
+    }
+}
+
+protocol ChekinanaReplyLanguageClientProtocol: Sendable {
+    func decide(
+        request: ChekinanaReplyLanguageRequest,
+        activeConfirmationCodes: Set<String>
+    ) async throws -> ChekinanaReplyLanguageDecision
+}
+
+struct ChekinanaReplyLanguageClient: ChekinanaReplyLanguageClientProtocol, Sendable {
+    static let productionEndpoint = URL(string: "https://api.chekinana.top/api/nl/reply-language")!
+    static let transportTimeout: TimeInterval = ChekinanaNLInterpretClient.transportTimeout
+    static let maximumRequestBytes = ChekinanaNLInterpretClient.maximumRequestBytes
+    static let maximumResponseBytes = 256 * 1_024
+
+    private let endpoint: URL
+    private let session: URLSession
+
+    init(endpoint: URL = productionEndpoint, session: URLSession? = nil) {
+        self.endpoint = endpoint
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = Self.transportTimeout
+            configuration.timeoutIntervalForResource = Self.transportTimeout
+            configuration.waitsForConnectivity = false
+            configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            configuration.urlCache = nil
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
+            configuration.connectionProxyDictionary =
+                ChekinanaCatalogueNetworkPolicy.directConnectionProxyDictionary()
+            self.session = URLSession(configuration: configuration)
+        }
+    }
+
+    func decide(
+        request languageRequest: ChekinanaReplyLanguageRequest,
+        activeConfirmationCodes: Set<String> = []
+    ) async throws -> ChekinanaReplyLanguageDecision {
+        let utterance = languageRequest.utterance.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !utterance.isEmpty,
+              utterance == languageRequest.utterance,
+              utterance.utf16.count <= 1_000,
+              !utterance.unicodeScalars.contains(where: { scalar in
+                  scalar.value <= 0x08
+                      || (0x0B...0x0C).contains(scalar.value)
+                      || (0x0E...0x1F).contains(scalar.value)
+                      || scalar.value == 0x7F
+              }),
+              (languageRequest.phase == .initial && languageRequest.currentLanguage == nil)
+                || (languageRequest.phase == .continuation
+                    && languageRequest.currentLanguage?.assistantLanguage != nil) else {
+            throw ChekinanaNLClientError.invalidRequest
+        }
+        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            utterance,
+            activeConfirmationCodes: activeConfirmationCodes
+        ) else {
+            throw ChekinanaNLClientError.sensitiveInput
+        }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = Self.transportTimeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        let encodedBody = try JSONEncoder().encode(languageRequest)
+        guard encodedBody.count <= Self.maximumRequestBytes else {
+            throw ChekinanaNLClientError.invalidRequest
+        }
+        request.httpBody = encodedBody
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw ChekinanaNLClientError.cancelled
+        } catch let error as URLError {
+            switch error.code {
+            case .cannotFindHost, .dnsLookupFailed:
+                throw ChekinanaNLClientError.cannotFindHost
+            case .notConnectedToInternet, .cannotConnectToHost:
+                throw ChekinanaNLClientError.notConnectedToInternet
+            case .timedOut:
+                throw ChekinanaNLClientError.timedOut
+            case .networkConnectionLost:
+                throw ChekinanaNLClientError.networkConnectionLost
+            case .cancelled:
+                throw ChekinanaNLClientError.cancelled
+            default:
+                throw error
+            }
+        }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ChekinanaNLClientError.invalidSchema
+        }
+        guard data.count <= Self.maximumResponseBytes else {
+            throw ChekinanaNLClientError.responseTooLarge
+        }
+        guard httpResponse.statusCode == 200 else {
+            throw ChekinanaNLClientError.invalidHTTPStatus(httpResponse.statusCode)
+        }
+        do {
+            let decision = try JSONDecoder().decode(ChekinanaReplyLanguageDecision.self, from: data)
+            try Self.validate(decision, for: utterance)
+            return decision
+        } catch let error as ChekinanaNLClientError {
+            throw error
+        } catch {
+            throw ChekinanaNLClientError.invalidSchema
+        }
+    }
+
+    static func validate(
+        _ decision: ChekinanaReplyLanguageDecision,
+        for trimmedUtterance: String
+    ) throws {
+        guard decision.version == 1 else { throw ChekinanaNLClientError.invalidSchema }
+        if decision.switchRequested {
+            guard decision.language.assistantLanguage != nil else {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+            if decision.directiveOnly {
+                guard decision.businessUtterance == nil else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+            } else {
+                guard let businessUtterance = decision.businessUtterance,
+                      !businessUtterance.isEmpty,
+                      trimmedUtterance.range(of: businessUtterance) != nil else {
+                    throw ChekinanaNLClientError.invalidSchema
+                }
+            }
+        } else {
+            guard !decision.directiveOnly, decision.businessUtterance == nil else {
+                throw ChekinanaNLClientError.invalidSchema
+            }
+        }
+    }
+}
+
+struct ChekinanaReplyLanguageResolution: Equatable, Sendable {
+    let language: ChekinanaAssistantReplyLanguage
+    let businessUtterance: String?
+    let switchRequested: Bool
+}
+
+enum ChekinanaReplyLanguageResolver {
+    static func resolve(
+        utterance: String,
+        currentLanguage: ChekinanaAssistantReplyLanguage?,
+        interfaceFallback: ChekinanaAssistantReplyLanguage,
+        activeConfirmationCodes: Set<String>,
+        client: any ChekinanaReplyLanguageClientProtocol
+    ) async -> ChekinanaReplyLanguageResolution {
+        let request = ChekinanaReplyLanguageRequest(
+            utterance: utterance,
+            currentLanguage: currentLanguage
+        )
+        let fallback = currentLanguage ?? interfaceFallback
+        guard ChekinanaNLPrivacyGuard.allowsRemoteInterpretation(
+            utterance,
+            activeConfirmationCodes: activeConfirmationCodes
+        ) else {
+            return .init(language: fallback, businessUtterance: utterance, switchRequested: false)
+        }
+        do {
+            let decision = try await client.decide(
+                request: request,
+                activeConfirmationCodes: activeConfirmationCodes
+            )
+            try ChekinanaReplyLanguageClient.validate(decision, for: utterance)
+            if decision.switchRequested, let target = decision.language.assistantLanguage {
+                return .init(
+                    language: target,
+                    businessUtterance: decision.directiveOnly ? nil : decision.businessUtterance,
+                    switchRequested: true
+                )
+            }
+            guard currentLanguage == nil else {
+                return .init(language: fallback, businessUtterance: utterance, switchRequested: false)
+            }
+            return .init(
+                language: decision.language.assistantLanguage ?? interfaceFallback,
+                businessUtterance: utterance,
+                switchRequested: false
+            )
+        } catch {
+            return .init(language: fallback, businessUtterance: utterance, switchRequested: false)
+        }
+    }
+}
+
 struct ChekinanaNLInterpretClient: Sendable {
     static let productionEndpoint = URL(string: "https://api.chekinana.top/api/nl/interpret")!
     static let transportTimeout: TimeInterval = 12
@@ -560,7 +877,8 @@ struct ChekinanaNLInterpretClient: Sendable {
         localDate: String,
         timezone: String,
         draft: ChekinanaNLRequestDraft? = nil,
-        activeConfirmationCodes: Set<String> = []
+        activeConfirmationCodes: Set<String> = [],
+        context: ChekinanaNLContext? = nil
     ) async throws -> ChekinanaNLInterpretation {
         let trimmedUtterance = utterance.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUtterance.isEmpty,
@@ -582,6 +900,7 @@ struct ChekinanaNLInterpretClient: Sendable {
         ) else {
             throw ChekinanaNLClientError.sensitiveInput
         }
+        try context?.validatePrivacy(activeConfirmationCodes: activeConfirmationCodes)
         if let draft {
             try ChekinanaNLSchemaValidator.validateDraft(draft.operation, missing: draft.missing)
         }
@@ -599,6 +918,7 @@ struct ChekinanaNLInterpretClient: Sendable {
                 requestDraft: draft
             )
             try ChekinanaNLSchemaValidator.validateSuccessInterpretation(interpretation)
+            try ChekinanaNLContext.validate(interpretation, using: context)
             return interpretation
         }
 #endif
@@ -607,7 +927,8 @@ struct ChekinanaNLInterpretClient: Sendable {
             utterance: trimmedUtterance,
             localDate: localDate,
             timezone: timezone,
-            draft: draft
+            draft: draft,
+            context: context
         )
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -677,6 +998,7 @@ struct ChekinanaNLInterpretClient: Sendable {
                 requestDraft: draft
             )
             try ChekinanaNLSchemaValidator.validateSuccessInterpretation(interpretation)
+            try ChekinanaNLContext.validate(interpretation, using: context)
             return interpretation
         } catch let error as ChekinanaNLClientError {
             throw error
@@ -745,7 +1067,7 @@ private actor ChekinanaNLDebugStub {
             ])
         case "event_candidate":
             guard let url = ChekinanaEventWeiboInput.extractedURL(from: utterance),
-                  ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(url) else {
+                  ChekinanaEventCandidateValidator.isPublicSocialStatusURL(url) else {
                 return uiRouterInterpretation(utterance: utterance)
             }
             return .clarify(
@@ -755,7 +1077,7 @@ private actor ChekinanaNLDebugStub {
         case "event_candidate_then_cancel":
             if requestCounts[mode] == 1,
                let url = ChekinanaEventWeiboInput.extractedURL(from: utterance),
-               ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(url) {
+               ChekinanaEventCandidateValidator.isPublicSocialStatusURL(url) {
                 return .clarify(
                     draft: .init(intent: .addevent, slots: .init(url: url)),
                     missing: [.eventName, .date]
@@ -951,7 +1273,23 @@ enum ChekinanaNLSchemaValidator {
     ) throws {
         let before = requestDraft.slots
         let after = operation.slots
-        guard (before.name == nil || before.name == after.name),
+        if requestDraft.missing.isEmpty {
+            let cleared = Set(after.clearFields ?? [])
+            let oldCleared = Set(before.clearFields ?? [])
+            let oldValues = before.presentKeys.subtracting(["clear_fields"])
+            guard oldValues.subtracting(cleared).isSubset(of: after.presentKeys),
+                  oldCleared.allSatisfy({ cleared.contains($0) || after.presentKeys.contains($0) }) else { throw ChekinanaNLClientError.invalidSchema }
+            return
+        }
+        guard (before.city == nil || before.city == after.city),
+              (before.livehouse == nil || before.livehouse == after.livehouse),
+              (before.price == nil || before.price == after.price),
+              (before.ticketURL == nil || before.ticketURL == after.ticketURL),
+              (before.count == nil || before.count == after.count),
+              (before.contextRef == nil || before.contextRef == after.contextRef),
+              (before.dateFrom == nil || before.dateFrom == after.dateFrom),
+              (before.dateTo == nil || before.dateTo == after.dateTo),
+              (before.name == nil || before.name == after.name),
               (before.url == nil || before.url == after.url),
               (before.date == nil || before.date == after.date),
               (before.idols == nil || before.idols == after.idols),
@@ -981,7 +1319,8 @@ enum ChekinanaNLSchemaValidator {
             case .eventName:
                 fillable.insert("name")
             case .date:
-                fillable.insert("date")
+                if requestDraft.intent == .statscheki { fillable.formUnion(["date_from", "date_to"]) }
+                else { fillable.insert("date") }
             case .temporaryCheki:
                 fillable.insert("temporary")
             }
@@ -1002,7 +1341,7 @@ enum ChekinanaNLSchemaValidator {
     static func validateDraft(_ operation: ChekinanaNLOperation, missing: [ChekinanaNLMissing]) throws {
         try validateOperation(operation, allowingPartial: true)
         let expected = expectedMissing(for: operation)
-        guard (1...5).contains(missing.count),
+        guard (0...5).contains(missing.count),
               missing.count == Set(missing).count,
               missing.count == expected.count,
               missing.allSatisfy(expected.contains) else {
@@ -1013,6 +1352,8 @@ enum ChekinanaNLSchemaValidator {
     static func expectedMissing(for operation: ChekinanaNLOperation) -> [ChekinanaNLMissing] {
         let slots = operation.slots
         switch operation.intent {
+        case .statscheki:
+            return (slots.dateFrom == nil) != (slots.dateTo == nil) ? [.date] : []
         case .addidol:
             return slots.name == nil ? [.idol] : []
         case .editidol, .deleteidol, .favoriteidol, .editevent, .deleteevent,
@@ -1035,8 +1376,10 @@ enum ChekinanaNLSchemaValidator {
 
     static func validateOperation(_ operation: ChekinanaNLOperation, allowingPartial: Bool) throws {
         let slots = operation.slots
-        let allowed: Set<String>
+        var allowed: Set<String>
         switch operation.intent {
+        case .statscheki:
+            allowed = ["idol", "event", "date_from", "date_to"]
         case .navigate:
             allowed = ["destination", "date"]
         case .openScan:
@@ -1050,7 +1393,7 @@ enum ChekinanaNLSchemaValidator {
         case .favoriteidol:
             allowed = ["target", "favorite"]
         case .addevent:
-            allowed = ["url", "name", "date"]
+            allowed = ["url", "name", "date", "city", "livehouse", "price", "ticket_url", "note"]
         case .editevent:
             allowed = ["target", "name", "date", "city", "livehouse", "price", "url", "ticket_url", "note", "clear_fields"]
         case .deleteevent:
@@ -1074,9 +1417,24 @@ enum ChekinanaNLSchemaValidator {
         case .showrecord, .deleterecord:
             allowed = ["record_type", "target"]
         case .addrecord:
-            allowed = ["record_type", "idols", "event", "date", "idx", "note", "favorite", "size"]
+            allowed = ["record_type", "idols", "event", "date", "idx", "note", "favorite", "size", "count"]
         case .editrecord:
-            allowed = ["record_type", "target", "idols", "event", "date", "idx", "note", "favorite", "size", "clear_fields"]
+            allowed = ["record_type", "target", "idols", "event", "date", "idx", "note", "favorite", "size", "clear_fields", "count"]
+        }
+        if ChekinanaNLContext.supportsReference(operation.intent) { allowed.insert("context_ref") }
+        if let reference = slots.contextRef {
+            guard ["last_target", "last_statistics"].contains(reference), slots.target == nil,
+                  reference != "last_statistics" || operation.intent == .statscheki else { throw ChekinanaNLClientError.invalidSchema }
+        }
+        if let count = slots.count {
+            guard slots.recordType == "cheki",
+                  operation.intent == .addrecord || operation.intent == .editrecord,
+                  ((operation.intent == .addrecord ? 1 : 0)...100).contains(count) else { throw ChekinanaNLClientError.invalidSchema }
+        }
+        if operation.intent == .statscheki {
+            for date in [slots.dateFrom, slots.dateTo].compactMap({ $0 }) where !isCalendarDate(date) { throw ChekinanaNLClientError.invalidSchema }
+            if let from = slots.dateFrom, let to = slots.dateTo, from > to { throw ChekinanaNLClientError.invalidSchema }
+            if !allowingPartial, (slots.dateFrom == nil) != (slots.dateTo == nil) { throw ChekinanaNLClientError.invalidSchema }
         }
         guard slots.presentKeys.isSubset(of: allowed) else {
             throw ChekinanaNLClientError.invalidSchema
@@ -1097,7 +1455,7 @@ enum ChekinanaNLSchemaValidator {
         if let user = slots.user, !["true", "false", "?"].contains(user) {
             throw ChekinanaNLClientError.invalidSchema
         }
-        if let size = slots.size, !["mini", "wide", "else", "?"].contains(size) {
+        if let size = slots.size, !["mini", "wide", "?"].contains(size) {
             throw ChekinanaNLClientError.invalidSchema
         }
         try validateExtendedOperation(operation)
@@ -1111,42 +1469,42 @@ enum ChekinanaNLSchemaValidator {
         case .addidol:
             try require(slots.name)
         case .editidol:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
             guard [slots.name, slots.group, slots.birthday, slots.color,
                    slots.verification, slots.bio, slots.avatar]
                 .contains(where: { $0 != nil }) || slots.clearFields?.isEmpty == false else {
                 throw ChekinanaNLClientError.invalidSchema
             }
         case .deleteidol, .deleteevent, .deletecheki:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
         case .favoriteidol:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
             guard slots.favorite != nil else { throw ChekinanaNLClientError.invalidSchema }
         case .addevent:
             try require(slots.name)
             try require(slots.date)
         case .editevent:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
             guard hasEventPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
         case .addcheki, .addscancheki:
             // Media selection is the only required step. Associations may be
             // absent and filled later in the picker/scan review UI.
             break
         case .showidol, .showevent, .showcheki:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
         case .editcheki:
-            try require(slots.target)
+            try require(slots.target ?? slots.contextRef)
             guard hasRecordPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
         case .showrecord, .deleterecord:
-            try require(slots.recordType); try require(slots.target)
+            try require(slots.recordType); try require(slots.target ?? slots.contextRef)
         case .addrecord:
             try require(slots.recordType)
         case .editrecord:
-            try require(slots.recordType); try require(slots.target)
+            try require(slots.recordType); try require(slots.target ?? slots.contextRef)
             guard hasRecordPatch(slots) else { throw ChekinanaNLClientError.invalidSchema }
         case .listrecord:
             break
-        case .listidol, .listevent, .scancheki, .listcheki:
+        case .listidol, .listevent, .scancheki, .listcheki, .statscheki:
             break
         }
     }
@@ -1164,7 +1522,7 @@ enum ChekinanaNLSchemaValidator {
              .addrecord, .editrecord, .deleterecord:
             for reference in ([slots.target, slots.event].compactMap { $0 }
                 + (slots.idols ?? []) + (slots.candidateRefs ?? [])) {
-                guard isHumanReference(reference) else {
+                guard (slots.isLocallyResolved && UUID(uuidString: reference) != nil) || isHumanReference(reference) else {
                     throw ChekinanaNLClientError.invalidSchema
                 }
             }
@@ -1190,6 +1548,8 @@ enum ChekinanaNLSchemaValidator {
                     throw ChekinanaNLClientError.invalidSchema
                 }
             }
+        case .addevent:
+            if let url = slots.ticketURL, !isSafeHTTPURL(url) { throw ChekinanaNLClientError.invalidSchema }
         case .editevent:
             let allowed = Set(["date", "city", "livehouse", "price", "url", "ticket_url", "note"])
             if let clear = slots.clearFields, !Set(clear).isSubset(of: allowed) { throw ChekinanaNLClientError.invalidSchema }
@@ -1224,7 +1584,7 @@ enum ChekinanaNLSchemaValidator {
     }
 
     private static func hasRecordPatch(_ slots: ChekinanaNLSlots) -> Bool {
-        slots.idols != nil || [slots.event, slots.date, slots.user, slots.note, slots.size].contains(where: { $0 != nil }) || slots.idx != nil || slots.favorite != nil || slots.clearFields?.isEmpty == false
+        slots.idols != nil || [slots.event, slots.date, slots.user, slots.note, slots.size].contains(where: { $0 != nil }) || slots.idx != nil || slots.count != nil || slots.favorite != nil || slots.clearFields?.isEmpty == false
     }
 
     static func isCalendarDate(_ value: String) -> Bool {
@@ -1267,7 +1627,7 @@ enum ChekinanaNLSchemaValidator {
         intent: ChekinanaNLIntent
     ) throws {
         if let name = slots.name {
-            try validateString(name, maximum: intent == .addevent ? 300 : 200)
+            try validateString(name, maximum: [.addevent, .editevent].contains(intent) ? 300 : 200)
         }
         if let url = slots.url { try validateString(url, maximum: 1_000) }
         if let date = slots.date { try validateString(date, maximum: 10) }
@@ -1275,10 +1635,13 @@ enum ChekinanaNLSchemaValidator {
             slots.idol, slots.event, slots.temporary, slots.target, slots.group,
             slots.birthday, slots.color, slots.verification, slots.bio, slots.avatar,
             slots.destination, slots.fixedDate, slots.dateFrom, slots.dateTo,
-            slots.recordType, slots.city, slots.livehouse, slots.price, slots.ticketURL,
+            slots.recordType, slots.city,
         ].compactMap({ $0 }) {
             try validateString(value, maximum: 200)
         }
+        if let value = slots.livehouse { try validateString(value, maximum: 300) }
+        if let value = slots.price { try validateString(value, maximum: 300) }
+        if let value = slots.ticketURL { try validateString(value, maximum: 1_000) }
         if let note = slots.note { try validateString(note, maximum: 500) }
         if let user = slots.user { try validateString(user, maximum: 5) }
         if let size = slots.size { try validateString(size, maximum: 4) }

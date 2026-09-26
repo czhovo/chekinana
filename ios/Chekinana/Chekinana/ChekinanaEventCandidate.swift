@@ -111,8 +111,87 @@ struct ChekinanaEventCandidateFields: Equatable, Sendable {
     }
 }
 
+struct ChekinanaEventCandidateContentMetadata: Equatable, Sendable {
+    static let versionHeader = "X-Chekinana-Content-Metadata-Version"
+    static let incompleteReasonsHeader =
+        "X-Chekinana-Content-Incomplete-Reasons"
+
+    enum Completeness: Equatable, Sendable {
+        case unknown
+        case complete
+        case incomplete
+    }
+
+    enum IncompleteReason: String, CaseIterable, Hashable, Sendable {
+        case weiboSummaryFallback = "weibo-summary-fallback"
+        case localTruncation = "local-truncation"
+        case xUpstreamTruncation = "x-upstream-truncation"
+    }
+
+    let completeness: Completeness
+    let reasons: Set<IncompleteReason>
+    let containsUnknownReason: Bool
+
+    static let unknown = Self(
+        completeness: .unknown,
+        reasons: [],
+        containsUnknownReason: false
+    )
+
+    static let complete = Self(
+        completeness: .complete,
+        reasons: [],
+        containsUnknownReason: false
+    )
+
+    var requiresWarning: Bool {
+        completeness != .complete
+    }
+
+    static func parse(
+        versionValue: String?,
+        incompleteReasonsValue: String?
+    ) -> Self {
+        guard versionValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "1" else {
+            return .unknown
+        }
+        let tokens = (incompleteReasonsValue ?? "")
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+            }
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return .complete }
+        let reasons = Set(tokens.compactMap(IncompleteReason.init(rawValue:)))
+        return Self(
+            completeness: .incomplete,
+            reasons: reasons,
+            containsUnknownReason: tokens.contains {
+                IncompleteReason(rawValue: $0) == nil
+            }
+        )
+    }
+
+    static func parse(response: HTTPURLResponse) -> Self {
+        parse(
+            versionValue: response.value(forHTTPHeaderField: versionHeader),
+            incompleteReasonsValue: response.value(
+                forHTTPHeaderField: incompleteReasonsHeader
+            )
+        )
+    }
+}
+
+struct ChekinanaEventCandidateClientResponse: Equatable, Sendable {
+    let fields: ChekinanaEventCandidateFields
+    let contentMetadata: ChekinanaEventCandidateContentMetadata
+}
+
 enum ChekinanaEventCandidateBlocker: Equatable, Sendable, Identifiable {
     case missingName
+    case missingCity
     case invalidDate
     case invalidWeiboURL
     case invalidTicketURL
@@ -122,6 +201,7 @@ enum ChekinanaEventCandidateBlocker: Equatable, Sendable, Identifiable {
     var id: String {
         switch self {
         case .missingName: "missing-name"
+        case .missingCity: "missing-city"
         case .invalidDate: "invalid-date"
         case .invalidWeiboURL: "invalid-weibo-url"
         case .invalidTicketURL: "invalid-ticket-url"
@@ -134,10 +214,15 @@ enum ChekinanaEventCandidateBlocker: Equatable, Sendable, Identifiable {
         switch self {
         case .missingName:
             ChekinanaL10n.text("assistant.event.error.name", fallback: "The Event name is required.")
+        case .missingCity:
+            ChekinanaL10n.text(
+                "product.events.city_required",
+                fallback: "City is required."
+            )
         case .invalidDate:
             ChekinanaL10n.text("assistant.event.error.date", fallback: "Use YYYY-MM-DD, or leave the date empty if it is undetermined.")
         case .invalidWeiboURL:
-            ChekinanaL10n.text("assistant.event.error.weibo", fallback: "The Weibo URL must be a public HTTPS status URL on weibo.com.")
+            ChekinanaL10n.text("assistant.event.error.weibo", fallback: "Enter a Weibo or X link.")
         case .invalidTicketURL:
             ChekinanaL10n.text("assistant.event.error.ticket", fallback: "Use an HTTPS URL on a trusted ticket site, or leave it empty.")
         case .livehouseLooksLikeAddress:
@@ -154,7 +239,7 @@ enum ChekinanaEventCandidateValidator {
     private static let trustedTicketDomains: Set<String> = [
         "showstart.com", "damai.cn", "piaoxingqiu.com", "maoyan.com",
         "247tickets.com", "gewara.com", "motntickets.com", "cityline.com",
-        "hkticketing.com",
+        "hkticketing.com", "t-dv.com", "ticketdive.com",
     ]
 
     static func blockers(for fields: ChekinanaEventCandidateFields) -> [ChekinanaEventCandidateBlocker] {
@@ -162,12 +247,16 @@ enum ChekinanaEventCandidateValidator {
         if fields.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             blockers.append(.missingName)
         }
+        if fields.city.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blockers.append(.missingCity)
+        }
         let date = fields.date.trimmingCharacters(in: .whitespacesAndNewlines)
         if !date.isEmpty, !isCalendarDate(date) {
             blockers.append(.invalidDate)
         }
         let weiboURL = fields.weiboURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !weiboURL.isEmpty, !isPublicWeiboStatusURL(weiboURL) {
+        if !weiboURL.isEmpty,
+           ChekinanaEventSource.validatedURL(from: weiboURL) == nil {
             blockers.append(.invalidWeiboURL)
         }
         let ticketURL = fields.ticketURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -191,7 +280,7 @@ enum ChekinanaEventCandidateValidator {
                 priceMaximumUTF8ByteCount
             ),
             (ChekinanaL10n.text("assistant.event.field.avatar", fallback: "Avatar URL"), fields.avatarURL, 2_048),
-            (ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo URL"), fields.weiboURL, 2_048),
+            (ChekinanaL10n.text("assistant.event.field.weibo", fallback: "Weibo / X URL"), fields.weiboURL, 2_048),
             (ChekinanaL10n.text("assistant.event.field.ticket", fallback: "Ticket URL"), fields.ticketURL, 2_048),
             (ChekinanaL10n.text("assistant.note", fallback: "Note"), fields.note, 2_000),
         ] where value.utf8.count > limit {
@@ -208,21 +297,44 @@ enum ChekinanaEventCandidateValidator {
 
     static func isPublicWeiboStatusURL(_ rawValue: String) -> Bool {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercasedValue = value.lowercased()
-        let authorities = ["https://weibo.com", "https://www.weibo.com"]
-        guard value.utf8.count <= 2_048,
-              let authority = authorities.first(where: {
-                lowercasedValue.hasPrefix($0 + "/")
-              }) else {
+        guard rawValue == value,
+              value.utf8.count <= 2_048,
+              !value.unicodeScalars.contains(where: {
+                  $0.value <= 0x1F || $0.value == 0x7F
+              }),
+              hasValidPercentEncoding(value),
+              let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              let host = components.host?.lowercased(),
+              components.user == nil,
+              components.password == nil,
+              components.port == nil,
+              components.fragment == nil,
+              !components.percentEncodedPath.contains("\\") else {
             return false
         }
-        let rawPercentEncodedPath = value.dropFirst(authority.count)
-        guard !rawPercentEncodedPath.contains("?"),
-              !rawPercentEncodedPath.contains("#"),
-              !rawPercentEncodedPath.contains("\\") else {
-            return false
+
+        if host == "m.weibo.cn" {
+            guard components.percentEncodedQuery.map({
+                $0 == "jumpfrom=weibocom"
+            }) ?? true else { return false }
+            let segments = components.percentEncodedPath.split(
+                separator: "/",
+                omittingEmptySubsequences: false
+            )
+            guard segments.count == 3,
+                  segments[0].isEmpty,
+                  segments[1] == "status" || segments[1] == "detail",
+                  String(segments[2]).range(
+                    of: #"^[0-9]{1,20}$"#,
+                    options: .regularExpression
+                  ) != nil else { return false }
+            return true
         }
-        let segments = rawPercentEncodedPath.split(
+
+        guard host == "weibo.com" || host == "www.weibo.com",
+              components.percentEncodedQuery == nil else { return false }
+        let segments = components.percentEncodedPath.split(
             separator: "/",
             omittingEmptySubsequences: false
         )
@@ -256,6 +368,74 @@ enum ChekinanaEventCandidateValidator {
         }
     }
 
+    static func isPublicXStatusURL(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rawValue == value,
+              rawValue.utf8.count <= 2_048,
+              !rawValue.unicodeScalars.contains(where: { $0.value <= 0x1F || $0.value == 0x7F }),
+              hasValidPercentEncoding(value),
+              let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "https",
+              let host = components.host?.lowercased(),
+              host == "x.com" || host == "www.x.com",
+              components.user == nil,
+              components.password == nil,
+              components.port == nil,
+              components.fragment == nil,
+              components.percentEncodedQuery.map({ query in
+                  query.range(
+                      of: #"^s=[0-9]{1,3}$"#,
+                      options: .regularExpression
+                  ) != nil
+              }) ?? true,
+              !components.percentEncodedPath.contains("\\") else {
+            return false
+        }
+        let segments = components.percentEncodedPath.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard segments.count == 4,
+              segments[0].isEmpty,
+              segments[2].lowercased() == "status",
+              String(segments[1]).range(
+                  of: #"^[A-Za-z0-9_]{1,15}$"#,
+                  options: .regularExpression
+              ) != nil,
+              String(segments[3]).range(
+                  of: #"^[0-9]{1,20}$"#,
+                  options: .regularExpression
+              ) != nil else {
+            return false
+        }
+        return true
+    }
+
+    static func isPublicSocialStatusURL(_ rawValue: String) -> Bool {
+        isPublicWeiboStatusURL(rawValue) || isPublicXStatusURL(rawValue)
+    }
+
+    private static func hasValidPercentEncoding(_ value: String) -> Bool {
+        let scalars = Array(value.unicodeScalars)
+        var index = 0
+        while index < scalars.count {
+            if scalars[index].value == 0x25 {
+                guard index + 2 < scalars.count,
+                      scalars[(index + 1)...(index + 2)].allSatisfy({ scalar in
+                          (48...57).contains(scalar.value)
+                              || (65...70).contains(scalar.value)
+                              || (97...102).contains(scalar.value)
+                      }) else {
+                    return false
+                }
+                index += 3
+            } else {
+                index += 1
+            }
+        }
+        return true
+    }
+
     static func isTrustedTicketURL(_ rawValue: String) -> Bool {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.utf8.count <= 2_048,
@@ -285,17 +465,20 @@ enum ChekinanaEventCandidateValidator {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return false }
         let address = separateAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !address.isEmpty, value == address || value.contains(address) {
+        if !address.isEmpty,
+           value == address || value.contains(address) || address.contains(value) {
             return true
         }
-        let patterns = [
-            #"(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*号(?!馆|店|厅|沙滩)"#,
+        let detailedAddressPatterns = [
+            #"(?:路|街|大道|公路|道|巷|弄|胡同).{0,16}(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*号"#,
             #"(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)\s*(?:弄|栋|幢|室|层|单元)"#,
-            #"(?:路|街|道|巷|弄).{0,12}[0-9]+"#,
+            #"(?:路|街|大道|公路|道|巷|弄|胡同).{0,12}(?:[0-9]+|[零〇一二两三四五六七八九十百千万]+)"#,
             #"(?:省|市|区|县).*(?:路|街|道|巷|弄)"#,
             #"(?:路|街|道|巷|弄)(?:东|西|南|北|中)?(?:段|侧|口|附近|交叉口|与)"#,
         ]
-        return patterns.contains { value.range(of: $0, options: .regularExpression) != nil }
+        return detailedAddressPatterns.contains(where: {
+            value.range(of: $0, options: .regularExpression) != nil
+        })
     }
 }
 
@@ -430,9 +613,9 @@ enum ChekinanaEventCandidateClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidURL:
-            ChekinanaL10n.text("assistant.event.client.invalid_url", fallback: "Enter a public Weibo status URL.")
+            ChekinanaL10n.text("assistant.event.client.invalid_url", fallback: "Enter a public Weibo or X status URL.")
         case .emptyText:
-            ChekinanaL10n.text("assistant.event.client.empty_text", fallback: "Enter the full Weibo post text.")
+            ChekinanaL10n.text("assistant.event.client.empty_text", fallback: "Enter the full Weibo or X post text.")
         case .invalidTextCharacters:
             ChekinanaL10n.text("assistant.event.client.characters", fallback: "The post contains unsupported control characters. Remove them and try again.")
         case .textTooLarge:
@@ -450,15 +633,15 @@ enum ChekinanaEventCandidateClientError: LocalizedError, Equatable {
         case .rejected(let code):
             switch code {
             case "invalid_request", "invalid_weibo_url":
-                ChekinanaL10n.text("assistant.event.reject.invalid_url", fallback: "This is not a supported public Weibo status URL.")
+                ChekinanaL10n.text("assistant.event.reject.invalid_url", fallback: "This is not a supported public Weibo or X status URL.")
             case "status_unavailable", "not_found":
-                ChekinanaL10n.text("assistant.event.reject.not_found", fallback: "This public Weibo status could not be read.")
+                ChekinanaL10n.text("assistant.event.reject.not_found", fallback: "This public Weibo or X status could not be read.")
             case "upstream_timeout":
-                ChekinanaL10n.text("assistant.event.reject.upstream_timeout", fallback: "Reading the Weibo status timed out. Try again later.")
+                ChekinanaL10n.text("assistant.event.reject.upstream_timeout", fallback: "Reading the Weibo or X status timed out. Try again later.")
             case "weibo_timeout", "weibo_upstream_timeout":
-                ChekinanaL10n.text("assistant.event.reject.weibo_timeout", fallback: "Reading the Weibo post timed out. Try again later or enter the Event fields manually.")
+                ChekinanaL10n.text("assistant.event.reject.weibo_timeout", fallback: "Reading the Weibo or X post timed out. Try again later or enter the Event fields manually.")
             case "weibo_upstream_unavailable":
-                ChekinanaL10n.text("assistant.event.reject.weibo_unavailable", fallback: "The Weibo post is temporarily unavailable. Try again later or enter the Event fields manually.")
+                ChekinanaL10n.text("assistant.event.reject.weibo_unavailable", fallback: "The Weibo or X post is temporarily unavailable. Try again later or enter the Event fields manually.")
             case "service_unavailable":
                 ChekinanaL10n.text("assistant.event.reject.service", fallback: "Event extraction is temporarily unavailable. Try again later or enter the fields manually.")
             case "model_timeout":
@@ -470,7 +653,7 @@ enum ChekinanaEventCandidateClientError: LocalizedError, Equatable {
             case "invalid_model_output":
                 ChekinanaL10n.text("assistant.event.reject.model_output", fallback: "No safe Event details could be parsed. Check the post or enter the fields manually.")
             case "invalid_text", "text_too_large":
-                ChekinanaL10n.text("assistant.event.reject.text", fallback: "The Weibo post is invalid or too long. Check it and try again.")
+                ChekinanaL10n.text("assistant.event.reject.text", fallback: "The Weibo or X post is invalid or too long. Check it and try again.")
             case "rate_limited":
                 ChekinanaL10n.text("assistant.event.reject.rate", fallback: "Too many requests. Try again later.")
             default:
@@ -506,7 +689,13 @@ struct ChekinanaEventCandidateClient {
     }
 
     func fetch(weiboURL: String) async throws -> ChekinanaEventCandidateFields {
-        guard ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(weiboURL) else {
+        try await fetchResponse(weiboURL: weiboURL).fields
+    }
+
+    func fetchResponse(
+        weiboURL: String
+    ) async throws -> ChekinanaEventCandidateClientResponse {
+        guard ChekinanaEventCandidateValidator.isPublicSocialStatusURL(weiboURL) else {
             throw ChekinanaEventCandidateClientError.invalidURL
         }
         return try await perform(
@@ -516,6 +705,12 @@ struct ChekinanaEventCandidateClient {
     }
 
     func parse(text: String) async throws -> ChekinanaEventCandidateFields {
+        try await parseResponse(text: text).fields
+    }
+
+    func parseResponse(
+        text: String
+    ) async throws -> ChekinanaEventCandidateClientResponse {
         try Self.validateText(text)
         return try await perform(
             request: Self.makeTextRequest(endpointURL: try resolvedEndpoint(), text: text),
@@ -533,11 +728,11 @@ struct ChekinanaEventCandidateClient {
     private func perform(
         request: URLRequest,
         expectedWeiboURL: String?
-    ) async throws -> ChekinanaEventCandidateFields {
+    ) async throws -> ChekinanaEventCandidateClientResponse {
 #if DEBUG
         switch ProcessInfo.processInfo.environment["CHEKINANA_EVENT_CANDIDATE_UI_STUB"] {
         case "fixture":
-            return .init(
+            return .init(fields: .init(
                 name: expectedWeiboURL == nil ? "Fixture Text Live" : "Fixture Live",
                 date: expectedWeiboURL == nil ? "2026-08-03" : "",
                 city: "上海",
@@ -548,9 +743,9 @@ struct ChekinanaEventCandidateClient {
                 weiboURL: expectedWeiboURL ?? "",
                 ticketURL: "https://showstart.com/event/fixture",
                 note: expectedWeiboURL == nil ? "Parsed from pasted text" : ""
-            )
+            ), contentMetadata: .unknown)
         case "address_fixture":
-            return .init(
+            return .init(fields: .init(
                 name: "Address Fixture",
                 date: "2026-08-02",
                 city: "北京",
@@ -558,7 +753,7 @@ struct ChekinanaEventCandidateClient {
                 weiboURL: expectedWeiboURL ?? "",
                 ticketURL: "",
                 note: ""
-            )
+            ), contentMetadata: .unknown)
         case "hang":
             try await Task.sleep(nanoseconds: 30_000_000_000)
             throw ChekinanaEventCandidateClientError.timedOut
@@ -598,7 +793,10 @@ struct ChekinanaEventCandidateClient {
                 }
                 // Model/source prose must never become the user's Event note.
                 normalized.note = ""
-                return normalized
+                return ChekinanaEventCandidateClientResponse(
+                    fields: normalized,
+                    contentMetadata: .parse(response: http)
+                )
             }
             throw Self.decodeReject(data)
         } catch let error as ChekinanaEventCandidateClientError {
@@ -618,7 +816,7 @@ struct ChekinanaEventCandidateClient {
     }
 
     static func makeRequest(endpointURL: URL, weiboURL: String) throws -> URLRequest {
-        guard ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(weiboURL) else {
+        guard ChekinanaEventCandidateValidator.isPublicSocialStatusURL(weiboURL) else {
             throw ChekinanaEventCandidateClientError.invalidURL
         }
         return try makeRequest(endpointURL: endpointURL, key: "weiboURL", value: weiboURL)

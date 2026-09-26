@@ -293,7 +293,7 @@ class LLMFallbackTests(unittest.TestCase):
         contents = ("[]", '"text"', "null", "{}", "", "{not-json", None)
         for content in contents:
             response = {
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-flash",
                 "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
@@ -320,7 +320,7 @@ class LLMFallbackTests(unittest.TestCase):
         )
         for usage in invalid_usages:
             response = {
-                "model": "deepseek-v4-pro",
+                "model": "deepseek-flash",
                 "choices": [{"message": {"content": valid_content}}],
             }
             if usage is not None:
@@ -334,7 +334,7 @@ class LLMFallbackTests(unittest.TestCase):
 
     def test_normal_integer_usage_is_accepted_without_coercion(self):
         response = {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             "choices": [{"message": {"content": '{"command":"listidol","intent":"listidol","message":"ok"}'}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
         }

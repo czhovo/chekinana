@@ -1,0 +1,104 @@
+[
+  {
+    "id": "numbered-warehouse-venue",
+    "livehouse": "8号仓库Livehouse",
+    "separateAddress": "",
+    "expectedPureVenue": true
+  },
+  {
+    "id": "numbered-theatre-venue",
+    "livehouse": "3号剧场",
+    "separateAddress": "",
+    "expectedPureVenue": true
+  },
+  {
+    "id": "numbered-beach-venue",
+    "livehouse": "11号沙滩",
+    "separateAddress": "",
+    "expectedPureVenue": true
+  },
+  {
+    "id": "numbered-livehouse-venue",
+    "livehouse": "9号Livehouse",
+    "separateAddress": "",
+    "expectedPureVenue": true
+  },
+  {
+    "id": "venue-equals-separate-address",
+    "livehouse": "MAO Livehouse",
+    "separateAddress": "MAO Livehouse",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "venue-contains-separate-address-without-street-evidence",
+    "livehouse": "星光中心A座",
+    "separateAddress": "星光中心",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "separate-address-contains-venue-without-street-evidence",
+    "livehouse": "星光中心",
+    "separateAddress": "星光中心A座",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "street-arabic-number-address",
+    "livehouse": "幸福路100号",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "street-chinese-number-address",
+    "livehouse": "幸福路一百号",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "unit-room-address",
+    "livehouse": "B区2单元301室",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "street-address-with-hall-suffix",
+    "livehouse": "幸福路100号厅",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "street-address-with-shop-suffix",
+    "livehouse": "幸福路100号店",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "venue-containing-complete-separate-address",
+    "livehouse": "3号剧场（幸福路100号）",
+    "separateAddress": "幸福路100号",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "short-street-address",
+    "livehouse": "XX街12号",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "multi-part-building-address",
+    "livehouse": "人民路12号3栋4层",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "administrative-street-address",
+    "livehouse": "上海市浦东新区世纪大道",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  },
+  {
+    "id": "lane-address",
+    "livehouse": "长宁区88弄",
+    "separateAddress": "",
+    "expectedPureVenue": false
+  }
+]

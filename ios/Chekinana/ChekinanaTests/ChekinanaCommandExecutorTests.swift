@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Combine
 import CoreData
+import CoreML
 import ImageIO
 import SwiftData
 import SwiftUI
@@ -9,12 +10,807 @@ import UIKit
 import XCTest
 @testable import Chekinana
 
+private enum ChekinanaV8ToV9TestMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [ChekinanaSchemaV8.self, ChekinanaSchemaV9.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [.lightweight(fromVersion: ChekinanaSchemaV8.self, toVersion: ChekinanaSchemaV9.self)]
+    }
+}
+
+private enum ChekinanaV9ToV10TestMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [ChekinanaSchemaV9.self, ChekinanaSchemaV10.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [.lightweight(fromVersion: ChekinanaSchemaV9.self, toVersion: ChekinanaSchemaV10.self)]
+    }
+}
+
+private enum ChekinanaV10ToV11TestMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] {
+        [ChekinanaSchemaV10.self, ChekinanaSchemaV11.self]
+    }
+
+    static var stages: [MigrationStage] {
+        [.lightweight(fromVersion: ChekinanaSchemaV10.self, toVersion: ChekinanaSchemaV11.self)]
+    }
+}
+
 @MainActor
 final class ChekinanaCommandExecutorTests: XCTestCase {
+    func testFixedBorderWhiteBalanceSelectorFiltersThenRanksByBrightness() throws {
+        typealias Block = ChekinanaFixedBorderWhiteBalanceEstimator.ReferenceBlock
+        func block(
+            _ brightness: Double,
+            variance: Double,
+            x: Int,
+            y: Int
+        ) -> Block {
+            Block(
+                mean: SIMD3<Double>(repeating: brightness),
+                averageLinearVariance: variance,
+                brightness: brightness,
+                x: x,
+                y: y,
+                validPixels: 144
+            )
+        }
+
+        let aboveThreshold = block(
+            0.99,
+            variance: ChekinanaFixedBorderWhiteBalanceEstimator
+                .maximumAverageLinearVariance.nextUp,
+            x: 0,
+            y: 0
+        )
+        var candidates = [aboveThreshold]
+        candidates.append(block(0.91, variance: 0.000_999, x: 12, y: 12))
+        candidates.append(block(0.90, variance: 0.001, x: 24, y: 12))
+        candidates.append(block(0.85, variance: 0, x: 24, y: 12))
+        candidates.append(block(0.85, variance: 0, x: 12, y: 0))
+        candidates.append(block(0.85, variance: 0, x: 0, y: 0))
+        for index in 0..<7 {
+            candidates.append(block(
+                0.80 - Double(index) * 0.01,
+                variance: 0,
+                x: index * 12,
+                y: 24
+            ))
+        }
+
+        let estimate = try XCTUnwrap(
+            ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+                referenceBlocks: candidates
+            )
+        )
+        XCTAssertEqual(estimate.candidateCount, 13)
+        XCTAssertEqual(estimate.eligibleCount, 12)
+        XCTAssertEqual(estimate.selectedBlocks.count, 10)
+        XCTAssertFalse(estimate.selectedBlocks.contains(aboveThreshold))
+        XCTAssertNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            referenceBlocks: [aboveThreshold]
+        ))
+        XCTAssertEqual(estimate.selectedBlocks[0].brightness, 0.91)
+        XCTAssertEqual(estimate.selectedBlocks[1].brightness, 0.90)
+        XCTAssertEqual(
+            estimate.selectedBlocks[2...4].map { [$0.x, $0.y] },
+            [[0, 0], [12, 0], [24, 12]]
+        )
+        XCTAssertEqual(
+            ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+                referenceBlocks: [block(0.8, variance: 0, x: 0, y: 0)]
+            )?.selectedBlocks.count,
+            1
+        )
+    }
+
+    func testFixedBorderWhiteBalanceSelectorHonorsPixelAndInkBoundaries() throws {
+        let width = 300
+        let height = 477
+        func proxy() -> [UInt8] {
+            var result = [UInt8](repeating: 0, count: width * height * 4)
+            for offset in stride(from: 3, to: result.count, by: 4) {
+                result[offset] = 255
+            }
+            return result
+        }
+        func paint(
+            _ pixels: inout [UInt8],
+            count: Int,
+            color: (UInt8, UInt8, UInt8),
+            start: Int = 0
+        ) {
+            for index in start..<(start + count) {
+                let x = index % 12
+                let y = index / 12
+                let offset = (y * width + x) * 4
+                pixels[offset] = color.0
+                pixels[offset + 1] = color.1
+                pixels[offset + 2] = color.2
+            }
+        }
+
+        var exactly116 = proxy()
+        paint(&exactly116, count: 116, color: (141, 141, 141))
+        paint(&exactly116, count: 28, color: (140, 140, 140), start: 116)
+        XCTAssertNotNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: exactly116,
+            width: width,
+            height: height,
+            orientation: .portrait
+        ))
+
+        var only115 = proxy()
+        paint(&only115, count: 115, color: (141, 141, 141))
+        paint(&only115, count: 29, color: (140, 140, 140), start: 115)
+        XCTAssertNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: only115,
+            width: width,
+            height: height,
+            orientation: .portrait
+        ))
+
+        var faintInk = proxy()
+        paint(&faintInk, count: 144, color: (235, 205, 180))
+        paint(&faintInk, count: 14, color: (155, 160, 150))
+        XCTAssertNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: faintInk,
+            width: width,
+            height: height,
+            orientation: .portrait
+        ))
+
+        var sparseDarkInk = proxy()
+        paint(&sparseDarkInk, count: 144, color: (235, 205, 180))
+        paint(&sparseDarkInk, count: 14, color: (80, 70, 60))
+        XCTAssertNotNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: sparseDarkInk,
+            width: width,
+            height: height,
+            orientation: .portrait
+        ))
+
+        var denseDarkInk = proxy()
+        paint(&denseDarkInk, count: 144, color: (235, 205, 180))
+        paint(&denseDarkInk, count: 29, color: (80, 70, 60))
+        XCTAssertNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: denseDarkInk,
+            width: width,
+            height: height,
+            orientation: .portrait
+        ))
+    }
+
+    func testFixedBorderWhiteBalanceSelectorKeepsColorCastAndOrientation() throws {
+        var portraitPixels = [UInt8](repeating: 255, count: 300 * 477 * 4)
+        for y in 0..<477 {
+            for x in 0..<300 {
+                let offset = (y * 300 + x) * 4
+                let isContent = (21...279).contains(x) && (38...383).contains(y)
+                let color: (UInt8, UInt8, UInt8) = isContent
+                    ? (250, 250, 250) : (170, 205, 240)
+                portraitPixels[offset] = color.0
+                portraitPixels[offset + 1] = color.1
+                portraitPixels[offset + 2] = color.2
+                portraitPixels[offset + 3] = 255
+            }
+        }
+        var landscapePixels = [UInt8](repeating: 255, count: 477 * 300 * 4)
+        for y in 0..<477 {
+            for x in 0..<300 {
+                let sourceOffset = (y * 300 + x) * 4
+                let landscapeX = 476 - y
+                let landscapeY = x
+                let destinationOffset = (landscapeY * 477 + landscapeX) * 4
+                landscapePixels[destinationOffset..<(destinationOffset + 4)] =
+                    portraitPixels[sourceOffset..<(sourceOffset + 4)]
+            }
+        }
+        let portrait = try XCTUnwrap(
+            ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+                pixels: portraitPixels,
+                width: 300,
+                height: 477,
+                orientation: .portrait
+            )
+        )
+        let landscape = try XCTUnwrap(
+            ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+                pixels: landscapePixels,
+                width: 477,
+                height: 300,
+                orientation: .landscape
+            )
+        )
+        XCTAssertEqual(portrait.gain.x, landscape.gain.x, accuracy: 0.000_001)
+        XCTAssertEqual(portrait.gain.y, landscape.gain.y, accuracy: 0.000_001)
+        XCTAssertEqual(portrait.gain.z, landscape.gain.z, accuracy: 0.000_001)
+        XCTAssertGreaterThan(portrait.gain.x, portrait.gain.y)
+        XCTAssertGreaterThan(portrait.gain.y, portrait.gain.z)
+
+        let dim = [UInt8](repeating: 130, count: 300 * 477 * 4)
+        XCTAssertNil(ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
+            pixels: dim,
+            width: 300,
+            height: 477,
+            orientation: .portrait
+        ))
+    }
+
+    func testCustomChekiSizeDimensionsAndLegacyElseRemoval() throws {
+        XCTAssertEqual(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 1,
+                heightRatio: 2
+            )?.width,
+            1_200
+        )
+        XCTAssertEqual(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 1,
+                heightRatio: 2
+            )?.height,
+            2_400
+        )
+        XCTAssertEqual(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 2,
+                heightRatio: 1
+            )?.width,
+            2_400
+        )
+        XCTAssertEqual(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 1,
+                heightRatio: 1
+            )?.height,
+            1_200
+        )
+        XCTAssertEqual(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 8_192,
+                heightRatio: 1_200
+            )?.width,
+            8_192
+        )
+        XCTAssertNil(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: 8_193,
+                heightRatio: 1_200
+            )
+        )
+        XCTAssertNil(
+            ChekinanaCustomChekiSizePolicy.pixelDimensions(
+                widthRatio: Double.greatestFiniteMagnitude,
+                heightRatio: 1
+            )
+        )
+        XCTAssertNil(ChekiSize(rawValue:
+            "custom:\(UUID().uuidString.lowercased()):8193x1200"
+        ))
+        XCTAssertNil(ChekiSize(rawValue: "else"))
+        XCTAssertNil(ChekiSize(rawValue: "other"))
+        XCTAssertEqual(ChekiSize.builtInCases, [.mini, .wide])
+
+        let commandSource = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Chekinana/ChekinanaCommandExecutor.swift"),
+            encoding: .utf8
+        )
+        XCTAssertFalse(commandSource.contains("mini|wide|else"))
+        XCTAssertFalse(commandSource.contains("mini|wide|other"))
+
+        let customID = UUID()
+        let custom = ChekiSize.custom(
+            id: customID,
+            pixelWidth: 1_200,
+            pixelHeight: 2_100
+        )
+        XCTAssertEqual(custom.customID, customID)
+        XCTAssertEqual(custom.customPixelDimensions?.width, 1_200)
+        XCTAssertEqual(custom.customPixelDimensions?.height, 2_100)
+        XCTAssertEqual(
+            ChekinanaImportedChekiCanvasPolicy.dimensions(
+                inferredSize: custom,
+                isLandscape: false
+            ).width,
+            1_200
+        )
+        XCTAssertEqual(
+            ChekinanaImportedChekiCanvasPolicy.dimensions(
+                inferredSize: custom,
+                isLandscape: false
+            ).height,
+            2_100
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                ChekiSize.self,
+                from: JSONEncoder().encode(custom)
+            ),
+            custom
+        )
+    }
+
+    func testEventSourceValidationUsesPersistedWeiboAndXContract() {
+        let mobileURL = "https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom"
+        XCTAssertEqual(
+            ChekinanaEventSource.validatedURL(
+                from: mobileURL
+            )?.source,
+            .weibo
+        )
+        XCTAssertEqual(
+            ChekinanaEventSource.validatedURL(from: mobileURL)?.url.absoluteString,
+            mobileURL
+        )
+        XCTAssertEqual(
+            ChekinanaEventSource.validatedURL(
+                from: "https://www.weibo.com/u/1"
+            )?.source,
+            .weibo
+        )
+        XCTAssertEqual(
+            ChekinanaEventSource.validatedURL(
+                from: "https://x.com/user/status/1"
+            )?.source,
+            .x
+        )
+        XCTAssertEqual(
+            ChekinanaEventSource.validatedURL(
+                from: "https://www.x.com/user/status/1"
+            )?.source,
+            .x
+        )
+        XCTAssertNil(ChekinanaEventSource.validatedURL(
+            from: "https://twitter.com/user/status/1"
+        ))
+        XCTAssertNil(ChekinanaEventSource.validatedURL(
+            from: "https://example.com/post/1"
+        ))
+        XCTAssertNil(ChekinanaEventSource.validatedURL(
+            from: "https://evilx.com/post/1"
+        ))
+    }
+
+    func testCustomSizeAndEventSourcePersistAndRoundTripThroughBackupPayload() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        )
+        let context = container.mainContext
+        let custom = CustomChekiSize(
+            name: "Square",
+            widthRatio: 1,
+            heightRatio: 1
+        )
+        let event = Event(
+            name: "Event",
+            weiboURL: URL(string: "https://m.weibo.cn/status/1"),
+            source: .weibo
+        )
+        let record = ChekiRecord(event: event, size: custom.size)
+        context.insert(custom)
+        context.insert(event)
+        context.insert(record)
+        try context.save()
+
+        let snapshot = try ChekinanaDataExportSnapshot.capture(in: context)
+        let payload = try JSONDecoder().decode(
+            ChekinanaDataImportPayload.self,
+            from: JSONSerialization.data(withJSONObject: snapshot.data)
+        )
+        XCTAssertEqual(payload.schemaVersion, "17.0.0")
+        XCTAssertEqual(payload.entities.customChekiSizes.count, 1)
+        XCTAssertEqual(payload.entities.customChekiSizes.first?.id, custom.id.uuidString.lowercased())
+        XCTAssertEqual(payload.entities.chekiRecords.first?.size, custom.size.rawValue)
+        XCTAssertEqual(payload.entities.events.first?.source, ChekinanaEventSource.weibo.rawValue)
+    }
+
+    func testV16PostOpenRepairInfersLegacySourceAndNormalizesMissingRecordSize() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV16.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        )
+        let context = container.mainContext
+        let weibo = Event(
+            name: "Legacy Weibo",
+            weiboURL: URL(string: "https://m.weibo.cn/status/1")
+        )
+        let x = Event(
+            name: "Legacy X",
+            weiboURL: URL(string: "https://x.com/user/status/1")
+        )
+        let unsupported = Event(
+            name: "Legacy unsupported",
+            weiboURL: URL(string: "https://twitter.com/user/status/1")
+        )
+        let record = ChekiRecord()
+        record.sizeRawValue = nil
+        context.insert(weibo)
+        context.insert(x)
+        context.insert(unsupported)
+        context.insert(record)
+        try context.save()
+
+        try ChekinanaDataStore.normalizeV16Metadata(in: container)
+
+        XCTAssertEqual(weibo.source, .weibo)
+        XCTAssertEqual(x.source, .x)
+        XCTAssertNil(unsupported.source)
+        XCTAssertEqual(record.sizeRawValue, ChekiSize.mini.rawValue)
+    }
+
+    func testCustomSizeAndFixedProductCopyLocalizationCoverage() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let catalogURL = root.appendingPathComponent("Chekinana/Localizable.xcstrings")
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: catalogURL))
+                as? [String: Any]
+        )
+        let strings = try XCTUnwrap(object["strings"] as? [String: Any])
+        for key in [
+            "product.settings.cheki_sizes",
+            "product.settings.cheki_sizes.add",
+            "product.settings.cheki_sizes.name",
+            "product.settings.cheki_sizes.width",
+            "product.settings.cheki_sizes.height",
+            "product.settings.cheki_sizes.details",
+            "product.settings.cheki_sizes.rule",
+            "product.settings.cheki_sizes.preview",
+            "product.settings.cheki_sizes.preview_hint",
+            "product.settings.cheki_sizes.too_large",
+            "product.events.open_weibo",
+            "product.events.open_x",
+            "product.sidebar.match",
+        ] {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let values = try XCTUnwrap(entry["localizations"] as? [String: Any], key)
+            XCTAssertEqual(Set(values.keys), ["en", "ja", "zh-Hans", "zh-Hant"], key)
+        }
+        let match = try XCTUnwrap(strings["product.sidebar.match"] as? [String: Any])
+        let matchLocales = try XCTUnwrap(match["localizations"] as? [String: Any])
+        func value(_ locale: String) throws -> String {
+            let localeNode = try XCTUnwrap(matchLocales[locale] as? [String: Any])
+            let unit = try XCTUnwrap(localeNode["stringUnit"] as? [String: Any])
+            return try XCTUnwrap(unit["value"] as? String)
+        }
+        XCTAssertEqual(try value("en"), "Link Link")
+        XCTAssertEqual(try value("ja"), "リンクリンク")
+        XCTAssertEqual(try value("zh-Hans"), "连连看")
+        XCTAssertEqual(try value("zh-Hant"), "连连看")
+
+        func localizedValue(_ key: String, _ locale: String) throws -> String {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let localizations = try XCTUnwrap(entry["localizations"] as? [String: Any], key)
+            let localeNode = try XCTUnwrap(localizations[locale] as? [String: Any], key)
+            let unit = try XCTUnwrap(localeNode["stringUnit"] as? [String: Any], key)
+            return try XCTUnwrap(unit["value"] as? String, key)
+        }
+        XCTAssertEqual(try localizedValue("product.events.open_weibo", "ja"), "Weiboを開く")
+        XCTAssertEqual(try localizedValue("product.events.open_weibo", "zh-Hans"), "微博页面")
+        XCTAssertEqual(try localizedValue("product.events.open_x", "ja"), "Xを開く")
+        XCTAssertEqual(try localizedValue("product.events.open_x", "zh-Hans"), "X页面")
+        for (locale, title, close) in [
+            ("en", "Link Link", "Close Link Link"),
+            ("ja", "リンクリンク", "リンクリンクを閉じる"),
+            ("zh-Hans", "连连看", "关闭连连看"),
+        ] {
+            XCTAssertEqual(try localizedValue("连连看", locale), title)
+            XCTAssertEqual(try localizedValue("关闭连连看", locale), close)
+        }
+        XCTAssertEqual(try localizedValue("product.sidebar.match.subtitle", "ja"), "空色轨迹とUtage！")
+        XCTAssertEqual(try localizedValue("product.sidebar.match.subtitle", "zh-Hans"), "空色轨迹和Utage！")
+        XCTAssertEqual(try localizedValue("product.sidebar.assistant.subtitle", "ja"), "一時的に無効")
+        XCTAssertEqual(try localizedValue("product.sidebar.assistant.subtitle", "zh-Hans"), "暂时禁用")
+
+        let matchGameSource = try String(
+            contentsOf: root.appendingPathComponent("Chekinana/MatchGameView.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(matchGameSource.contains("Text(verbatim: \"目光 - 空色轨迹\")"))
+        XCTAssertTrue(matchGameSource.contains(
+            ".navigationTitle(ChekinanaProductCopy.text(\"sidebar.match\", \"Link Link\"))"
+        ))
+        XCTAssertTrue(matchGameSource.contains(
+            ".accessibilityLabel(ChekinanaL10n.text(\"关闭连连看\", fallback: \"Close Link Link\"))"
+        ))
+        XCTAssertFalse(matchGameSource.contains(".navigationTitle(\"连连看\")"))
+    }
+
+    func testReviewTemporaryEditorKeepsCancelLeadingAndDeleteBeforeSaveTrailing() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana/ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeTemporaryEditor: View {"
+        )?.lowerBound)
+        let end = try XCTUnwrap(source.range(
+            of: "    private var draftCanonicalDate:",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let editor = String(source[start..<end])
+        XCTAssertFalse(editor.contains(".navigationTitle("))
+        let cancellation = try XCTUnwrap(editor.range(of: "placement: .cancellationAction")?.lowerBound)
+        let cancel = try XCTUnwrap(editor.range(of: "action: onCancel")?.lowerBound)
+        let confirmation = try XCTUnwrap(editor.range(
+            of: "ToolbarItemGroup(placement: .confirmationAction)"
+        )?.lowerBound)
+        let delete = try XCTUnwrap(editor.range(of: "Button(role: .destructive, action: onDelete)")?.lowerBound)
+        let save = try XCTUnwrap(editor.range(of: "action: onSave")?.lowerBound)
+        XCTAssertLessThan(cancellation, cancel)
+        XCTAssertLessThan(cancel, confirmation)
+        XCTAssertLessThan(confirmation, delete)
+        XCTAssertLessThan(delete, save)
+        XCTAssertTrue(editor.contains(".tint(.red)"))
+        XCTAssertTrue(editor.contains(".accessibilityIdentifier(\"chekinana.scan.review.editor.cancel\")"))
+        XCTAssertTrue(editor.contains(".accessibilityIdentifier(\"chekinana.scan.review.editor.delete\")"))
+    }
+
+    func testGalleryPerformanceCopyAndSidebarMediaOnlyContract() throws {
+        let first = MediaItem(kind: .cheki, mediaRef: "first.jpg")
+        let second = MediaItem(kind: .cheki, mediaRef: "second.jpg")
+        XCTAssertEqual(
+            ChekinanaSidebarSummaryPolicy.chekiCount(
+                mediaChekis: [first, second],
+                hiddenIDs: []
+            ),
+            2
+        )
+        let hiddenIdol = Idol(name: "Hidden")
+        let hiddenMedia = MediaItem(
+            kind: .cheki,
+            idols: [hiddenIdol],
+            mediaRef: "hidden.jpg"
+        )
+        XCTAssertEqual(
+            ChekinanaSidebarSummaryPolicy.chekiCount(
+                mediaChekis: [first, hiddenMedia],
+                hiddenIDs: [hiddenIdol.id]
+            ),
+            1
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryDerivedRefreshPolicy.debounceNanoseconds,
+            120_000_000
+        )
+        let initialSource = ChekinanaGallerySourceIdentity(
+            chekiIDs: [first.id],
+            shameIDs: [],
+            dougaIDs: []
+        )
+        let insertedSource = ChekinanaGallerySourceIdentity(
+            chekiIDs: [first.id, second.id],
+            shameIDs: [],
+            dougaIDs: []
+        )
+        XCTAssertNotEqual(initialSource, insertedSource)
+
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains(
+            "Text(ChekinanaL10n.message(\"Cheki size and orientation recognition are currently disabled. The default size is mini.\"))"
+        ))
+        XCTAssertFalse(source.contains(
+            "idol识别使用的DINOv2编码器存在尚未识别的错误"
+        ))
+
+        let galleryStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaGalleryView")?.lowerBound
+        )
+        let galleryEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaGalleryCompactFilterLabel",
+            range: galleryStart..<source.endIndex
+        )?.lowerBound)
+        let gallery = String(source[galleryStart..<galleryEnd])
+        XCTAssertTrue(gallery.contains("@State private var filteredItemsSnapshot"))
+        XCTAssertTrue(gallery.contains(
+            "refreshGalleryDerivedState(rebuildSource: false)"
+        ))
+        XCTAssertTrue(gallery.contains(
+            "NotificationCenter.default.publisher(for: ModelContext.didSave)"
+        ))
+        XCTAssertTrue(gallery.contains(".onChange(of: sourceIdentity)"))
+        XCTAssertTrue(gallery.contains("scheduleGallerySourceRefresh()"))
+        XCTAssertTrue(gallery.contains("derivedRefreshTask?.cancel()"))
+        XCTAssertFalse(gallery.contains("private var filteredItems:"))
+
+        let refreshStart = try XCTUnwrap(
+            source.range(of: "private func refreshLibraryDerivedState()")?.lowerBound
+        )
+        let refreshEnd = try XCTUnwrap(source.range(
+            of: "private func openAssistant()",
+            range: refreshStart..<source.endIndex
+        )?.lowerBound)
+        let refresh = String(source[refreshStart..<refreshEnd])
+        XCTAssertTrue(refresh.contains(
+            "ChekinanaSidebarSummaryPolicy.chekiCount("
+        ))
+        XCTAssertFalse(refresh.contains("visibleRecordCount"))
+        XCTAssertFalse(refresh.contains("combinedChekiCount"))
+    }
+
+    func testDrawerIsAStableOverlayThatNeverReflowsProductTabs() throws {
+        XCTAssertEqual(
+            ChekinanaDrawerOverlayLayout.drawerWidth(availableWidth: 390),
+            335.4,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            ChekinanaDrawerOverlayLayout.drawerOffset(
+                isPresented: true,
+                drawerWidth: 335.4
+            ),
+            0
+        )
+        XCTAssertEqual(
+            ChekinanaDrawerOverlayLayout.drawerOffset(
+                isPresented: false,
+                drawerWidth: 335.4
+            ),
+            -335.4,
+            accuracy: 0.000_001
+        )
+
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let shellStart = try XCTUnwrap(
+            source.range(of: "struct ChekinanaProductShell: View")?.lowerBound
+        )
+        let shellEnd = try XCTUnwrap(source.range(
+            of: "enum ChekinanaBottomTabBarMetrics",
+            range: shellStart..<source.endIndex
+        )?.lowerBound)
+        let shell = String(source[shellStart..<shellEnd])
+        XCTAssertTrue(shell.contains(
+            "productTabs\n            // Drawer presentation must not mutate"
+        ))
+        XCTAssertTrue(shell.contains(
+            ".allowsHitTesting(!isChekiRokuImportPresented)"
+        ))
+        XCTAssertTrue(shell.contains(
+            "isDrawerPresented || isChekiRokuImportPresented"
+        ))
+        XCTAssertFalse(shell.contains(
+            "GeometryReader { geometry in\n            productTabs"
+        ))
+        let overlayStart = try XCTUnwrap(
+            shell.range(of: ".overlay {\n                GeometryReader")?.lowerBound
+        )
+        let overlayEnd = try XCTUnwrap(shell.range(
+            of: "\n        .tint(",
+            range: overlayStart..<shell.endIndex
+        )?.lowerBound)
+        let drawerOverlay = String(shell[overlayStart..<overlayEnd])
+        let productSurface = String(shell[..<overlayStart])
+        XCTAssertFalse(productSurface.contains("!isDrawerPresented"))
+        XCTAssertEqual(
+            productSurface.components(
+                separatedBy: "isDrawerPresented || isChekiRokuImportPresented"
+            ).count - 1,
+            1
+        )
+        XCTAssertTrue(productSurface.contains(
+            "value-only accessibility modifier is always present"
+        ))
+        XCTAssertFalse(drawerOverlay.contains("if isDrawerPresented"))
+        XCTAssertFalse(drawerOverlay.contains(".transition("))
+        XCTAssertTrue(drawerOverlay.contains(
+            "ChekinanaProductCopy.text(\n                                    \"sidebar.close\",\n                                    \"Close sidebar\""
+        ))
+        XCTAssertFalse(drawerOverlay.contains(
+            ".accessibilityLabel(\"关闭侧边栏\")"
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            ".opacity(isDrawerPresented ? 0.24 : 0)"
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            "ChekinanaDrawerOverlayLayout.drawerOffset("
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            ".allowsHitTesting(isDrawerPresented)"
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            ".accessibilityHidden(!isDrawerPresented)"
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            ".opacity(isDrawerPresented ? 0.24 : 0)"
+        ))
+        XCTAssertTrue(drawerOverlay.contains(
+            "Only the visual cover escapes the safe area"
+        ))
+        XCTAssertFalse(drawerOverlay.contains(
+            "}\n                .ignoresSafeArea()\n                .animation(.snappy(duration: 0.3), value: isDrawerPresented)"
+        ))
+
+        let sidebarStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaSidebar: View")?.lowerBound
+        )
+        let sidebarEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaSidebarSummary",
+            range: sidebarStart..<source.endIndex
+        )?.lowerBound)
+        let sidebar = String(source[sidebarStart..<sidebarEnd])
+        XCTAssertFalse(sidebar.contains(".safeAreaPadding(.vertical)"))
+        XCTAssertTrue(sidebar.contains(
+            "Color(uiColor: .systemBackground)\n                .ignoresSafeArea()"
+        ))
+
+        let openStart = try XCTUnwrap(
+            shell.range(of: "private func openDrawer()")?.lowerBound
+        )
+        let openEnd = try XCTUnwrap(shell.range(
+            of: "private func closeDrawer()",
+            range: openStart..<shell.endIndex
+        )?.lowerBound)
+        let openDrawer = String(shell[openStart..<openEnd])
+        XCTAssertTrue(openDrawer.contains("isDrawerPresented = true"))
+        XCTAssertFalse(openDrawer.contains("withAnimation"))
+        XCTAssertFalse(openDrawer.contains("refresh"))
+        XCTAssertFalse(openDrawer.contains("chekis"))
+        XCTAssertFalse(openDrawer.contains("chekiRecords"))
+        XCTAssertFalse(openDrawer.contains("modelContext"))
+
+        XCTAssertTrue(shell.contains(
+            "NotificationCenter.default.publisher(for: ModelContext.didSave)"
+        ))
+        XCTAssertTrue(shell.contains(
+            ".onChange(of: hiddenIdols.hiddenIDs)"
+        ))
+        XCTAssertTrue(shell.contains(
+            "private func refreshLibraryDerivedState()"
+        ))
+        XCTAssertEqual(
+            ChekinanaLibraryDerivedStateRefreshPolicy.debounceNanoseconds,
+            250_000_000
+        )
+        XCTAssertTrue(shell.contains("libraryDerivedStateRefreshTask?.cancel()"))
+        XCTAssertTrue(shell.contains("ChekinanaLibraryDerivedStateRefreshPolicy"))
+        XCTAssertTrue(shell.contains(".debounceNanoseconds"))
+        XCTAssertTrue(shell.contains("guard !Task.isCancelled else { return }"))
+        XCTAssertTrue(shell.contains("let liveChekis = chekis"))
+        XCTAssertTrue(shell.contains("let liveRecords = chekiRecords"))
+        XCTAssertFalse(shell.contains(
+            "let liveRecords = (try? modelContext.fetch(FetchDescriptor<ChekiRecord>()))"
+        ))
+    }
+
+    private enum ScannerRouterTestError: Error {
+        case remoteFailed
+    }
+
     private struct Fixture {
         let context: ModelContext
         let ledger: ChekinanaConfirmationLedger
         let executor: ChekinanaCommandExecutor
+    }
+
+    private struct RetainedChekiEditIntentFixture {
+        let item: MediaItem
+        let handle: ChekinanaChekiEditPublicationHandle
+        let generation: UUID
+        let targetURL: URL
+        let preparedData: Data
     }
 
     func testEventChekiOrderingIsIdolFirstStableAndHiddenAware() throws {
@@ -429,7 +1225,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             to: "private var orderedIdols"
         )
         XCTAssertTrue(actions.contains("\"Download\""))
-        XCTAssertTrue(actions.contains("\"View annotation\""))
+        XCTAssertTrue(actions.contains("\"View detection box\""))
         XCTAssertEqual(
             actions.components(separatedBy:
                 "minHeight: actionTextRegionHeight"
@@ -446,8 +1242,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             actions.components(separatedBy: ".contentShape(Rectangle())").count - 1,
             1
         )
-        XCTAssertTrue(actions.contains(".lineLimit(2)"))
+        XCTAssertTrue(actions.contains(".lineLimit(2, reservesSpace: true)"))
         XCTAssertTrue(actions.contains(".multilineTextAlignment(.center)"))
+        XCTAssertTrue(actions.contains(
+            ".frame(height: actionIconRegionHeight, alignment: .center)"
+        ))
         XCTAssertTrue(actions.contains("alignment: .top"))
         XCTAssertFalse(actions.contains(".minimumScaleFactor("))
         XCTAssertFalse(actions.contains("actionButtonHeight"))
@@ -455,6 +1254,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(review.contains(
             "ChekinanaScanReviewLayout.actionTextRegionBaseHeight"
         ))
+        XCTAssertTrue(review.contains(
+            "ChekinanaScanReviewLayout.actionIconRegionBaseHeight"
+        ))
+        XCTAssertEqual(ChekinanaScanReviewLayout.actionIconRegionBaseHeight, 20)
         XCTAssertEqual(ChekinanaScanReviewLayout.actionTextRegionBaseHeight, 28)
 
         let editor = try slice(
@@ -479,6 +1282,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(idolGrid.contains("let label = idol?.name"))
         XCTAssertTrue(idolGrid.contains("common.unassigned"))
         XCTAssertFalse(idolGrid.contains("Text(label)"))
+        XCTAssertTrue(idolGrid.contains("var showsOptionBackground = true"))
+        XCTAssertTrue(idolGrid.contains("guard showsOptionBackground else { return .clear }"))
         XCTAssertTrue(idolGrid.contains(
             "columns: ChekinanaIdolAvatarSelectionLayout.columns"
         ))
@@ -517,6 +1322,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             to: "private func executeNativeScan"
         )
         XCTAssertTrue(staging.contains("inferredSize: normalized.inferredSize"))
+        XCTAssertTrue(staging.contains("appliesWhiteBalance: true"))
+        XCTAssertFalse(staging.contains("appliesWhiteBalance: false"))
+        XCTAssertEqual(ChekinanaEdgeFitRectifier.whiteBalanceMinimumChannelValue, 140)
         XCTAssertTrue(productSource.contains("inferredChekiSize: staged.inferredSize"))
         XCTAssertTrue(review.contains("temporary.size?.rawValue"))
 
@@ -579,7 +1387,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
     }
 
-    func testCalendarCrossMonthSelectionKeepsDisplayedPage() {
+    func testCalendarCrossMonthSelectionKeepsDisplayedPage() throws {
         let displayedMonth = ChekinanaProductDate.date(
             year: 2026,
             month: 8,
@@ -590,12 +1398,155 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             month: 7,
             day: 26
         )
-        let selection = ChekinanaCalendarSelectionPolicy.selecting(
+        let selection = try XCTUnwrap(ChekinanaCalendarSelectionPolicy.selecting(
             leadingDate,
             displayedMonth: displayedMonth
-        )
+        ))
         XCTAssertEqual(selection.selectedDate, leadingDate)
         XCTAssertEqual(selection.displayedMonth, displayedMonth)
+    }
+
+    func testCalendarDateBoundaryRejectsUnavailableDaysAndBoundsMonthPaging() throws {
+        let december7 = ChekinanaProductDate.date(
+            year: 2005,
+            month: 12,
+            day: 7
+        )
+        let december8 = ChekinanaProductDate.date(
+            year: 2005,
+            month: 12,
+            day: 8
+        )
+        let lastDate = ChekinanaProductDate.date(
+            year: 2200,
+            month: 12,
+            day: 31
+        )
+        let afterLastDate = ChekinanaProductDate.date(
+            year: 2201,
+            month: 1,
+            day: 1
+        )
+
+        XCTAssertEqual(
+            ChekinanaCalendarMonthYearWheelPolicy.yearRange,
+            2005...2200
+        )
+        XCTAssertFalse(
+            ChekinanaCalendarDateBoundaryPolicy.isSelectable(december7)
+        )
+        XCTAssertTrue(
+            ChekinanaCalendarDateBoundaryPolicy.isSelectable(december8)
+        )
+        XCTAssertTrue(
+            ChekinanaCalendarDateBoundaryPolicy.isSelectable(lastDate)
+        )
+        XCTAssertFalse(
+            ChekinanaCalendarDateBoundaryPolicy.isSelectable(afterLastDate)
+        )
+        XCTAssertNil(
+            ChekinanaPersistedContentDatePolicy.canonicalDate(from: december7)
+        )
+        XCTAssertNotNil(
+            ChekinanaPersistedContentDatePolicy.canonicalDate(from: december8)
+        )
+        XCTAssertNotNil(
+            ChekinanaPersistedContentDatePolicy.canonicalDate(from: lastDate)
+        )
+        XCTAssertNil(
+            ChekinanaPersistedContentDatePolicy.canonicalDate(from: afterLastDate)
+        )
+        XCTAssertThrowsError(
+            try ChekinanaPersistedContentDatePolicy.validatedCanonical(december7)
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaPersistedContentDateError,
+                .outsideSupportedRange
+            )
+        }
+        XCTAssertNil(ChekinanaCalendarSelectionPolicy.selecting(
+            december7,
+            displayedMonth: ChekinanaProductDate.date(
+                year: 2005,
+                month: 12,
+                day: 1
+            )
+        ))
+        XCTAssertNil(ChekinanaCalendarDateBoundaryPolicy.adjacentDisplayedMonth(
+            from: ChekinanaProductDate.date(year: 2005, month: 1, day: 1),
+            offset: -1
+        ))
+        XCTAssertNil(ChekinanaCalendarDateBoundaryPolicy.adjacentDisplayedMonth(
+            from: ChekinanaProductDate.date(year: 2200, month: 12, day: 1),
+            offset: 1
+        ))
+        XCTAssertEqual(
+            ChekinanaCalendarDateBoundaryPolicy.adjacentDisplayedMonth(
+                from: ChekinanaProductDate.date(year: 2005, month: 1, day: 1),
+                offset: 1
+            ),
+            ChekinanaProductDate.date(year: 2005, month: 2, day: 1)
+        )
+
+        let earlyMonthSelection = try XCTUnwrap(
+            ChekinanaCalendarMonthYearWheelPolicy.selection(
+                year: 2005,
+                month: 1,
+                preservingDayFrom: ChekinanaProductDate.date(
+                    year: 2026,
+                    month: 8,
+                    day: 31
+                )
+            )
+        )
+        XCTAssertEqual(
+            earlyMonthSelection.displayedMonth,
+            ChekinanaProductDate.date(year: 2005, month: 1, day: 1)
+        )
+        XCTAssertEqual(earlyMonthSelection.selectedDate, december8)
+    }
+
+    func testPersistedContentStoresRejectDatesOutsideSharedBoundary() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [
+                ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            ]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Boundary")
+        context.insert(idol)
+        let tooEarly = ChekinanaProductDate.date(year: 2005, month: 12, day: 7)
+        XCTAssertThrowsError(try ChekinanaChekiRecordStore.upsert(
+            idols: [idol],
+            event: nil,
+            date: tooEarly,
+            size: .mini,
+            note: "",
+            adding: 1,
+            in: context
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaPersistedContentDateError,
+                .outsideSupportedRange
+            )
+        }
+
+        let event = Event(name: "Boundary Event")
+        XCTAssertThrowsError(try ChekinanaEventPersistence.save(
+            event,
+            inserting: true,
+            images: [],
+            previousAvatarRef: nil,
+            in: context,
+            apply: { $0.date = tooEarly }
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaPersistedContentDateError,
+                .outsideSupportedRange
+            )
+        }
     }
 
     func testCalendarTodayVisualStateUsesHalfAccentStrokeAndSelectedFillWins() {
@@ -672,8 +1623,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(state.range.end, today)
     }
 
-    func testGalleryIdolOrderingUsesPrimaryIdolThenDateAndLeavesUnassignedLast() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV8.self)
+    func testGalleryIdolOrderingPlacesAnchoredMultiIdolItemsAfterAllSingles() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(
@@ -688,11 +1639,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         context.insert(secondIdol)
         let firstDay = utcDate(2026, 8, 10)
         let secondDay = utcDate(2026, 8, 11)
-        let firstEarlier = Cheki(date: firstDay, imageRef: "first-earlier.jpg")
-        let firstLater = Cheki(date: secondDay, imageRef: "first-later.jpg")
-        let multi = Cheki(date: firstDay, imageRef: "multi.jpg")
-        let second = Cheki(date: firstDay, imageRef: "second.jpg")
-        let unassigned = Cheki(date: firstDay, imageRef: "unassigned.jpg")
+        let firstEarlier = MediaItem(date: firstDay, imageRef: "first-earlier.jpg")
+        let firstLater = MediaItem(date: secondDay, imageRef: "first-later.jpg")
+        let multi = MediaItem(date: firstDay, imageRef: "multi.jpg")
+        let second = MediaItem(date: firstDay, imageRef: "second.jpg")
+        let unassigned = MediaItem(date: firstDay, imageRef: "unassigned.jpg")
         for value in [firstEarlier, firstLater, multi, second, unassigned] {
             context.insert(value)
         }
@@ -709,9 +1660,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             order: .dateAscending,
             sortByIdol: true
         ).map(\.modelID)
-        XCTAssertEqual(Set(ascendingIDs.prefix(2)), [firstEarlier.id, multi.id])
-        XCTAssertEqual(ascendingIDs.dropFirst(2), [
+        XCTAssertEqual(ascendingIDs, [
+            firstEarlier.id,
             firstLater.id,
+            multi.id,
             second.id,
             unassigned.id,
         ])
@@ -721,19 +1673,243 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(
             ChekinanaGalleryOrdering.ordered(
-                values,
-                order: .dateDescending,
-                sortByIdol: true
-            ).last?.modelID,
-            unassigned.id
-        )
-        XCTAssertEqual(
-            ChekinanaGalleryOrdering.ordered(
                 [firstEarlier, firstLater].map(ChekinanaGalleryItem.cheki),
                 order: .dateDescending,
                 sortByIdol: true
             ).map(\.modelID),
             [firstLater.id, firstEarlier.id]
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateDescending,
+                sortByIdol: true
+            ).map(\.modelID),
+            [firstLater.id, firstEarlier.id, multi.id, second.id, unassigned.id]
+        )
+    }
+
+    func testGalleryIdolOrderingUsesDeterministicCombinationGroups() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )]
+        )
+        let context = ModelContext(container)
+        let first = Idol(name: "First", sortOrder: 1)
+        let second = Idol(name: "Second", sortOrder: 2)
+        let third = Idol(name: "Third", sortOrder: 3)
+        context.insert(first)
+        context.insert(second)
+        context.insert(third)
+
+        let early = utcDate(2026, 8, 10)
+        let late = utcDate(2026, 8, 11)
+        let single = MediaItem(date: late, imageRef: "single.jpg")
+        let firstSecondLate = MediaItem(date: late, imageRef: "first-second-late.jpg")
+        let firstSecondEarly = MediaItem(date: early, imageRef: "first-second-early.jpg")
+        let firstThird = MediaItem(date: early, imageRef: "first-third.jpg")
+        let secondSingle = MediaItem(date: early, imageRef: "second-single.jpg")
+        for item in [single, firstSecondLate, firstSecondEarly, firstThird, secondSingle] {
+            context.insert(item)
+        }
+        single.idols = [first]
+        firstSecondLate.idols = [second, first]
+        firstSecondEarly.idols = [first, second]
+        firstThird.idols = [third, first]
+        secondSingle.idols = [second]
+        try context.save()
+
+        let values = [firstThird, secondSingle, firstSecondLate, single, firstSecondEarly]
+            .map(ChekinanaGalleryItem.cheki)
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateAscending,
+                sortByIdol: true
+            ).map(\.modelID),
+            [
+                single.id,
+                firstSecondEarly.id,
+                firstSecondLate.id,
+                firstThird.id,
+                secondSingle.id,
+            ]
+        )
+    }
+
+    func testGalleryDateOrderingGroupsIdolsOnlyWithinEachDate() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )]
+        )
+        let context = ModelContext(container)
+        let first = Idol(name: "First", sortOrder: 1)
+        let second = Idol(name: "Second", sortOrder: 2)
+        context.insert(first)
+        context.insert(second)
+
+        let early = utcDate(2026, 8, 10)
+        let late = utcDate(2026, 8, 11)
+        let earlyFirst = MediaItem(date: early, imageRef: "early-first.jpg")
+        let earlyMulti = MediaItem(date: early, imageRef: "early-multi.jpg")
+        let earlySecond = MediaItem(date: early, imageRef: "early-second.jpg")
+        let earlyUnassigned = MediaItem(date: early, imageRef: "early-unassigned.jpg")
+        let lateFirst = MediaItem(date: late, imageRef: "late-first.jpg")
+        let lateUnassigned = MediaItem(date: late, imageRef: "late-unassigned.jpg")
+        for item in [
+            earlyFirst,
+            earlyMulti,
+            earlySecond,
+            earlyUnassigned,
+            lateFirst,
+            lateUnassigned,
+        ] {
+            context.insert(item)
+        }
+        earlyFirst.idols = [first]
+        earlyMulti.idols = [second, first]
+        earlySecond.idols = [second]
+        lateFirst.idols = [first]
+        try context.save()
+
+        let values = [
+            lateUnassigned,
+            earlyUnassigned,
+            earlySecond,
+            lateFirst,
+            earlyMulti,
+            earlyFirst,
+        ].map(ChekinanaGalleryItem.cheki)
+
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateAscending,
+                sortByIdol: false
+            ).map(\.modelID),
+            [
+                earlyFirst.id,
+                earlyMulti.id,
+                earlySecond.id,
+                earlyUnassigned.id,
+                lateFirst.id,
+                lateUnassigned.id,
+            ]
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateDescending,
+                sortByIdol: false
+            ).map(\.modelID),
+            [
+                lateFirst.id,
+                lateUnassigned.id,
+                earlyFirst.id,
+                earlyMulti.id,
+                earlySecond.id,
+                earlyUnassigned.id,
+            ]
+        )
+    }
+
+    func testGalleryDateOrderingUsesSystemTimeZoneNaturalDays() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )]
+        )
+        let context = ModelContext(container)
+        let first = Idol(name: "First", sortOrder: 1)
+        let second = Idol(name: "Second", sortOrder: 2)
+        context.insert(first)
+        context.insert(second)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        func localDate(_ day: Int, hour: Int, minute: Int, second: Int) -> Date {
+            calendar.date(from: DateComponents(
+                year: 2026,
+                month: 8,
+                day: day,
+                hour: hour,
+                minute: minute,
+                second: second
+            ))!
+        }
+
+        let previousDaySecond = MediaItem(
+            date: localDate(9, hour: 23, minute: 59, second: 59),
+            imageRef: "previous-second.jpg"
+        )
+        let sameDayEarlySecond = MediaItem(
+            date: localDate(10, hour: 0, minute: 0, second: 1),
+            imageRef: "same-early-second.jpg"
+        )
+        let sameDayLateFirst = MediaItem(
+            date: localDate(10, hour: 23, minute: 59, second: 58),
+            imageRef: "same-late-first.jpg"
+        )
+        let nextDayFirst = MediaItem(
+            date: localDate(11, hour: 0, minute: 0, second: 0),
+            imageRef: "next-first.jpg"
+        )
+        for item in [
+            previousDaySecond,
+            sameDayEarlySecond,
+            sameDayLateFirst,
+            nextDayFirst,
+        ] {
+            context.insert(item)
+        }
+        previousDaySecond.idols = [second]
+        sameDayEarlySecond.idols = [second]
+        sameDayLateFirst.idols = [first]
+        nextDayFirst.idols = [first]
+        try context.save()
+
+        let values = [
+            sameDayEarlySecond,
+            nextDayFirst,
+            previousDaySecond,
+            sameDayLateFirst,
+        ].map(ChekinanaGalleryItem.cheki)
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateAscending,
+                sortByIdol: false
+            ).map(\.modelID),
+            [
+                previousDaySecond.id,
+                sameDayLateFirst.id,
+                sameDayEarlySecond.id,
+                nextDayFirst.id,
+            ]
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryOrdering.ordered(
+                values,
+                order: .dateDescending,
+                sortByIdol: false
+            ).map(\.modelID),
+            [
+                nextDayFirst.id,
+                sameDayLateFirst.id,
+                sameDayEarlySecond.id,
+                previousDaySecond.id,
+            ]
         )
     }
 
@@ -858,6 +2034,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             range: viewerStart..<source.endIndex
         )?.lowerBound)
         let viewer = String(source[viewerStart..<viewerEnd])
+        let pageEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaLegacyGalleryDetailView",
+            range: viewerEnd..<source.endIndex
+        )?.lowerBound)
+        let chekiPage = String(source[viewerEnd..<pageEnd])
+        let pagerStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaFullScreenMediaPager")?.lowerBound
+        )
+        let pagerEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaMediaViewerPageChrome",
+            range: pagerStart..<source.endIndex
+        )?.lowerBound)
+        let sharedPager = String(source[pagerStart..<pagerEnd])
         let viewportStart = try XCTUnwrap(
             source.range(of: "struct ChekinanaZoomableImageViewport")?.lowerBound
         )
@@ -866,39 +2055,75 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             range: viewportStart..<source.endIndex
         )?.lowerBound)
         let viewport = String(source[viewportStart..<viewportEnd])
-        let tapSurfaceStart = try XCTUnwrap(
-            source.range(of: "private struct ChekinanaReliableSingleTapSurface")?
-                .lowerBound
-        )
-        let tapSurface = String(source[tapSurfaceStart..<viewportStart])
-
         XCTAssertTrue(viewer.contains("onTap: { editingCheki = cheki }"))
         XCTAssertTrue(viewer.contains(".sheet(item: $editingCheki)"))
         XCTAssertTrue(viewer.contains("ChekinanaChekiEditorView("))
         XCTAssertTrue(viewer.contains("allowsDelete: true"))
         XCTAssertTrue(viewer.contains("onDelete: close"))
-        XCTAssertTrue(viewer.contains(".scrollTargetBehavior(.paging)"))
-        XCTAssertTrue(viewer.contains(".scrollDisabled(visibleImageIsZoomed)"))
-        XCTAssertTrue(viewer.contains("visibleImageIsZoomed = false"))
+        XCTAssertTrue(viewer.contains("ChekinanaFullScreenMediaPager("))
+        XCTAssertFalse(viewer.contains("ScrollView(.horizontal)"))
+        XCTAssertTrue(viewer.contains("usesEmbeddedPagingGesture: true"))
+        XCTAssertFalse(viewer.contains("visibleImageIsZoomed"))
+        XCTAssertTrue(chekiPage.contains("ChekinanaMediaViewerPageChrome("))
+        XCTAssertTrue(chekiPage.contains("idols: cheki.idols"))
+        XCTAssertTrue(chekiPage.contains("date: cheki.date"))
+        XCTAssertFalse(chekiPage.contains("allowsDoubleTap"))
+        XCTAssertFalse(sharedPager.contains("TabView(selection: $selectedID)"))
+        XCTAssertTrue(sharedPager.contains("ForEach(visibleIndices"))
+        XCTAssertTrue(sharedPager.contains("ChekinanaMediaPagerPolicy.renderedIndices"))
+        XCTAssertTrue(sharedPager.contains("ChekinanaMediaPagerPolicy.targetIndex"))
+        XCTAssertFalse(sharedPager.contains("contentIsZoomed"))
+        XCTAssertTrue(sharedPager.contains("pageInteraction"))
+        XCTAssertTrue(sharedPager.contains("updatePageDrag("))
+        XCTAssertTrue(sharedPager.contains("finishPageDrag("))
+        XCTAssertTrue(sharedPager.contains("predictedEndTranslation"))
+        XCTAssertTrue(sharedPager.contains("settlingInitialVelocity"))
+        XCTAssertTrue(sharedPager.contains("surface.gesture("))
         XCTAssertFalse(viewer.contains("TapGesture"))
         XCTAssertFalse(viewer.contains("DragGesture"))
         XCTAssertFalse(viewer.contains("minimumDistance: 0"))
         XCTAssertFalse(source.contains("routesTap(maximumTranslation:"))
         XCTAssertTrue(viewport.contains(".simultaneously(with: pan)"))
-        XCTAssertFalse(viewport.contains("TapGesture().onEnded"))
-        XCTAssertTrue(viewport.contains("ChekinanaReliableSingleTapSurface("))
-        XCTAssertTrue(tapSurface.contains("UITapGestureRecognizer("))
-        XCTAssertTrue(tapSurface.contains("recognizer.cancelsTouchesInView = false"))
-        XCTAssertTrue(tapSurface.contains("shouldRecognizeSimultaneouslyWith"))
-        XCTAssertTrue(tapSurface.contains("onSingleTap()"))
+        XCTAssertTrue(viewport.contains(
+            "DragGesture(minimumDistance: 4, coordinateSpace: .global)"
+        ))
+        XCTAssertTrue(viewport.contains("@GestureState private var pinchIsActive"))
+        XCTAssertTrue(viewport.contains("handoff.magnification = scale / transform.scale"))
+        XCTAssertTrue(viewport.contains("handoff.anchor = value.startAnchor"))
+        XCTAssertTrue(viewport.contains(
+            "gestureHandoff = handoff\n                previousPinchMagnification = value.magnification\n                cancelPageDrag()"
+        ))
+        XCTAssertTrue(viewport.contains("interactionSurface("))
+        let viewportSurfaceStart = try XCTUnwrap(
+            viewport.range(of: "let surface = singleTapSurface(")?.lowerBound
+        )
+        let viewportGestureStart = try XCTUnwrap(
+            viewport.range(
+                of: "interactionSurface(",
+                range: viewportSurfaceStart..<viewport.endIndex
+            )?.lowerBound
+        )
+        let viewportSurface = viewport[viewportSurfaceStart..<viewportGestureStart]
+        XCTAssertTrue(viewportSurface.contains("width: geometry.size.width"))
+        XCTAssertTrue(viewportSurface.contains("height: geometry.size.height"))
+        XCTAssertTrue(viewportSurface.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(viewport.contains("private func singleTapSurface"))
+        XCTAssertFalse(viewport.contains("magnifyOnlyGesture("))
+        XCTAssertFalse(viewport.contains("allowsInternalPan"))
+        XCTAssertFalse(viewport.contains("TapGesture(count: 2)"))
+        XCTAssertTrue(viewport.contains("TapGesture().onEnded { onSingleTap() }"))
+        XCTAssertFalse(source.contains("ChekinanaReliableSingleTapSurface"))
+        XCTAssertFalse(viewport.contains("UITapGestureRecognizer("))
+        XCTAssertFalse(viewport.contains("onDoubleTap"))
         XCTAssertFalse(viewport.contains(".exclusively(before: TapGesture())"))
         XCTAssertTrue(viewport.contains(".onChange(of: resetID)"))
         XCTAssertTrue(viewport.contains(".onChange(of: isActive)"))
+        XCTAssertTrue(viewport.contains("predictedEndTranslation: pan.predictedEndTranslation"))
+        XCTAssertTrue(viewport.contains("ChekinanaZoomPanGeometry.pageDragRelease("))
+        XCTAssertTrue(viewport.contains("if !active { reset() }"))
+        XCTAssertTrue(viewer.contains("onHorizontalDragChanged: pageInteraction.dragChanged"))
+        XCTAssertTrue(viewer.contains("onHorizontalDragEnded: pageInteraction.dragEnded"))
 
-        XCTAssertEqual(
-            source.components(separatedBy: "ChekinanaGalleryDetailView(cheki:").count - 1,
-            5
-        )
         XCTAssertEqual(
             source.components(separatedBy: "ChekinanaChekiImageViewer(").count - 1,
             2
@@ -913,42 +2138,671 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )
             return source[startIndex..<endIndex]
         }
-        XCTAssertTrue(try routeSlice(
-            "private struct ChekinanaIdolDetailView",
-            "private struct ChekinanaIdolLinkedEventsView"
-        ).contains("ChekinanaGalleryDetailView(cheki:"))
-        XCTAssertTrue(try routeSlice(
+        let idolEventRoute = try routeSlice(
             "private struct ChekinanaIdolEventChekiView",
             "private typealias ChekinanaIdolMediaKind"
-        ).contains("ChekinanaGalleryDetailView(cheki:"))
-        XCTAssertTrue(try routeSlice(
+        )
+        XCTAssertTrue(idolEventRoute.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertTrue(idolEventRoute.contains("groups: groups"))
+        XCTAssertTrue(idolEventRoute.contains("ChekinanaIdolChekiPagerScope.items("))
+
+        let idolDateRoute = try routeSlice(
             "private struct ChekinanaIdolMediaDateGroupView",
-            "private struct ChekinanaIdolNoMediaChekiGroupView"
-        ).contains("ChekinanaGalleryDetailView(cheki:"))
-        XCTAssertTrue(try routeSlice(
+            "struct ChekinanaChekiRecordSelection"
+        )
+        XCTAssertTrue(idolDateRoute.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertFalse(idolDateRoute.contains("ChekinanaUnifiedChekiGroupSections("))
+        XCTAssertTrue(idolDateRoute.contains("ChekinanaIdolChekiPagerScope.items("))
+        XCTAssertTrue(idolDateRoute.contains("from: dateGroupMediaChekis"))
+        XCTAssertTrue(idolDateRoute.contains("matching: value"))
+        XCTAssertTrue(idolDateRoute.contains("items: items.compactMap"))
+
+        let eventRoute = try routeSlice(
             "private struct ChekinanaEventDetailView",
-            "private struct ChekinanaEventChekiGroupView"
-        ).contains("ChekinanaGalleryDetailView(cheki:"))
-        XCTAssertTrue(try routeSlice(
+            "private struct ChekinanaUnifiedChekiGroupPage"
+        )
+        XCTAssertTrue(eventRoute.contains("chekis: visibleChekis"))
+
+        let galleryRoute = try routeSlice(
             "private struct ChekinanaGalleryView",
             "private struct ChekinanaGalleryCompactFilterLabel"
-        ).contains("ChekinanaGalleryDetailView(cheki:"))
+        )
+        XCTAssertTrue(galleryRoute.contains("chekis: filteredChekisSnapshot"))
+        XCTAssertTrue(galleryRoute.contains(
+            "items: filteredItemsSnapshot.compactMap"
+        ))
+
+        let calendarRoute = try routeSlice(
+            "private struct ChekinanaCalendarGroupEditor",
+            "private struct ChekinanaCalendarGroupSummary"
+        )
+        XCTAssertTrue(calendarRoute.contains("chekis: group?.chekis ?? [cheki]"))
+        XCTAssertTrue(calendarRoute.contains("items: group?.shames ?? [shame]"))
+
         XCTAssertTrue(try routeSlice(
             "private struct ChekinanaCalendarGroupSummary",
             "struct ChekinanaLocalDataClearResult"
         ).contains("ChekinanaChekiImageViewer("))
+        XCTAssertTrue(chekiPage.contains("ChekinanaMediaPreviewCache.shared.image"))
+        XCTAssertFalse(chekiPage.contains("maxDimension: 3_200"))
+        XCTAssertTrue(chekiPage.contains("onHorizontalDragChanged"))
+        XCTAssertTrue(chekiPage.contains("onHorizontalDragEnded"))
+        XCTAssertTrue(chekiPage.contains("guard !Task.isCancelled"))
         XCTAssertTrue(source.contains(".accessibilityValue(cheki.id.uuidString.lowercased())"))
+    }
+
+    func testFullScreenChekiUsesEntireAspectFitCanvasWithoutContentInsets() throws {
+        let viewport = CGSize(width: 390, height: 700)
+        let landscapeWide = ChekinanaZoomPanGeometry.aspectFitSize(
+            imageSize: CGSize(width: 2_400, height: 1_908),
+            viewportSize: viewport
+        )
+        let portraitMini = ChekinanaZoomPanGeometry.aspectFitSize(
+            imageSize: CGSize(width: 1_200, height: 1_908),
+            viewportSize: viewport
+        )
+        let portraitWide = ChekinanaZoomPanGeometry.aspectFitSize(
+            imageSize: CGSize(width: 1_908, height: 2_400),
+            viewportSize: viewport
+        )
+        let narrow = ChekinanaZoomPanGeometry.aspectFitSize(
+            imageSize: CGSize(width: 100, height: 1_000),
+            viewportSize: viewport
+        )
+        XCTAssertEqual(landscapeWide.width, viewport.width, accuracy: 0.001)
+        XCTAssertEqual(portraitMini.width, viewport.width, accuracy: 0.001)
+        XCTAssertEqual(portraitWide.width, viewport.width, accuracy: 0.001)
+        XCTAssertEqual(narrow.height, viewport.height, accuracy: 0.001)
+
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaChekiViewerPage"
+        )?.lowerBound)
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaLegacyGalleryDetailView",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let page = source[start..<end]
+        XCTAssertTrue(page.contains(".scaledToFit()"))
+        XCTAssertTrue(page.contains(".frame(maxWidth: .infinity, maxHeight: .infinity)"))
+        XCTAssertFalse(page.contains(".padding(.horizontal"))
+        XCTAssertFalse(page.contains(".padding(.vertical"))
+        XCTAssertFalse(page.contains(".ignoresSafeArea("))
+
+        let viewerStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaChekiImageViewer"
+        )?.lowerBound)
+        let viewer = source[viewerStart..<start]
+        XCTAssertTrue(viewer.contains("ChekinanaFullScreenMediaPager("))
+        XCTAssertFalse(viewer.contains("ScrollView(.horizontal)"))
+
+        let chromeStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaMediaViewerPageChrome"
+        )?.lowerBound)
+        let chromeEnd = try XCTUnwrap(source.range(
+            of: "enum ChekinanaGalleryVideoInteractionPolicy",
+            range: chromeStart..<source.endIndex
+        )?.lowerBound)
+        let chrome = source[chromeStart..<chromeEnd]
+        XCTAssertTrue(chrome.contains("mediaContent()"))
+        XCTAssertTrue(chrome.contains(
+            ".frame(maxWidth: .infinity, maxHeight: .infinity)"
+        ))
+    }
+
+    func testFullScreenMediaPagerUsesDistanceAndProjectedFlickThresholds() {
+        let first = UUID()
+        let second = UUID()
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.initialID(
+                requested: second,
+                available: [first, second]
+            ),
+            second
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.initialID(
+                requested: UUID(),
+                available: [first, second]
+            ),
+            first
+        )
+        XCTAssertNil(ChekinanaMediaPagerPolicy.initialID(
+            requested: first,
+            available: []
+        ))
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.renderedIndices(
+                selectedIndex: 0,
+                itemCount: 10
+            ),
+            [0, 1]
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.renderedIndices(
+                selectedIndex: 5,
+                itemCount: 10
+            ),
+            [5, 4, 6]
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.renderedIndices(
+                selectedIndex: 9,
+                itemCount: 10
+            ),
+            [9, 8]
+        )
+        XCTAssertNil(ChekinanaMediaPagerPolicy.pageStep(
+            horizontalTranslation: 195,
+            canvasWidth: 390
+        ))
+        XCTAssertNil(ChekinanaMediaPagerPolicy.pageStep(
+            horizontalTranslation: -195,
+            canvasWidth: 390
+        ))
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.pageStep(
+                horizontalTranslation: 196,
+                canvasWidth: 390
+            ),
+            -1
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.pageStep(
+                horizontalTranslation: -196,
+                canvasWidth: 390
+            ),
+            1
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 1,
+                itemCount: 3,
+                horizontalTranslation: -196,
+                canvasWidth: 390
+            ),
+            2
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 0,
+                itemCount: 3,
+                horizontalTranslation: 300,
+                canvasWidth: 390
+            ),
+            0
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 1,
+                itemCount: 3,
+                release: .init(
+                    translation: -196,
+                    predictedEndTranslation: -205
+                ),
+                canvasWidth: 390
+            ),
+            2,
+            "A slow drag past half the canvas must always change pages"
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 1,
+                itemCount: 3,
+                release: .init(
+                    translation: -60,
+                    predictedEndTranslation: -180
+                ),
+                canvasWidth: 390
+            ),
+            2,
+            "A short high-velocity flick should use projected translation"
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 1,
+                itemCount: 3,
+                release: .init(
+                    translation: -120,
+                    predictedEndTranslation: -135
+                ),
+                canvasWidth: 390
+            ),
+            1,
+            "A short slow drag must return to the current page"
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 0,
+                itemCount: 3,
+                release: .init(
+                    translation: 60,
+                    predictedEndTranslation: 220
+                ),
+                canvasWidth: 390
+            ),
+            0,
+            "Projected motion must remain bounded at the first page"
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.interactiveTranslation(
+                horizontalTranslation: -120,
+                currentIndex: 1,
+                itemCount: 3
+            ),
+            -120
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.interactiveTranslation(
+                horizontalTranslation: 120,
+                currentIndex: 0,
+                itemCount: 3
+            ),
+            40
+        )
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.interactiveTranslation(
+                horizontalTranslation: -120,
+                currentIndex: 2,
+                itemCount: 3
+            ),
+            -40
+        )
+        XCTAssertEqual(ChekinanaMediaPagerPolicy.previewMaximumPixelDimension, 2_048)
+        XCTAssertEqual(ChekinanaMediaPagerPolicy.previewCacheEntryLimit, 4)
+        XCTAssertGreaterThan(
+            ChekinanaMediaPagerPolicy.settlingInitialVelocity(
+                release: .init(
+                    translation: -60,
+                    predictedEndTranslation: -180
+                ),
+                canvasWidth: 390,
+                changesPage: true
+            ),
+            0
+        )
+        XCTAssertLessThan(
+            ChekinanaMediaPagerPolicy.settlingInitialVelocity(
+                release: .init(
+                    translation: -120,
+                    predictedEndTranslation: -135
+                ),
+                canvasWidth: 390,
+                changesPage: false
+            ),
+            0
+        )
+    }
+
+    func testMediaDragDisplacementCountsHorizontalTranslationOnceAtEveryZoom() {
+        let canvas = CGSize(width: 390, height: 390)
+        for scale: CGFloat in [1, 2, 4] {
+            for translation: CGFloat in [-120, -40, 40, 120] {
+                let logicalOffset = ChekinanaZoomPanGeometry.clampedOffset(
+                    CGSize(width: translation, height: 30),
+                    imageSize: canvas,
+                    viewportSize: canvas,
+                    scale: scale
+                )
+                let pageTranslation = ChekinanaMediaPagerPolicy.interactiveTranslation(
+                    horizontalTranslation: translation,
+                    currentIndex: 1,
+                    itemCount: 3
+                )
+                let transform = ChekinanaZoomViewportTransform(
+                    scale: scale,
+                    offset: logicalOffset
+                )
+                let imageOffset = transform.imageOffset(
+                    compensatingPageTranslation: pageTranslation
+                )
+                XCTAssertEqual(imageOffset.width + pageTranslation, translation)
+                XCTAssertEqual(imageOffset.height, logicalOffset.height)
+
+                // The exact half-canvas distance rule remains identical at
+                // every scale; projected flick handling is tested separately.
+                for drag: CGFloat in [-196, -195, 195, 196] {
+                    XCTAssertEqual(
+                        ChekinanaMediaPagerPolicy.targetIndex(
+                            currentIndex: 1,
+                            itemCount: 3,
+                            horizontalTranslation: drag,
+                            canvasWidth: canvas.width
+                        ),
+                        drag < -195 ? 2 : (drag > 195 ? 0 : 1)
+                    )
+                }
+            }
+        }
+    }
+
+    func testZoomedPagerReceivesOnlyOverflowAfterRealEdgeContact() {
+        let size = CGSize(width: 300, height: 400)
+        func release(_ actual: CGFloat, _ predicted: CGFloat) -> ChekinanaMediaPagerDragRelease {
+            ChekinanaZoomPanGeometry.pageDragRelease(
+                translation: CGSize(width: actual, height: 0),
+                predictedEndTranslation: CGSize(width: predicted, height: 0),
+                initialOffset: .zero, imageSize: size, viewportSize: size, scale: 2
+            )
+        }
+        XCTAssertEqual(release(100, 900), .init(translation: 0, predictedEndTranslation: 0))
+        XCTAssertEqual(release(200, 400), .init(translation: 50, predictedEndTranslation: 250))
+        XCTAssertEqual(release(-200, -400), .init(translation: -50, predictedEndTranslation: -250))
+        XCTAssertEqual(release(20, 400), .init(translation: 0, predictedEndTranslation: 0))
+        XCTAssertEqual(release(200, -400).predictedEndTranslation, 0)
+    }
+
+    func testMemoryOriginalTilesCanReachOneSourcePixelPerScreenPixel() {
+        let image = CGSize(width: 6000, height: 4000)
+        let viewport = CGSize(width: 300, height: 600)
+        let maximum = ChekinanaMemoryOriginalTilePolicy.maximumScale(
+            imageSize: image, viewport: viewport, displayScale: 3
+        )
+        XCTAssertGreaterThan(maximum, 4)
+        let tiles = ChekinanaMemoryOriginalTilePolicy.requests(
+            imageSize: image, viewport: viewport,
+            transform: .init(scale: maximum, offset: .zero), displayScale: 3
+        )
+        XCTAssertFalse(tiles.isEmpty)
+        XCTAssertLessThanOrEqual(tiles.count, 64)
+        XCTAssertTrue(tiles.allSatisfy { $0.divisor == 1 && $0.rect.width <= 512 && $0.rect.height <= 512 })
+        XCTAssertEqual(ChekinanaZoomPanGeometry.clampedScale(20), 4)
+    }
+
+    func testZoomedDragCompensatesActualEdgeDampingAndPreservesImageBounds() {
+        let canvas = CGSize(width: 390, height: 390)
+        for (index, translation): (Int, CGFloat) in [(0, 120), (2, -120)] {
+            let pageTranslation = ChekinanaMediaPagerPolicy.interactiveTranslation(
+                horizontalTranslation: translation,
+                currentIndex: index,
+                itemCount: 3
+            )
+            XCTAssertEqual(pageTranslation, translation / 3)
+            let transform = ChekinanaZoomViewportTransform(
+                scale: 2,
+                offset: CGSize(width: translation, height: 30)
+            )
+            let imageOffset = transform.imageOffset(
+                compensatingPageTranslation: pageTranslation
+            )
+            XCTAssertEqual(imageOffset.width + pageTranslation, translation)
+            XCTAssertEqual(imageOffset.height, 30)
+            // Event image viewers have no enclosing pager to compensate.
+            XCTAssertEqual(
+                transform.imageOffset(compensatingPageTranslation: 0),
+                transform.offset
+            )
+        }
+
+        let boundedOffset = ChekinanaZoomPanGeometry.clampedOffset(
+            CGSize(width: 300, height: -300),
+            imageSize: canvas,
+            viewportSize: canvas,
+            scale: 2
+        )
+        let transform = ChekinanaZoomViewportTransform(scale: 2, offset: boundedOffset)
+        let imageOffset = transform.imageOffset(compensatingPageTranslation: 300)
+        XCTAssertEqual(imageOffset.width + 300, 195)
+        XCTAssertEqual(imageOffset.height, -195)
+    }
+
+    func testBelowThresholdZoomedReleaseKeepsComposedImagePosition() {
+        let transform = ChekinanaZoomViewportTransform(
+            scale: 2,
+            offset: CGSize(width: 120, height: 30)
+        )
+        let duringDrag = transform.imageOffset(compensatingPageTranslation: 120)
+        let afterCommit = transform.imageOffset(compensatingPageTranslation: 0)
+        XCTAssertEqual(duringDrag.width + 120, afterCommit.width)
+        XCTAssertEqual(duringDrag.height, afterCommit.height)
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.targetIndex(
+                currentIndex: 1,
+                itemCount: 3,
+                horizontalTranslation: 120,
+                canvasWidth: 390
+            ),
+            1
+        )
+    }
+
+    func testZoomGestureHandoffKeepsEffectiveTransformContinuousAtEnd() throws {
+        let imageSize = CGSize(width: 300, height: 520)
+        let viewportSize = CGSize(width: 390, height: 500)
+        let persistent = ChekinanaZoomViewportTransform(
+            scale: 1.6,
+            offset: CGSize(width: 18, height: -24)
+        )
+        let finalChanged = ChekinanaZoomViewportGestureHandoff(
+            magnification: 1.45,
+            anchor: UnitPoint(x: 0.23, y: 0.71),
+            translation: CGSize(width: 37, height: -19)
+        )
+
+        let beforeEnd = finalChanged.effectiveTransform(
+            from: persistent,
+            imageSize: imageSize,
+            viewportSize: viewportSize
+        )
+        var committed = persistent
+        var handoff: ChekinanaZoomViewportGestureHandoff? = finalChanged
+        committed = try XCTUnwrap(handoff).effectiveTransform(
+            from: committed,
+            imageSize: imageSize,
+            viewportSize: viewportSize
+        )
+        handoff = nil
+        let afterEnd = (handoff ?? ChekinanaZoomViewportGestureHandoff())
+            .effectiveTransform(
+                from: committed,
+                imageSize: imageSize,
+                viewportSize: viewportSize
+            )
+
+        XCTAssertEqual(afterEnd, beforeEnd)
+        XCTAssertEqual(
+            afterEnd.imageOffset(compensatingPageTranslation: 83),
+            beforeEnd.imageOffset(compensatingPageTranslation: 83)
+        )
+
+        let nextGestureStart = ChekinanaZoomViewportGestureHandoff()
+            .effectiveTransform(
+                from: committed,
+                imageSize: imageSize,
+                viewportSize: viewportSize
+            )
+        XCTAssertEqual(nextGestureStart, committed)
+    }
+
+    func testMediaDragCancellationClearsPendingDragButNotCompletedSelection() {
+        var lifecycle = ChekinanaMediaDragLifecycle()
+        var pageTranslation: CGFloat = 120
+        lifecycle.changed()
+        XCTAssertTrue(lifecycle.hasPendingDrag)
+        if lifecycle.cancel() { pageTranslation = 0 }
+        XCTAssertEqual(pageTranslation, 0)
+        XCTAssertFalse(lifecycle.cancel())
+
+        // Entering a pinch uses the same cancellation path immediately, even
+        // if the one-finger drag never delivers another change or normal end.
+        lifecycle.changed()
+        pageTranslation = -80
+        if lifecycle.cancel() { pageTranslation = 0 }
+        XCTAssertEqual(pageTranslation, 0)
+        XCTAssertFalse(lifecycle.hasPendingDrag)
+
+        lifecycle.changed()
+        lifecycle.finish()
+        var selectedIndex = ChekinanaMediaPagerPolicy.targetIndex(
+            currentIndex: 1,
+            itemCount: 3,
+            horizontalTranslation: -196,
+            canvasWidth: 390
+        )
+        if lifecycle.cancel() { selectedIndex = 1 }
+        XCTAssertEqual(selectedIndex, 2)
+        XCTAssertFalse(lifecycle.hasPendingDrag)
+    }
+
+    func testZoomViewportLeavingAndReturningUsesUnzoomedTransform() {
+        var outgoing = ChekinanaZoomViewportTransform(
+            scale: 3,
+            offset: CGSize(width: 170, height: -90)
+        )
+        let neighbour = ChekinanaZoomViewportTransform()
+        XCTAssertEqual(neighbour.scale, 1)
+        XCTAssertEqual(neighbour.offset, .zero)
+        outgoing.reset()
+        XCTAssertEqual(outgoing, neighbour)
+        XCTAssertEqual(
+            outgoing.imageOffset(compensatingPageTranslation: 120),
+            .zero
+        )
+        XCTAssertEqual(outgoing.scale, 1)
+    }
+
+    func testGalleryVideoPlaybackButtonDoesNotOpenEditor() {
+        let started = ChekinanaGalleryVideoInteractionPolicy.reduce(
+            state: .init(),
+            action: .togglePlayback
+        )
+        XCTAssertEqual(
+            started,
+            .init(
+                state: .init(isPlaying: true, isEditing: false),
+                playbackEffect: .play
+            )
+        )
+
+        let paused = ChekinanaGalleryVideoInteractionPolicy.reduce(
+            state: started.state,
+            action: .togglePlayback
+        )
+        XCTAssertEqual(
+            paused,
+            .init(
+                state: .init(isPlaying: false, isEditing: false),
+                playbackEffect: .pause
+            )
+        )
+    }
+
+    func testGalleryVideoPreviewTapOpensEditorWithoutPlaying() {
+        let transition = ChekinanaGalleryVideoInteractionPolicy.reduce(
+            state: .init(isPlaying: true, isEditing: false),
+            action: .openEditor
+        )
+        XCTAssertEqual(
+            transition,
+            .init(
+                state: .init(isPlaying: false, isEditing: true),
+                playbackEffect: .pause
+            )
+        )
+    }
+
+    func testGalleryVideoStopsWhenPagingEditingOrDisappearing() {
+        for action in [
+            ChekinanaGalleryVideoInteractionPolicy.Action.pageBecameInactive,
+            .viewDisappeared,
+        ] {
+            let transition = ChekinanaGalleryVideoInteractionPolicy.reduce(
+                state: .init(isPlaying: true, isEditing: false),
+                action: action
+            )
+            XCTAssertFalse(transition.state.isPlaying)
+            XCTAssertFalse(transition.state.isEditing)
+            XCTAssertEqual(transition.playbackEffect, .pause)
+        }
+
+        let editing = ChekinanaGalleryVideoInteractionPolicy.reduce(
+            state: .init(isPlaying: true, isEditing: false),
+            action: .openEditor
+        )
+        XCTAssertFalse(editing.state.isPlaying)
+        XCTAssertTrue(editing.state.isEditing)
+        XCTAssertEqual(editing.playbackEffect, .pause)
+
+        let ended = ChekinanaGalleryVideoInteractionPolicy.reduce(
+            state: .init(isPlaying: true, isEditing: false),
+            action: .playbackEnded
+        )
+        XCTAssertFalse(ended.state.isPlaying)
+        XCTAssertEqual(ended.playbackEffect, .pauseAndRewind)
+    }
+
+    func testZoomGestureTreeDoesNotSwitchWhenScaleChanges() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+
+        let start = try XCTUnwrap(
+            source.range(of: "struct ChekinanaZoomableImageViewport")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventImageViewerSelection",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let viewport = source[start..<end]
+        XCTAssertTrue(viewport.contains("interactionGesture("))
+        XCTAssertTrue(viewport.contains(".simultaneously(with: pan)"))
+        XCTAssertFalse(viewport.contains("if ChekinanaZoomGestureRoutingPolicy"))
+        XCTAssertFalse(viewport.contains("magnifyOnlyGesture"))
+        XCTAssertFalse(viewport.contains("UITapGestureRecognizer"))
+        XCTAssertTrue(viewport.contains(".onChange(of: interactionIsActive)"))
+        XCTAssertTrue(viewport.contains(
+            "cancelPageDrag()\n                gestureHandoff = nil\n                previousPinchMagnification = 1"
+        ))
+        XCTAssertTrue(viewport.contains("gestureHandoff = handoff"))
+        XCTAssertTrue(viewport.contains("gestureHandoff = nil"))
+        XCTAssertTrue(viewport.contains(".onDisappear { reset() }"))
+        XCTAssertTrue(viewport.contains("if !active { reset() }"))
+        XCTAssertTrue(viewport.contains("transform.reset()"))
+        XCTAssertFalse(viewport.contains("compensatingPageTranslation: pageTranslation"))
+        XCTAssertTrue(viewport.contains("let renderedOffset = liveTransform.offset"))
+    }
+
+    func testEventImageViewerUsesSharedInteractivePager() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaEventImageViewer:")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventImageDraft",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let viewer = String(source[start..<end])
+
+        XCTAssertTrue(viewer.contains("ChekinanaFullScreenMediaPager("))
+        XCTAssertTrue(viewer.contains("usesEmbeddedPagingGesture: true"))
+        XCTAssertTrue(viewer.contains("pageTranslation: pageInteraction.translation"))
+        XCTAssertTrue(viewer.contains("onHorizontalDragChanged: pageInteraction.dragChanged"))
+        XCTAssertTrue(viewer.contains("onHorizontalDragEnded: pageInteraction.dragEnded"))
+        XCTAssertFalse(viewer.contains("TabView(selection:"))
+        XCTAssertFalse(viewer.contains(".scrollDisabled(selectedImageIsZoomed)"))
     }
 
     func testCalendarViewerUsesOrderedRowMediaAndRequestedThumbnail() throws {
         let idol = Idol(name: "Ordered")
-        let first = Cheki(idols: [idol], imageRef: "first.jpg")
-        let withoutMedia = Cheki(idols: [idol])
-        let second = Cheki(idols: [idol], imageRef: "second.jpg")
+        let first = MediaItem(idols: [idol], imageRef: "first.jpg")
+        let second = MediaItem(idols: [idol], imageRef: "second.jpg")
         let group = ChekinanaCalendarIdolGroup(
             id: idol.id.uuidString.lowercased(),
             idol: idol,
-            chekis: [first, withoutMedia, second]
+            chekis: [first, second]
         )
 
         let selection = ChekinanaCalendarMediaSelection(
@@ -966,7 +2820,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
 
         let other = Idol(name: "Other")
-        let multi = Cheki(
+        let multi = MediaItem(
             idols: [other, idol],
             imageRef: "multi.jpg"
         )
@@ -993,12 +2847,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             .appendingPathComponent("Chekinana")
             .appendingPathComponent("ChekinanaProductShell.swift")
         let source = try String(contentsOf: productSourceURL, encoding: .utf8)
-        XCTAssertTrue(source.contains("openCalendarMedia(group, initialID: cheki.id)"))
+        XCTAssertTrue(source.contains("onSelect: { _ in\n                                        openCalendarGroupEditor(group)"))
         XCTAssertTrue(source.contains("ForEach(Array(chekis.prefix(5)))"))
         XCTAssertTrue(source.contains("appearance: .calendar"))
         XCTAssertTrue(source.contains("var backgroundColor: Color {\n        ChekinanaProductTheme.pageBackground"))
-        XCTAssertTrue(source.contains("isPresented: $isMediaViewerPresented"))
-        XCTAssertTrue(source.contains("onDismiss: { selectedMediaSelection = nil }"))
+        XCTAssertFalse(source.contains("isPresented: $isMediaViewerPresented"))
+        XCTAssertFalse(source.contains("selectedMediaSelection"))
         XCTAssertFalse(source.contains("case .immersive: .black"))
     }
 
@@ -1019,9 +2873,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let calendar = String(source[calendarStart..<calendarEnd])
         XCTAssertTrue(calendar.contains("groupsByExactIdolCombination: true"))
         XCTAssertTrue(calendar.contains("selectedGroupEditor = .init("))
+        XCTAssertTrue(calendar.contains("date: selectedDate"))
+        XCTAssertTrue(calendar.contains("group: group"))
         XCTAssertTrue(calendar.contains(".sheet(item: $selectedGroupEditor)"))
-        XCTAssertTrue(calendar.contains("isPresented: $isMediaViewerPresented"))
-        XCTAssertTrue(calendar.contains("if let selection = selectedMediaSelection"))
+        XCTAssertFalse(calendar.contains("isPresented: $isMediaViewerPresented"))
+        XCTAssertFalse(calendar.contains("selectedMediaSelection"))
+        XCTAssertTrue(calendar.contains("openCalendarGroupEditor(group)"))
         XCTAssertFalse(calendar.contains("ChekinanaCalendarNoMediaRecordEditor(record:"))
 
         let editorStart = try XCTUnwrap(
@@ -1035,6 +2892,22 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(editor.contains("ForEach($recordDrafts)"))
         XCTAssertTrue(editor.contains("ChekinanaChekiRecordEditorFields("))
         XCTAssertTrue(editor.contains("mediaStripSection("))
+        XCTAssertTrue(editor.contains("Set(selection.chekiIDs)"))
+        XCTAssertTrue(editor.contains("Set(selection.recordIDs)"))
+        XCTAssertTrue(editor.contains("Set(selection.shameIDs)"))
+        XCTAssertTrue(editor.contains("Set(selection.dougaIDs)"))
+        XCTAssertTrue(editor.contains("_chekis = Query(filter:"))
+        XCTAssertTrue(editor.contains("_records = Query(filter:"))
+        XCTAssertTrue(editor.contains("_shames = Query(filter:"))
+        XCTAssertTrue(editor.contains("_dougas = Query(filter:"))
+        XCTAssertTrue(editor.contains("chekiIDs.contains($0.id)"))
+        XCTAssertTrue(editor.contains("recordIDs.contains($0.id)"))
+        XCTAssertTrue(editor.contains("shameIDs.contains($0.id)"))
+        XCTAssertTrue(editor.contains("dougaIDs.contains($0.id)"))
+        XCTAssertTrue(editor.contains("availableStableObjectIDs"))
+        XCTAssertFalse(editor.contains(
+            "ChekinanaProductDate.isSameDay($0.date, selection.date)"
+        ))
         XCTAssertTrue(editor.contains(
             "group.chekis.map(ChekinanaGalleryItem.cheki)"
         ))
@@ -1046,10 +2919,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
         XCTAssertTrue(editor.contains("ScrollView(.horizontal)"))
         XCTAssertTrue(editor.contains("LazyHStack(spacing: 10)"))
-        XCTAssertTrue(editor.contains(".sheet(item: $editingMediaItem)"))
-        XCTAssertTrue(editor.contains("ChekinanaChekiEditorView("))
-        XCTAssertTrue(editor.contains("allowsDelete: true"))
-        XCTAssertTrue(editor.contains("ChekinanaGalleryMetadataEditor("))
+        XCTAssertTrue(editor.contains(".fullScreenCover(item: $previewMediaItem)"))
+        XCTAssertTrue(editor.contains("ChekinanaGalleryDetailView("))
+        XCTAssertTrue(editor.contains("ChekinanaGalleryMediaDetailView(shame:"))
+        XCTAssertTrue(editor.contains("ChekinanaGalleryMediaDetailView(douga:"))
+        XCTAssertFalse(editor.contains("ChekinanaChekiEditorView("))
+        XCTAssertFalse(editor.contains("ChekinanaGalleryMetadataEditor("))
         XCTAssertFalse(editor.contains("ForEach($chekiDrafts)"))
         XCTAssertFalse(editor.contains("ForEach($mediaDrafts)"))
         XCTAssertFalse(editor.contains("ChekinanaChekiEditorFields("))
@@ -1083,8 +2958,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             range: thumbnailStart..<source.endIndex
         )?.lowerBound)
         let thumbnail = String(source[thumbnailStart..<thumbnailEnd])
+        XCTAssertTrue(thumbnail.contains("if item.kind == .cheki"))
+        XCTAssertTrue(thumbnail.contains("ChekinanaFixedChekiThumbnailImage(image: image)"))
         XCTAssertTrue(thumbnail.contains(".scaledToFit()"))
-        XCTAssertTrue(thumbnail.contains("thumbnailReference(id: douga.id)"))
+        XCTAssertTrue(thumbnail.contains("thumbnailReference(id: douga.mediaOwnerID)"))
 
         let chekiEditorStart = try XCTUnwrap(
             source.range(of: "private struct ChekinanaChekiEditorView")?.lowerBound
@@ -1106,6 +2983,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "@State private var confirmationLedger = ChekinanaConfirmationLedger()"
         ))
         XCTAssertTrue(chekiEditor.contains("cancellationRequiresRecovery("))
+        XCTAssertTrue(chekiEditor.contains(".interactiveDismissDisabled(!canDismiss)"))
+        XCTAssertTrue(chekiEditor.contains(
+            "!isSaving && ChekinanaGalleryDeleteDismissPolicy.canDismiss("
+        ))
+        XCTAssertTrue(chekiEditor.contains(
+            ".disabled(isSaving || editAuthorization == nil)"
+        ))
+        XCTAssertTrue(chekiEditor.contains(
+            "ChekinanaChekiEditCommitter.commit("
+        ))
+        XCTAssertTrue(chekiEditor.contains(
+            "if edited.contains(.note) { target.note = note }"
+        ))
 
         let sharedFieldsStart = try XCTUnwrap(
             source.range(of: "private struct ChekinanaChekiEditorFields")?.lowerBound
@@ -1159,21 +3049,60 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let noMediaEditor = String(source[noMediaStart..<groupStart])
         for editorSource in [importEditor, noMediaEditor] {
             XCTAssertTrue(editorSource.contains("ChekinanaChekiEventSelectionField("))
-            XCTAssertTrue(editorSource.contains("ChekinanaMediaEventLinkStore.set("))
+            XCTAssertFalse(editorSource.contains("ChekinanaMediaEventLinkStore"))
         }
         XCTAssertTrue(metadataEditor.contains("ChekinanaMediaMetadataEditorFields("))
-        XCTAssertTrue(metadataEditor.contains("ChekinanaMediaEventLinkStore.set("))
+        XCTAssertTrue(metadataEditor.contains("value.eventID = eventID"))
+        XCTAssertFalse(metadataEditor.contains("ChekinanaMediaEventLinkStore"))
 
+        let mediaPagerStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaGalleryMediaPagerView")?.lowerBound
+        )
         let mediaDetailStart = try XCTUnwrap(
             source.range(of: "private struct ChekinanaGalleryMediaDetailView")?.lowerBound
         )
+        let mediaPager = String(source[mediaPagerStart..<mediaDetailStart])
+        XCTAssertTrue(mediaPager.contains(
+            "ChekinanaProductTheme.pageBackground.ignoresSafeArea()"
+        ))
+        XCTAssertTrue(mediaPager.contains("ChekinanaFullScreenMediaPager("))
+        XCTAssertTrue(mediaPager.contains("usesEmbeddedPagingGesture: kind == .shame"))
+        XCTAssertTrue(mediaPager.contains(
+            "onHorizontalDragChanged: pageInteraction.dragChanged"
+        ))
+        XCTAssertTrue(mediaPager.contains(
+            "onHorizontalDragEnded: pageInteraction.dragEnded"
+        ))
+        XCTAssertFalse(mediaPager.contains("TabView(selection: $selectedID)"))
+        let sharedPagerStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaFullScreenMediaPager")?.lowerBound
+        )
+        let sharedPagerEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaMediaViewerPageChrome",
+            range: sharedPagerStart..<source.endIndex
+        )?.lowerBound)
+        let sharedPager = source[sharedPagerStart..<sharedPagerEnd]
+        XCTAssertFalse(sharedPager.contains("TabView(selection: $selectedID)"))
+        XCTAssertTrue(sharedPager.contains("ForEach(visibleIndices"))
+        XCTAssertTrue(sharedPager.contains("ChekinanaPassivePageIndicator("))
         let mediaDetailEnd = try XCTUnwrap(source.range(
             of: "private struct ChekinanaGalleryImportEditor",
             range: mediaDetailStart..<source.endIndex
         )?.lowerBound)
         let mediaDetail = String(source[mediaDetailStart..<mediaDetailEnd])
+        let editableVideoPlayerStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaEditableVideoPlayer")?.lowerBound
+        )
+        let playbackVideoPlayerStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaPlaybackVideoPlayer",
+            range: editableVideoPlayerStart..<source.endIndex
+        )?.lowerBound)
+        let editableVideoPlayer = String(source[editableVideoPlayerStart..<playbackVideoPlayerStart])
         XCTAssertTrue(mediaDetail.contains(
-            "ChekinanaProductTheme.pageBackground.ignoresSafeArea()"
+            "ChekinanaMediaViewerPageChrome("
+        ))
+        XCTAssertTrue(mediaDetail.contains(
+            "backgroundColor: ChekinanaProductTheme.pageBackground"
         ))
         XCTAssertFalse(mediaDetail.contains(".preferredColorScheme(.light)"))
         XCTAssertFalse(mediaDetail.contains(".padding(12)"))
@@ -1181,44 +3110,572 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ".clipShape(RoundedRectangle(cornerRadius: 18"
         ))
         XCTAssertTrue(mediaDetail.contains("onSingleTap: { isEditing = true }"))
+        XCTAssertTrue(mediaDetail.contains(
+            "onHorizontalDragChanged: onHorizontalDragChanged"
+        ))
+        XCTAssertTrue(mediaDetail.contains(
+            "onHorizontalDragEnded: onHorizontalDragEnded"
+        ))
+        XCTAssertTrue(mediaDetail.contains("ChekinanaMediaPreviewCache.shared.image"))
         XCTAssertTrue(mediaDetail.contains("ChekinanaEditableVideoPlayer("))
-        XCTAssertTrue(mediaDetail.contains(".accessibilityAction { isEditing = true }"))
-        let stagedDelete = try XCTUnwrap(metadataEditor.range(
-            of: "staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion("
+        XCTAssertTrue(mediaDetail.contains(
+            "handleVideoInteraction(.togglePlayback, player: player)"
         ))
-        let mutationBoundary = try XCTUnwrap(metadataEditor.range(
-            of: "do {\n                try ChekinanaMediaEventLinkStore.delete(",
-            range: stagedDelete.upperBound..<metadataEditor.endIndex
+        XCTAssertTrue(mediaDetail.contains("onSingleTap: { openEditor() }"))
+        XCTAssertTrue(mediaDetail.contains(
+            "isPlaying ? \"pause.fill\" : \"play.fill\""
         ))
-        let eventLinkDelete = try XCTUnwrap(metadataEditor.range(
-            of: "try ChekinanaMediaEventLinkStore.delete(",
-            range: mutationBoundary.lowerBound..<metadataEditor.endIndex
+        XCTAssertTrue(mediaDetail.contains(
+            "chekinana.gallery.video.playback"
         ))
-        let shotTypeDelete = try XCTUnwrap(metadataEditor.range(
-            of: "try ChekinanaMediaShotTypeStore.delete(",
-            range: eventLinkDelete.upperBound..<metadataEditor.endIndex
+        XCTAssertTrue(mediaDetail.contains(".onChange(of: isActive)"))
+        XCTAssertTrue(editableVideoPlayer.contains("controller.showsPlaybackControls = false"))
+        XCTAssertFalse(editableVideoPlayer.contains("controller.showsPlaybackControls = true"))
+        XCTAssertTrue(mediaDetail.contains(".accessibilityAction { openEditor() }"))
+        let coordinatedDelete = try XCTUnwrap(metadataEditor.range(
+            of: "try await ChekinanaGalleryDeletionCoordinator.delete("
         ))
-        let mutationSave = try XCTUnwrap(metadataEditor.range(
-            of: "try modelContext.save()",
-            range: shotTypeDelete.upperBound..<metadataEditor.endIndex
+        let liveValidation = try XCTUnwrap(metadataEditor.range(
+            of: "validateModel:",
+            range: coordinatedDelete.upperBound..<metadataEditor.endIndex
         ))
-        let mutationRecovery = try XCTUnwrap(metadataEditor.range(
-            of: "} catch let databaseError {\n                modelContext.rollback()",
-            range: mutationSave.upperBound..<metadataEditor.endIndex
+        let modelDelete = try XCTUnwrap(metadataEditor.range(
+            of: "modelContext.delete(value)",
+            range: liveValidation.upperBound..<metadataEditor.endIndex
         ))
-        XCTAssertTrue(metadataEditor[mutationRecovery.lowerBound...].contains(
-            "ChekinanaGalleryMediaStore.recordRestoreRecovery(staged)"
-        ))
-        XCTAssertTrue(metadataEditor[mutationRecovery.lowerBound...].contains(
-            "try ChekinanaGalleryMediaStore.restoreStagedFiles(staged)"
-        ))
+        XCTAssertLessThan(coordinatedDelete.lowerBound, liveValidation.lowerBound)
+        XCTAssertLessThan(liveValidation.lowerBound, modelDelete.lowerBound)
 
         XCTAssertTrue(metadataEditor.contains("@State private var userAppears: Bool"))
-        XCTAssertTrue(metadataEditor.contains("ChekinanaMediaShotTypeStore.set("))
-        XCTAssertTrue(metadataEditor.contains("ChekinanaMediaShotTypeStore.userAppears("))
+        XCTAssertTrue(metadataEditor.contains("value.userAppears = userAppears"))
+        XCTAssertFalse(metadataEditor.contains("ChekinanaMediaShotTypeStore"))
         XCTAssertTrue(metadataEditor.contains("ChekinanaMediaMetadataEditorFields("))
         XCTAssertTrue(metadataEditor.contains("gallery.save_to_photos"))
+        XCTAssertFalse(metadataEditor.contains("gallery.media.saved_to_photos"))
         XCTAssertTrue(metadataEditor.contains("gallery.media.editor.delete"))
+        XCTAssertEqual(
+            metadataEditor.components(
+                separatedBy: "ChekinanaTextActionPressFeedbackStyle()"
+            ).count - 1,
+            2
+        )
+    }
+
+    func testMediaItemEditorsUseThreeConsistentCardsWithoutLosingActionsOrFields() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+
+        let metadataStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaGalleryMetadataEditor")?.lowerBound
+        )
+        let metadataEnd = try XCTUnwrap(source.range(
+            of: "private enum ChekinanaProductPhotoSaver",
+            range: metadataStart..<source.endIndex
+        )?.lowerBound)
+        let metadataEditor = String(source[metadataStart..<metadataEnd])
+        XCTAssertEqual(
+            metadataEditor.components(separatedBy: "Section {").count - 1,
+            3
+        )
+        XCTAssertTrue(metadataEditor.contains("gallery.media.editor.export"))
+        XCTAssertTrue(metadataEditor.contains("ChekinanaMediaMetadataEditorFields("))
+        XCTAssertTrue(metadataEditor.contains("gallery.media.editor.delete"))
+        XCTAssertTrue(metadataEditor.contains(".foregroundStyle(.red)"))
+        XCTAssertTrue(metadataEditor.contains(".chekinanaGroupedPageBackground()"))
+        XCTAssertFalse(metadataEditor.contains("ToolbarItemGroup(placement: .bottomBar)"))
+
+        let mediaFieldsStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaMediaMetadataEditorFields")?.lowerBound
+        )
+        let mediaFieldsEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUserAppearsPicker",
+            range: mediaFieldsStart..<source.endIndex
+        )?.lowerBound)
+        let mediaFields = String(source[mediaFieldsStart..<mediaFieldsEnd])
+        XCTAssertFalse(mediaFields.contains("Section("))
+        XCTAssertFalse(mediaFields.contains("Section {"))
+        XCTAssertTrue(mediaFields.contains("ChekinanaIdolSelectionSummaryButton("))
+        XCTAssertTrue(mediaFields.contains("ChekinanaChekiEventSelectionField("))
+        XCTAssertTrue(mediaFields.contains("ChekinanaUserAppearsPicker("))
+        XCTAssertTrue(mediaFields.contains("common.favorite"))
+        XCTAssertTrue(mediaFields.contains("common.posted_to_sns"))
+        XCTAssertTrue(mediaFields.contains("common.note"))
+
+        let chekiStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaChekiEditorView")?.lowerBound
+        )
+        let chekiEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaCalendarView",
+            range: chekiStart..<source.endIndex
+        )?.lowerBound)
+        let chekiEditor = String(source[chekiStart..<chekiEnd])
+        XCTAssertEqual(
+            chekiEditor.components(separatedBy: "Section {").count - 1,
+            3
+        )
+        XCTAssertTrue(chekiEditor.contains("chekinana.gallery.editor.export"))
+        XCTAssertTrue(chekiEditor.contains("ChekinanaChekiEditorFields("))
+        XCTAssertTrue(chekiEditor.contains("chekinana.gallery.editor.delete"))
+        XCTAssertTrue(chekiEditor.contains(".foregroundStyle(.red)"))
+        XCTAssertEqual(
+            chekiEditor.components(
+                separatedBy: "ChekinanaTextActionPressFeedbackStyle()"
+            ).count - 1,
+            2
+        )
+        XCTAssertTrue(chekiEditor.contains(".chekinanaGroupedPageBackground()"))
+        XCTAssertFalse(chekiEditor.contains("ToolbarItemGroup(placement: .bottomBar)"))
+
+        for editor in [metadataEditor, chekiEditor] {
+            let export = try XCTUnwrap(editor.range(of: "gallery.save_to_photos"))
+            let fieldsToken = editor == metadataEditor
+                ? "ChekinanaMediaMetadataEditorFields("
+                : "ChekinanaChekiEditorFields("
+            let fields = try XCTUnwrap(editor.range(of: fieldsToken))
+            let delete = try XCTUnwrap(editor.range(of: "role: .destructive"))
+            XCTAssertLessThan(export.lowerBound, fields.lowerBound)
+            XCTAssertLessThan(fields.lowerBound, delete.lowerBound)
+        }
+    }
+
+    func testMediaItemTextActionsUseFullRowHitTargetsAndPressedFeedback() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+
+        let styleStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaTextActionPressFeedbackStyle"
+        )?.lowerBound)
+        let styleEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaGalleryMetadataEditor",
+            range: styleStart..<source.endIndex
+        )?.lowerBound)
+        let style = String(source[styleStart..<styleEnd])
+        XCTAssertTrue(style.contains(
+            ".frame(maxWidth: .infinity, alignment: .leading)"
+        ))
+        XCTAssertTrue(style.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(style.contains(".colorMultiply("))
+        XCTAssertTrue(style.contains("Color(white: 0.45)"))
+        XCTAssertTrue(style.contains(": .white"))
+        XCTAssertFalse(style.contains(".brightness("))
+        XCTAssertTrue(style.contains(".opacity(isEnabled ? 1 : 0.35)"))
+
+        XCTAssertEqual(
+            source.components(
+                separatedBy: ".buttonStyle(ChekinanaTextActionPressFeedbackStyle())"
+            ).count - 1,
+            4
+        )
+    }
+
+    func testMainPageTitlesStayOutsideTheirVerticalScrollContainers() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains(
+            "static let galleryHeaderToSegmentSpacing: CGFloat = 12"
+        ))
+        XCTAssertTrue(source.contains(
+            "static let navigationTitleFirstContentTopPadding: CGFloat = 4"
+        ))
+        XCTAssertTrue(source.contains("private struct ChekinanaPinnedPageTitle"))
+
+        func viewSource(_ startToken: String, _ endToken: String) throws -> String {
+            let start = try XCTUnwrap(source.range(of: startToken)?.lowerBound)
+            let end = try XCTUnwrap(source.range(
+                of: endToken,
+                range: start..<source.endIndex
+            )?.lowerBound)
+            return String(source[start..<end])
+        }
+
+        for (start, end, titleIdentifier) in [
+            ("private struct ChekinanaScanView", "private struct ChekinanaNativeScanReview", "chekinana.scan.fixed-title"),
+            ("private struct ChekinanaIdolsView", "private struct ChekinanaIdolRow", "chekinana.idols.fixed-title"),
+            ("private struct ChekinanaCalendarView", "private struct ChekinanaCalendarNoMediaRecordEditor", "chekinana.calendar.fixed-title"),
+        ] {
+            let page = try viewSource(start, end)
+            let title = try XCTUnwrap(page.range(of: titleIdentifier))
+            let scroll = try XCTUnwrap(page.range(of: "ScrollView {"))
+            XCTAssertLessThan(title.lowerBound, scroll.lowerBound, titleIdentifier)
+            XCTAssertTrue(page.contains("ChekinanaPinnedPageTitle("), titleIdentifier)
+            XCTAssertTrue(page.contains(".navigationTitle(\"\")"), titleIdentifier)
+            XCTAssertTrue(page.contains(
+                ".navigationBarTitleDisplayMode(.inline)"
+            ), titleIdentifier)
+        }
+
+        let idols = try viewSource(
+            "private struct ChekinanaIdolsView",
+            "private struct ChekinanaIdolRow"
+        )
+        let idolsContentStart = try XCTUnwrap(idols.range(
+            of: "private func idolsContent("
+        )?.lowerBound)
+        let reorderStackStart = try XCTUnwrap(idols.range(
+            of: "private func reorderableIdolStack",
+            range: idolsContentStart..<idols.endIndex
+        )?.lowerBound)
+        let scrollingIdolContent = idols[idolsContentStart..<reorderStackStart]
+        let idolScroll = try XCTUnwrap(scrollingIdolContent.range(of: "ScrollView {"))
+        let idolRows = try XCTUnwrap(scrollingIdolContent.range(of: "ForEach(orderedIdols)"))
+        XCTAssertLessThan(idolScroll.lowerBound, idolRows.lowerBound)
+        XCTAssertFalse(idols.contains("chekinana.idols.search"))
+        XCTAssertFalse(idols.contains("filteredIdols"))
+        XCTAssertFalse(idols.contains("isSearchFocused"))
+        XCTAssertFalse(idols.contains("scrollDismissesKeyboard"))
+
+        let idolSelection = try viewSource(
+            "private struct ChekinanaIdolSelectionView",
+            "private struct ChekinanaCompactEditorRowModifier"
+        )
+        XCTAssertTrue(idolSelection.contains(".searchable("))
+        XCTAssertTrue(idolSelection.contains("common.search_idols"))
+
+        let events = try viewSource(
+            "private struct ChekinanaEventsView",
+            "private struct ChekinanaEventDetailView"
+        )
+        XCTAssertTrue(events.contains("chekinana.events.page-picker"))
+        XCTAssertFalse(events.contains("ChekinanaPinnedPageTitle("))
+
+        let gallery = try viewSource(
+            "private struct ChekinanaGalleryView",
+            "private struct ChekinanaGalleryCompactFilterLabel"
+        )
+        XCTAssertTrue(gallery.contains("NavigationStack {\n            VStack("))
+        XCTAssertTrue(gallery.contains("chekinana.gallery.type"))
+        XCTAssertTrue(gallery.contains(
+            "ChekinanaMainPageLayout.galleryHeaderToSegmentSpacing"
+        ))
+        XCTAssertTrue(gallery.contains(
+            "ChekinanaMainPageLayout.navigationTitleFirstContentTopPadding"
+        ))
+        let galleryHeader = try XCTUnwrap(gallery.range(of: "chekinana.gallery.header"))
+        let galleryType = try XCTUnwrap(gallery.range(of: "chekinana.gallery.type\"") )
+        let galleryScroll = try XCTUnwrap(gallery.range(of: "ScrollView {"))
+        XCTAssertLessThan(galleryHeader.lowerBound, galleryType.lowerBound)
+        XCTAssertLessThan(galleryType.lowerBound, galleryScroll.lowerBound)
+    }
+
+    func testAppSupportsPortraitOnlyOnPhoneAndPad() throws {
+        let plistURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("Info.plist")
+        let data = try Data(contentsOf: plistURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil)
+                as? [String: Any]
+        )
+        let portraitOnly = ["UIInterfaceOrientationPortrait"]
+        XCTAssertEqual(plist["UIRequiresFullScreen"] as? Bool, true)
+        XCTAssertEqual(
+            plist["UISupportedInterfaceOrientations"] as? [String],
+            portraitOnly
+        )
+        XCTAssertEqual(
+            plist["UISupportedInterfaceOrientations~ipad"] as? [String],
+            portraitOnly
+        )
+    }
+
+    func testScanDateModeTruthTableAndRemovedRangeUI() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let fixedDate = utcDate(2026, 8, 28)
+        let now = utcDate(2026, 9, 1)
+
+        XCTAssertNil(ChekinanaScanDateModePolicy.bounds(
+            mode: .disabled,
+            fixedDate: fixedDate,
+            now: now,
+            calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaScanDateModePolicy.requestsAutomaticRecognition(
+            mode: .disabled
+        ))
+
+        let fixed = try XCTUnwrap(ChekinanaScanDateModePolicy.bounds(
+            mode: .specified,
+            fixedDate: fixedDate,
+            now: now,
+            calendar: calendar
+        ))
+        XCTAssertEqual(fixed.fixedDate, fixedDate)
+        XCTAssertFalse(fixed.requestsDateAnnotation)
+        XCTAssertFalse(ChekinanaScanDateModePolicy.requestsAutomaticRecognition(
+            mode: .specified
+        ))
+
+        let automatic = try XCTUnwrap(ChekinanaScanDateModePolicy.bounds(
+            mode: .enabled,
+            fixedDate: fixedDate,
+            now: now,
+            calendar: calendar
+        ))
+        XCTAssertTrue(automatic.requestsDateAnnotation)
+        XCTAssertTrue(ChekinanaScanDateModePolicy.requestsAutomaticRecognition(
+            mode: .enabled
+        ))
+
+        let specifiedIdol = UUID()
+        let secondSpecifiedIdol = UUID()
+        XCTAssertEqual(ChekinanaScanIdolModePolicy.specifiedIdolIDs(
+            mode: .disabled,
+            selectedIDs: [specifiedIdol, secondSpecifiedIdol]
+        ), [])
+        XCTAssertEqual(ChekinanaScanIdolModePolicy.specifiedIdolIDs(
+            mode: .enabled,
+            selectedIDs: [specifiedIdol, secondSpecifiedIdol]
+        ), [])
+        XCTAssertEqual(ChekinanaScanIdolModePolicy.specifiedIdolIDs(
+            mode: .specified,
+            selectedIDs: [specifiedIdol, secondSpecifiedIdol]
+        ), [specifiedIdol, secondSpecifiedIdol])
+        XCTAssertFalse(ChekinanaScanIdolModePolicy.requestsAutomaticRecognition(
+            mode: .disabled
+        ))
+        XCTAssertFalse(ChekinanaScanIdolModePolicy.requestsAutomaticRecognition(
+            mode: .specified
+        ))
+        XCTAssertTrue(ChekinanaScanIdolModePolicy.requestsAutomaticRecognition(
+            mode: .enabled
+        ))
+
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaScanView"
+        )?.lowerBound)
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeScanReview",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let scan = source[start..<end]
+        XCTAssertTrue(scan.contains(
+            "@State private var dateRecognitionMode = "
+                + "ChekinanaScanRecognitionMode.enabled"
+        ))
+        XCTAssertTrue(scan.contains(
+            "@State private var idolRecognitionMode = "
+                + "ChekinanaScanRecognitionMode.specified"
+        ))
+        XCTAssertFalse(scan.contains("declaresDateRange"))
+        XCTAssertFalse(scan.contains("dateRangeFrom"))
+        XCTAssertFalse(scan.contains("dateRangeTo"))
+        XCTAssertFalse(scan.contains("chekinana.scan.date-scope.range"))
+        XCTAssertFalse(scan.contains("recognitionToggle(\n                    title: ChekinanaProductCopy.text(\"scan.recognize_date\""))
+        XCTAssertTrue(scan.contains(".pickerStyle(.segmented)"))
+        XCTAssertTrue(scan.contains("if dateRecognitionMode == .specified"))
+        XCTAssertTrue(scan.contains("if idolRecognitionMode == .specified"))
+        XCTAssertTrue(scan.contains("ChekinanaNativeIdolSelectionGrid("))
+        XCTAssertTrue(scan.contains("allowsMultipleSelection: true"))
+        XCTAssertTrue(scan.contains("includesUnassigned: false"))
+        let specifiedGridStart = try XCTUnwrap(scan.range(
+            of: "identifierPrefix: \"chekinana.scan.specified-idol\""
+        )?.lowerBound)
+        let specifiedGridTail = scan[specifiedGridStart...].prefix(320)
+        XCTAssertTrue(specifiedGridTail.contains("allowsMultipleSelection: true"))
+        XCTAssertTrue(specifiedGridTail.contains("includesUnassigned: false"))
+        XCTAssertTrue(specifiedGridTail.contains("showsOptionBackground: false"))
+        XCTAssertTrue(scan.contains("let forcedIdols = specifiedIdols"))
+        XCTAssertTrue(scan.contains("idolIDs: forcedIdols.map(\\.id)"))
+        XCTAssertTrue(scan.contains("ChekinanaScanDateModePolicy.bounds("))
+        let dateControlsStart = try XCTUnwrap(scan.range(
+            of: "private var dateDeclarationControls"
+        )?.lowerBound)
+        let dateControlsEnd = try XCTUnwrap(scan.range(
+            of: "private func recognitionModePicker",
+            range: dateControlsStart..<scan.endIndex
+        )?.lowerBound)
+        let dateControls = scan[dateControlsStart..<dateControlsEnd]
+        XCTAssertTrue(dateControls.contains("ChekinanaExpandableDateWheel("))
+        XCTAssertTrue(dateControls.contains(
+            "accessibilityIdentifier: \"chekinana.scan.date-fixed\""
+        ))
+        XCTAssertTrue(dateControls.contains(".frame(maxWidth: .infinity)"))
+        XCTAssertFalse(dateControls.contains("GeometryReader"))
+        XCTAssertFalse(dateControls.contains(".datePickerStyle(.wheel)"))
+        XCTAssertFalse(dateControls.contains(".padding(.leading, 46)"))
+
+        let enabledCandidatesStart = try XCTUnwrap(scan.range(
+            of: "else if idolRecognitionMode == .enabled"
+        )?.lowerBound)
+        let enabledCandidatesEnd = try XCTUnwrap(scan.range(
+            of: "if showsSleevesOption",
+            range: enabledCandidatesStart..<scan.endIndex
+        )?.lowerBound)
+        let enabledCandidates = scan[enabledCandidatesStart..<enabledCandidatesEnd]
+        let hint = try XCTUnwrap(enabledCandidates.range(
+            of: "scan.candidates.unassigned_hint"
+        )?.lowerBound)
+        let toggle = try XCTUnwrap(enabledCandidates.range(
+            of: "chekinana.scan.candidate.unassigned"
+        )?.lowerBound)
+        let grid = try XCTUnwrap(enabledCandidates.range(
+            of: "ChekinanaNativeIdolSelectionGrid("
+        )?.lowerBound)
+        XCTAssertLessThan(hint, toggle)
+        XCTAssertLessThan(toggle, grid)
+        XCTAssertTrue(enabledCandidates.contains("allowsMultipleSelection: true"))
+        XCTAssertTrue(enabledCandidates.contains("includesUnassigned: false"))
+        XCTAssertTrue(enabledCandidates.contains("showsOptionBackground: false"))
+        XCTAssertFalse(enabledCandidates.contains("isCandidatePickerPresented"))
+    }
+
+    func testScanVisibleCopyHasJapaneseAndSimplifiedChineseCatalogValues() throws {
+        let projectRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let catalogURL = projectRoot
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("Localizable.xcstrings")
+        let data = try Data(contentsOf: catalogURL)
+        let catalog = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let strings = try XCTUnwrap(catalog["strings"] as? [String: Any])
+        let scanEntries = strings.filter { $0.key.hasPrefix("product.scan.") }
+        XCTAssertFalse(scanEntries.isEmpty)
+        for (key, rawEntry) in scanEntries {
+            let entry = try XCTUnwrap(rawEntry as? [String: Any], key)
+            let localizations = try XCTUnwrap(
+                entry["localizations"] as? [String: Any],
+                key
+            )
+            for locale in ["ja", "zh-Hans"] {
+                let localization = try XCTUnwrap(
+                    localizations[locale] as? [String: Any],
+                    "\(key) [\(locale)]"
+                )
+                let unit = try XCTUnwrap(
+                    localization["stringUnit"] as? [String: Any],
+                    "\(key) [\(locale)]"
+                )
+                let value = try XCTUnwrap(
+                    unit["value"] as? String,
+                    "\(key) [\(locale)]"
+                )
+                XCTAssertFalse(
+                    value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    "\(key) [\(locale)]"
+                )
+            }
+        }
+
+        for key in [
+            "product.scan.candidates.unassigned_hint",
+            "product.common.unassigned",
+        ] {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let localizations = try XCTUnwrap(
+                entry["localizations"] as? [String: Any], key
+            )
+            let english = try XCTUnwrap(
+                ((localizations["en"] as? [String: Any])?["stringUnit"]
+                    as? [String: Any])?["value"] as? String
+            )
+            for locale in ["ja", "zh-Hans", "zh-Hant"] {
+                let value = try XCTUnwrap(
+                    ((localizations[locale] as? [String: Any])?["stringUnit"]
+                        as? [String: Any])?["value"] as? String,
+                    "\(key) [\(locale)]"
+                )
+                XCTAssertFalse(value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                XCTAssertNotEqual(value, english, "\(key) [\(locale)] must not fall back to English")
+            }
+        }
+
+        let productSourceURL = projectRoot
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaScanView"
+        )?.lowerBound)
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaIdolsView",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let scanFlow = source[start..<end]
+        for rawVisibleCopy in [
+            "Text(\"Input photos\")",
+            "Text(\"Preparing images\")",
+            "Text(userAppears ? \"2-shot\" : \"solo\")",
+            ".failed(\"The camera session could not start.\")",
+            "statusMessage = \"Unable to normalize the selected date.\"",
+            "errorMessage = \"这张临时 Cheki 已失效或进入待确认状态；当前选择仍保留。\"",
+            "errorMessage = \"无法规范化所选日期。\"",
+            "errorMessage = \"这张临时 Cheki 已失效或进入待确认状态；当前日期仍保留。\"",
+        ] {
+            XCTAssertFalse(scanFlow.contains(rawVisibleCopy), rawVisibleCopy)
+        }
+    }
+
+    func testScanReviewQuickSizeEditUpdatesOnlyTemporarySize() throws {
+        let ledger = ChekinanaConfirmationLedger()
+        let inserted = try ledger.insertTemporaryChekis(
+            [ChekinanaPendingChekiImage(
+                data: scannerPNGData(color: .purple),
+                filenameExtension: "png"
+            )],
+            thumbnailImageData: [nil],
+            sizes: [.mini]
+        )
+        let id = try XCTUnwrap(inserted.inserted.first?.id)
+
+        XCTAssertTrue(ledger.updateTemporaryChekiSize(id: id, size: .wide))
+        let updated = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertEqual(updated.size, .wide)
+        XCTAssertTrue(updated.explicitlyEditedFields.contains(.size))
+        XCTAssertEqual(updated.image.data, inserted.inserted[0].image.data)
+        XCTAssertEqual(updated.idolIDs, inserted.inserted[0].idolIDs)
+        XCTAssertEqual(updated.date, inserted.inserted[0].date)
+        XCTAssertEqual(updated.eventID, inserted.inserted[0].eventID)
+    }
+
+    func testScanReviewHasDirectSizeEditAndNoCapturedPhotoDeleteEntry() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeScanReview"
+        )?.lowerBound)
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeIdolSelectionView",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let review = source[start..<end]
+
+        XCTAssertTrue(review.contains("Menu {"))
+        XCTAssertTrue(review.contains("saveSizeSelection(id: temporary.id, size: size)"))
+        XCTAssertTrue(review.contains("beginSelectingIdols(temporary)"))
+        XCTAssertTrue(review.contains("beginSelectingDate(temporary)"))
+        XCTAssertTrue(review.contains("beginSelectingEvent(temporary)"))
+        XCTAssertTrue(review.contains("columns: reviewGridColumns"))
+        XCTAssertFalse(review.contains("reviewCardUsesFullWidth"))
+        XCTAssertFalse(review.contains("chekinana.scan.review.delete-captured"))
+        XCTAssertFalse(review.contains("scan.review.delete_capture"))
     }
 
     func testZoomInteractionRoutesOnlyCleanTap() {
@@ -1320,6 +3777,23 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(ChekinanaZoomPanGeometry.clampedScale(0.2), 1)
         XCTAssertEqual(ChekinanaZoomPanGeometry.clampedScale(8), 4)
+
+        let saturated = ChekinanaZoomPanGeometry
+            .scaleApplyingIncrementalMagnification(
+                currentScale: 3.5,
+                magnification: 2,
+                previousMagnification: 1
+            )
+        XCTAssertEqual(saturated, 4)
+        XCTAssertEqual(
+            ChekinanaZoomPanGeometry.scaleApplyingIncrementalMagnification(
+                currentScale: saturated,
+                magnification: 1.8,
+                previousMagnification: 2
+            ),
+            3.6,
+            accuracy: 0.001
+        )
     }
 
     func testZoomPanGeometryRejectsZeroAndNonFiniteInputs() {
@@ -1419,8 +3893,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(normalizedScaleOffset.height.isFinite)
     }
 
-    func testCalendarBatchWriterCreatesOnlySimpleRecordsAndAutoLinksUniqueEvent() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV8.self)
+    func testCalendarBatchWriterCreatesOnlySimpleRecordsAndLeavesEventUnsetWithoutExplicitSelection() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(
@@ -1449,7 +3923,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             in: context
         )
         XCTAssertEqual(ids.count, 1)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Cheki>()), 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MediaItem>()), 0)
         let records = try context.fetch(FetchDescriptor<ChekiRecord>())
         XCTAssertEqual(records.count, 1)
         for record in records {
@@ -1458,12 +3932,189 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             XCTAssertEqual(record.size, .mini)
             XCTAssertEqual(record.note, "record note")
             XCTAssertEqual(Set(record.idols.map(\.id)), [idol.id])
-            XCTAssertEqual(record.event?.id, event.id)
+            XCTAssertNil(record.eventID)
         }
     }
 
+    func testCalendarBatchWriterPersistsRecordWithoutDateWhenDateIsDisabled() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Undated Record Idol")
+        context.insert(idol)
+        try context.save()
+
+        _ = try ChekinanaCalendarRecordBatchWriter.commit(
+            .init(
+                kind: .cheki,
+                idolIDs: [idol.id],
+                date: nil,
+                quantity: 2,
+                manualStart: nil,
+                note: "undated",
+                eventID: nil
+            ),
+            in: context
+        )
+
+        let record = try XCTUnwrap(
+            context.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertNil(record.date)
+        XCTAssertEqual(record.count, 2)
+        XCTAssertEqual(record.idolIDs, [idol.id])
+    }
+
+    func testCalendarAddRecordDefaultsToSelectedDateAndReusesOptionalDateFields() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaCalendarRecordEditor")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "struct ChekinanaIdolCombinationKey",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let editor = source[start..<end]
+
+        XCTAssertTrue(source.contains(
+            "ChekinanaCalendarRecordEditor(initialDate: selectedDate)"
+        ))
+        XCTAssertTrue(editor.contains("@State private var hasDate = true"))
+        XCTAssertTrue(editor.contains(
+            "@State private var dateSession: ChekinanaDateOnlyEditorSession"
+        ))
+        XCTAssertTrue(editor.contains("dateSession.displayDate("))
+        XCTAssertTrue(editor.contains("dateCalendar: dateSession.calendar"))
+        XCTAssertTrue(editor.contains("dateSession.canonicalDate(from: date)"))
+        XCTAssertFalse(editor.contains("_date = State(initialValue: initialDate)"))
+        XCTAssertTrue(editor.contains("ChekinanaChekiRecordEditorFields("))
+        XCTAssertTrue(editor.contains("hasDate: $hasDate"))
+        XCTAssertTrue(editor.contains("date: $date"))
+        XCTAssertTrue(editor.contains("if hasDate {"))
+        XCTAssertTrue(editor.contains("normalizedDate = nil"))
+        XCTAssertTrue(editor.contains("date: normalizedDate"))
+    }
+
+    func testSingleRecordEditorUsesOneDateOnlySessionFromDraftThroughSave() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaChekiRecordEditor: View")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaMonthPicker",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let editor = source[start..<end]
+
+        XCTAssertTrue(editor.contains(
+            "@State private var dateSession: ChekinanaDateOnlyEditorSession"
+        ))
+        XCTAssertTrue(editor.contains("dateSession.displayDate(from: $0)"))
+        XCTAssertTrue(editor.contains("dateCalendar: dateSession.calendar"))
+        XCTAssertTrue(editor.contains("return dateSession.canonicalDate(from: date)"))
+        XCTAssertTrue(editor.contains("guard let canonical = dateSession.canonicalDate(from: date)"))
+        XCTAssertFalse(editor.contains(
+            "_date = State(initialValue: identity.canonicalDate ?? Date())"
+        ))
+    }
+
+    func testExistingGroupAndMediaChekiEditorsKeepTheirDateOnlyBoundaries() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        func slice(_ startMarker: String, _ endMarker: String) throws -> Substring {
+            let start = try XCTUnwrap(source.range(of: startMarker)?.lowerBound)
+            let end = try XCTUnwrap(source.range(
+                of: endMarker,
+                range: start..<source.endIndex
+            )?.lowerBound)
+            return source[start..<end]
+        }
+
+        let groupDraft = try slice(
+            "private struct ChekinanaCalendarRecordDraft",
+            "private struct ChekinanaCalendarRecordIdolSelection"
+        )
+        XCTAssertTrue(groupDraft.contains("ChekinanaDateOnly.displayDate("))
+        XCTAssertTrue(groupDraft.contains("calendar: .current"))
+
+        let groupEditor = try slice(
+            "private struct ChekinanaCalendarGroupEditor: View",
+            "private struct ChekinanaCalendarGroupMediaThumbnail"
+        )
+        XCTAssertTrue(groupEditor.contains("dateCalendar: .current"))
+        XCTAssertTrue(groupEditor.contains(
+            "ChekinanaPersistedContentDatePolicy\n            .canonicalDate(from: displayedDate)"
+        ))
+
+        let mediaEditor = try slice(
+            "private struct ChekinanaChekiEditorView: View",
+            "private struct ChekinanaCalendarView: View"
+        )
+        XCTAssertTrue(mediaEditor.contains("ChekinanaDateOnly.displayDate("))
+        XCTAssertTrue(mediaEditor.contains("calendar: .current"))
+        XCTAssertTrue(mediaEditor.contains(
+            "ChekinanaPersistedContentDatePolicy.canonicalDate(from: date)"
+        ))
+    }
+
+    func testCalendarBatchWriterLinksOnlyExplicitlySelectedEvent() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Explicit Event Idol")
+        let day = utcDate(2026, 8, 24)
+        let event = Event(name: "Explicit Event", date: day)
+        context.insert(idol)
+        context.insert(event)
+        try context.save()
+
+        _ = try ChekinanaCalendarRecordBatchWriter.commit(
+            .init(
+                kind: .cheki,
+                idolIDs: [idol.id],
+                date: day,
+                quantity: 1,
+                manualStart: nil,
+                note: "explicit event",
+                eventID: event.id
+            ),
+            in: context
+        )
+
+        let record = try XCTUnwrap(
+            context.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(record.eventID, event.id)
+    }
+
     func testCalendarBatchWriterPersistsEverySelectedIdolOnce() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV8.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(
@@ -1519,7 +4170,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testCalendarBatchWriterPersistsSelectedSizeAndKeepsItInRecordIdentity() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(
@@ -1561,7 +4212,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testChekiRecordStoreUpsertsOrderlessIdentityAndDeletesAtZero() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -1613,7 +4264,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testChekiRecordStoreCountOverflowRollsBackWithoutChangingRecord() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -1652,8 +4303,137 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(records.first?.count, Int.max)
     }
 
+    func testDisplayCountUsesNonnegativeSaturatingArithmetic() throws {
+        XCTAssertEqual(ChekinanaDisplayCount.normalized(-1), 0)
+        XCTAssertEqual(ChekinanaDisplayCount.normalized(0), 0)
+        XCTAssertEqual(ChekinanaDisplayCount.adding(2, 3), 5)
+        XCTAssertEqual(ChekinanaDisplayCount.adding(-4, 3), 3)
+        XCTAssertEqual(ChekinanaDisplayCount.adding(Int.max - 1, 1), Int.max)
+        XCTAssertEqual(ChekinanaDisplayCount.adding(Int.max, 1), Int.max)
+        XCTAssertEqual(
+            ChekinanaDisplayCount.total([Int.max - 2, 1, 1, 1]),
+            Int.max
+        )
+
+        let zero = ChekiRecord()
+        zero.count = 0
+        let negative = ChekiRecord()
+        negative.count = -7
+        let normal = ChekiRecord(count: 4)
+        let maximum = ChekiRecord(count: Int.max)
+        XCTAssertEqual(
+            ChekinanaChekiRecordStore.totalCount([zero, negative, normal]),
+            4
+        )
+        XCTAssertEqual(
+            ChekinanaChekiRecordStore.totalCount([maximum, normal]),
+            Int.max
+        )
+
+        XCTAssertThrowsError(try ChekinanaChekiRecordStore.checkedCountSum(
+            Int.max,
+            1
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiRecordMutationError,
+                .quantityOverflow
+            )
+        }
+    }
+
+    func testNoMediaBatchPersistentMergeRejectsOverflow() {
+        let idol = Idol(name: "Checked Merge")
+        let date = utcDate(2026, 8, 28)
+        let maximum = ChekiRecord(
+            idols: [idol],
+            date: date,
+            note: "same",
+            count: Int.max
+        )
+        let additional = ChekiRecord(
+            idols: [idol],
+            date: date,
+            note: "same",
+            count: 1
+        )
+
+        XCTAssertThrowsError(try ChekinanaIdolNoMediaChekiBatchWriter.draft(
+            selectedRecordIDs: [maximum.id, additional.id],
+            allRecords: [maximum, additional]
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiRecordMutationError,
+                .quantityOverflow
+            )
+        }
+    }
+
+    func testDisplayAggregatesSaturateRecordMediaAndSecondaryGroupCounts() {
+        let idol = Idol(name: "Saturated")
+        let event = Event(name: "Saturated Event")
+        let media = MediaItem(
+            idols: [idol],
+            event: event,
+            imageRef: "saturated.jpg"
+        )
+        let record = ChekiRecord(
+            idols: [idol],
+            event: event,
+            count: Int.max
+        )
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            mediaRef: "shame.jpg"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [idol],
+            mediaRef: "douga.mov"
+        )
+
+        XCTAssertEqual(
+            ChekinanaEventChekiCount.total(
+                eventID: event.id,
+                mediaChekis: [media],
+                simpleRecords: [record],
+                hiddenIDs: []
+            ),
+            Int.max
+        )
+        XCTAssertEqual(
+            ChekinanaIdolLinkedEventCount.chekiCount(
+                event: event,
+                mediaChekis: [media],
+                simpleRecords: [record],
+                idolID: idol.id,
+                hiddenIDs: []
+            ),
+            Int.max
+        )
+        XCTAssertEqual(
+            ChekinanaIdolCardChekiCount.countsByIdolID(
+                mediaChekis: [media],
+                simpleRecords: [record],
+                hiddenIDs: []
+            )[idol.id],
+            Int.max
+        )
+
+        let group = ChekinanaCalendarIdolGroup(
+            id: idol.id.uuidString,
+            idol: idol,
+            chekis: [media],
+            records: [record],
+            shames: [shame],
+            dougas: [douga]
+        )
+        XCTAssertEqual(group.chekiCount, Int.max)
+        XCTAssertEqual(group.count, Int.max)
+    }
+
     func testIdolLinkedEventCountIncludesCurrentIdolMediaAndSimpleRecords() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(
@@ -1672,9 +4452,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         context.insert(event)
         context.insert(recordOnlyEvent)
         context.insert(otherRecordOnlyEvent)
-        let targetMedia = Cheki(imageRef: "target.jpg")
-        let multiMedia = Cheki(imageRef: "multi.jpg")
-        let otherMedia = Cheki(imageRef: "other.jpg")
+        let targetMedia = MediaItem(imageRef: "target.jpg")
+        let multiMedia = MediaItem(imageRef: "multi.jpg")
+        let otherMedia = MediaItem(imageRef: "other.jpg")
         for value in [targetMedia, multiMedia, otherMedia] {
             context.insert(value)
             value.event = event
@@ -1715,6 +4495,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: event,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: target.id,
                 hiddenIDs: []
@@ -1724,6 +4505,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: event,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: other.id,
                 hiddenIDs: []
@@ -1733,6 +4515,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: recordOnlyEvent,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: target.id,
                 hiddenIDs: []
@@ -1742,6 +4525,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: recordOnlyEvent,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: other.id,
                 hiddenIDs: []
@@ -1750,7 +4534,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(
             Set(ChekinanaIdolEventChekiScope.mediaChekis(
-                event: event,
+                [targetMedia, multiMedia, otherMedia],
+                eventID: event.id,
                 idolID: target.id,
                 hiddenIDs: []
             ).map(\.id)),
@@ -1767,7 +4552,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(
             ChekinanaIdolEventChekiScope.mediaChekis(
-                event: event,
+                [targetMedia, multiMedia, otherMedia],
+                eventID: event.id,
                 idolID: target.id,
                 hiddenIDs: [other.id]
             ).map(\.id),
@@ -1785,6 +4571,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: event,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: target.id,
                 hiddenIDs: [other.id]
@@ -1794,6 +4581,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaIdolLinkedEventCount.chekiCount(
                 event: event,
+                mediaChekis: [targetMedia, multiMedia, otherMedia],
                 simpleRecords: simpleRecords,
                 idolID: target.id,
                 hiddenIDs: [target.id]
@@ -1815,7 +4603,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testEventChekiCountAddsMediaAndSimpleRecordQuantities() {
         let event = Event(name: "Counted Event")
         let idol = Idol(name: "Visible")
-        let media = Cheki(idols: [idol], event: event, imageRef: "media.jpg")
+        let media = MediaItem(idols: [idol], event: event, imageRef: "media.jpg")
         let first = ChekiRecord(idols: [idol], event: event, count: 2)
         let second = ChekiRecord(idols: [idol], event: event, count: 3)
 
@@ -1834,8 +4622,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let event = Event(name: "Visibility Event")
         let visible = Idol(name: "Visible")
         let hidden = Idol(name: "Hidden")
-        let visibleMedia = Cheki(idols: [visible], event: event, imageRef: "visible.jpg")
-        let hiddenMedia = Cheki(idols: [hidden], event: event, imageRef: "hidden.jpg")
+        let visibleMedia = MediaItem(idols: [visible], event: event, imageRef: "visible.jpg")
+        let hiddenMedia = MediaItem(idols: [hidden], event: event, imageRef: "hidden.jpg")
         let visibleRecord = ChekiRecord(idols: [visible], event: event, count: 2)
         let hiddenRecord = ChekiRecord(idols: [hidden], event: event, count: 9)
 
@@ -1996,7 +4784,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(
             try value("product.events.remaining_days.future", "zh-Hans"),
-            "还有%lld天"
+            "%lld天后"
         )
         XCTAssertEqual(
             try value("product.calendar.edit_cheki_records", "ja"),
@@ -2018,6 +4806,38 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             try value("record.kind_count.douga.other", "zh-Hans"),
             "%lld个视频"
         )
+    }
+
+    func testSimplifiedChineseChekiQuantitiesAndStandaloneNameUsePaiLiDe() throws {
+        let localizationURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("Localizable.xcstrings")
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: localizationURL))
+                as? [String: Any]
+        )
+        let strings = try XCTUnwrap(root["strings"] as? [String: Any])
+        let simplifiedChineseValues = strings.values.compactMap { rawEntry -> String? in
+            guard let entry = rawEntry as? [String: Any],
+                  let localizations = entry["localizations"] as? [String: Any],
+                  let localization = localizations["zh-Hans"] as? [String: Any],
+                  let unit = localization["stringUnit"] as? [String: Any]
+            else { return nil }
+            return unit["value"] as? String
+        }
+        let forbiddenQuantity = try NSRegularExpression(
+            pattern: #"%(?:[0-9]+\$)?lld[张張]切"#
+        )
+        XCTAssertFalse(simplifiedChineseValues.contains { value in
+            forbiddenQuantity.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..., in: value)
+            ) != nil
+        })
+        XCTAssertTrue(simplifiedChineseValues.contains("拍立得"))
+        XCTAssertTrue(simplifiedChineseValues.contains { $0.contains("%lld张拍立得") })
     }
 
     func testEventSimpleRecordOnlyContentBuildsEditableNonemptyGroup() throws {
@@ -2061,12 +4881,14 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             source.range(of: "private struct ChekinanaEventDetailView")?.lowerBound
         )
         let detailEnd = try XCTUnwrap(source.range(
-            of: "private struct ChekinanaEventChekiGroupView",
+            of: "private struct ChekinanaUnifiedChekiGroupPage",
             range: detailStart..<source.endIndex
         )?.lowerBound)
         let detail = source[detailStart..<detailEnd]
         let branchSelection = try XCTUnwrap(
-            detail.range(of: "selectRecord: { selectedChekiRecord = $0 }")
+            detail.range(
+                of: "selectedChekiRecord = ChekinanaChekiRecordSelection("
+            )
         )
         let commonSheet = try XCTUnwrap(
             detail.range(of: ".sheet(item: $selectedChekiRecord)")
@@ -2080,7 +4902,62 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             detail.components(separatedBy: ".sheet(item: $selectedChekiRecord)").count - 1,
             1
         )
-        XCTAssertTrue(detail.contains("ChekinanaChekiRecordEditor(record: record)"))
+        XCTAssertTrue(
+            detail.contains("ChekinanaChekiRecordEditor(selection: selection)")
+        )
+        XCTAssertFalse(detail.contains("ChekinanaLiveChekiRecordEditor"))
+    }
+
+    func testChekiRecordSheetSelectionIsDetachedScalarSnapshot() {
+        let firstIdol = Idol(name: "First Idol")
+        let secondIdol = Idol(name: "Second Idol")
+        let event = Event(name: "Snapshot Event")
+        let datedRecord = ChekiRecord(
+            idols: [secondIdol, firstIdol],
+            event: event,
+            date: utcDate(2026, 8, 10),
+            size: .wide,
+            note: "dated",
+            count: 3
+        )
+        let undatedRecord = ChekiRecord(
+            idols: [firstIdol],
+            date: nil,
+            size: .mini,
+            note: "undated",
+            count: 2
+        )
+
+        let datedSelection = ChekinanaChekiRecordSelection(record: datedRecord)
+        let undatedSelection = ChekinanaChekiRecordSelection(record: undatedRecord)
+
+        XCTAssertEqual(datedSelection.id, datedRecord.id)
+        XCTAssertEqual(datedSelection.snapshot.count, 3)
+        XCTAssertEqual(
+            Set(datedSelection.snapshot.identity.idolIDs),
+            Set([firstIdol.id, secondIdol.id])
+        )
+        XCTAssertEqual(datedSelection.snapshot.identity.eventID, event.id)
+        XCTAssertEqual(datedSelection.snapshot.identity.sizeRawValue, ChekiSize.wide.rawValue)
+        XCTAssertEqual(datedSelection.snapshot.identity.note, "dated")
+        XCTAssertNotNil(datedSelection.snapshot.identity.canonicalDate)
+
+        XCTAssertEqual(undatedSelection.id, undatedRecord.id)
+        XCTAssertEqual(undatedSelection.snapshot.count, 2)
+        XCTAssertNil(undatedSelection.snapshot.identity.canonicalDate)
+        XCTAssertNil(undatedSelection.snapshot.identity.eventID)
+        XCTAssertNotEqual(datedSelection.id, undatedSelection.id)
+
+        _ = MediaItem(
+            idols: [firstIdol],
+            date: utcDate(2026, 8, 10),
+            size: .wide,
+            imageRef: "snapshot-test.jpg"
+        )
+        XCTAssertEqual(
+            ChekinanaChekiRecordSelection(record: datedRecord),
+            datedSelection
+        )
     }
 
     func testBirthdayUsesCanonicalDateOnlyAndJapaneseTerm() throws {
@@ -2123,8 +5000,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "3月2日"
         )
 
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 9 * 60 * 60)!
+        let timeZone = TimeZone(secondsFromGMT: 9 * 60 * 60)!
+        let calendar = ChekinanaBirthdayValue.gregorianCalendar(timeZone: timeZone)
         let displayed = try XCTUnwrap(calendar.date(from: DateComponents(
             year: 2001,
             month: 2,
@@ -2133,7 +5010,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaBirthdayValue.canonicalString(
                 from: displayed,
-                calendar: calendar
+                timeZone: timeZone
             ),
             "2001-02-03"
         )
@@ -2177,31 +5054,30 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             30
         )
 
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let timeZone = TimeZone(secondsFromGMT: 0)!
         let graphicalLeapDay = try XCTUnwrap(
             ChekinanaBirthdayEditorPolicy.unknownYearDate(
                 month: 2,
                 day: 29,
-                calendar: calendar
+                timeZone: timeZone
             )
         )
         XCTAssertEqual(
             ChekinanaBirthdayEditorPolicy.unknownYearMonthDay(
                 from: graphicalLeapDay,
-                calendar: calendar
+                timeZone: timeZone
             )?.month,
             2
         )
         XCTAssertEqual(
             ChekinanaBirthdayEditorPolicy.unknownYearMonthDay(
                 from: graphicalLeapDay,
-                calendar: calendar
+                timeZone: timeZone
             )?.day,
             29
         )
         let graphicalRange = ChekinanaBirthdayEditorPolicy.unknownYearRange(
-            calendar: calendar
+            timeZone: timeZone
         )
         XCTAssertTrue(graphicalRange.contains(graphicalLeapDay))
 
@@ -2215,7 +5091,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 fullDate: referenceDate,
                 unknownMonth: 2,
                 unknownDay: 29,
-                fullYearConfirmed: false
+                fullYearConfirmed: false,
+                timeZone: timeZone
             ),
             "--02-29"
         )
@@ -2226,7 +5103,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 fullDate: referenceDate,
                 unknownMonth: 2,
                 unknownDay: 30,
-                fullYearConfirmed: false
+                fullYearConfirmed: false,
+                timeZone: timeZone
             )
         )
         XCTAssertThrowsError(
@@ -2236,7 +5114,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 fullDate: referenceDate,
                 unknownMonth: 2,
                 unknownDay: 29,
-                fullYearConfirmed: false
+                fullYearConfirmed: false,
+                timeZone: timeZone
             )
         )
         XCTAssertEqual(
@@ -2246,7 +5125,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 fullDate: referenceDate,
                 unknownMonth: 2,
                 unknownDay: 29,
-                fullYearConfirmed: true
+                fullYearConfirmed: true,
+                timeZone: timeZone
             ),
             "2000-02-29"
         )
@@ -2257,8 +5137,193 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 fullDate: referenceDate,
                 unknownMonth: 2,
                 unknownDay: 29,
-                fullYearConfirmed: false
+                fullYearConfirmed: false,
+                timeZone: timeZone
             )
+        )
+    }
+
+    func testBirthdayRoundTripsGregorianValuesAcrossSystemCalendarsAndTimeZones() throws {
+        let cases: [(Calendar.Identifier, String)] = [
+            (.gregorian, "UTC"),
+            (.buddhist, "Pacific/Kiritimati"),
+            (.japanese, "America/Los_Angeles"),
+        ]
+        let knownBirthdays = [
+            "2000-01-02",
+            "2004-02-29",
+            "2024-03-10",
+            "2024-11-03",
+        ]
+
+        for (identifier, timeZoneIdentifier) in cases {
+            var systemCalendar = Calendar(identifier: identifier)
+            systemCalendar.timeZone = try XCTUnwrap(
+                TimeZone(identifier: timeZoneIdentifier)
+            )
+            let birthdayCalendar = ChekinanaBirthdayValue.gregorianCalendar(
+                timeZone: systemCalendar.timeZone
+            )
+            XCTAssertEqual(birthdayCalendar.identifier, .gregorian)
+            XCTAssertEqual(birthdayCalendar.timeZone, systemCalendar.timeZone)
+
+            for stored in knownBirthdays {
+                let semantic = try XCTUnwrap(ChekinanaBirthdayValue.semantic(stored))
+                let displayed = try XCTUnwrap(
+                    ChekinanaBirthdayValue.draftDisplayDate(
+                        for: semantic,
+                        defaultYear: ChekinanaBirthdayEditorPolicy.unknownYearCarrier,
+                        timeZone: systemCalendar.timeZone
+                    )
+                )
+                XCTAssertEqual(
+                    ChekinanaBirthdayValue.canonicalString(
+                        from: displayed,
+                        timeZone: systemCalendar.timeZone
+                    ),
+                    stored,
+                    "\(identifier) \(timeZoneIdentifier) \(stored)"
+                )
+                XCTAssertEqual(
+                    try ChekinanaBirthdayEditorPolicy.storageValue(
+                        hasBirthday: true,
+                        mode: .fullDate,
+                        fullDate: displayed,
+                        unknownMonth: 1,
+                        unknownDay: 1,
+                        fullYearConfirmed: true,
+                        timeZone: systemCalendar.timeZone
+                    ),
+                    stored
+                )
+                if case .fullDate(let year, _, _) = semantic {
+                    let localized = try XCTUnwrap(
+                        ChekinanaBirthdayValue.localizedDisplay(
+                            stored,
+                            timeZone: systemCalendar.timeZone,
+                            locale: Locale(identifier: "en_US_POSIX")
+                        )
+                    )
+                    XCTAssertTrue(localized.contains(String(year)), localized)
+                }
+            }
+
+            let leapDayCarrier = try XCTUnwrap(
+                ChekinanaBirthdayEditorPolicy.unknownYearDate(
+                    month: 2,
+                    day: 29,
+                    timeZone: systemCalendar.timeZone
+                )
+            )
+            let restoredMonthDay = ChekinanaBirthdayEditorPolicy
+                .unknownYearMonthDay(
+                    from: leapDayCarrier,
+                    timeZone: systemCalendar.timeZone
+                )
+            XCTAssertEqual(restoredMonthDay?.month, 2)
+            XCTAssertEqual(restoredMonthDay?.day, 29)
+            XCTAssertEqual(
+                try ChekinanaBirthdayEditorPolicy.storageValue(
+                    hasBirthday: true,
+                    mode: .unknownYear,
+                    fullDate: leapDayCarrier,
+                    unknownMonth: 2,
+                    unknownDay: 29,
+                    fullYearConfirmed: false,
+                    timeZone: systemCalendar.timeZone
+                ),
+                "--02-29"
+            )
+            let monthDayDisplay = try XCTUnwrap(
+                ChekinanaBirthdayValue.localizedDisplay(
+                    "--02-29",
+                    timeZone: systemCalendar.timeZone,
+                    locale: Locale(identifier: "en_US_POSIX")
+                )
+            )
+            XCTAssertFalse(monthDayDisplay.contains("2000"), monthDayDisplay)
+        }
+    }
+
+    func testBirthdayModeSwitchKeepsMonthDayAndRequiresARealYear() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let calendar = ChekinanaBirthdayValue.gregorianCalendar(timeZone: timeZone)
+        let knownDate = try XCTUnwrap(
+            ChekinanaBirthdayValue.draftDisplayDate(
+                for: .fullDate(year: 2000, month: 1, day: 2),
+                defaultYear: ChekinanaBirthdayEditorPolicy.unknownYearCarrier,
+                timeZone: timeZone
+            )
+        )
+        let unknownSelection = try XCTUnwrap(
+            ChekinanaBirthdayEditorPolicy.unknownYearMonthDay(
+                from: knownDate,
+                timeZone: timeZone
+            )
+        )
+        XCTAssertEqual(unknownSelection.month, 1)
+        XCTAssertEqual(unknownSelection.day, 2)
+
+        let referenceDate = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 1,
+            hour: 12
+        )))
+        let fullDateDraft = try XCTUnwrap(
+            ChekinanaBirthdayEditorPolicy.fullDateDraft(
+                month: unknownSelection.month,
+                day: unknownSelection.day,
+                referenceDate: referenceDate,
+                timeZone: timeZone
+            )
+        )
+        XCTAssertEqual(
+            calendar.dateComponents([.year, .month, .day], from: fullDateDraft).year,
+            2026
+        )
+        XCTAssertThrowsError(
+            try ChekinanaBirthdayEditorPolicy.storageValue(
+                hasBirthday: true,
+                mode: .fullDate,
+                fullDate: fullDateDraft,
+                unknownMonth: unknownSelection.month,
+                unknownDay: unknownSelection.day,
+                fullYearConfirmed: false,
+                timeZone: timeZone
+            )
+        )
+        XCTAssertEqual(
+            try ChekinanaBirthdayEditorPolicy.storageValue(
+                hasBirthday: true,
+                mode: .fullDate,
+                fullDate: fullDateDraft,
+                unknownMonth: unknownSelection.month,
+                unknownDay: unknownSelection.day,
+                fullYearConfirmed: true,
+                timeZone: timeZone
+            ),
+            "2026-01-02"
+        )
+
+        let leapDayDraft = try XCTUnwrap(
+            ChekinanaBirthdayEditorPolicy.fullDateDraft(
+                month: 2,
+                day: 29,
+                referenceDate: referenceDate,
+                timeZone: timeZone
+            )
+        )
+        let leapDayComponents = calendar.dateComponents(
+            [.year, .month, .day],
+            from: leapDayDraft
+        )
+        XCTAssertEqual(leapDayComponents.year, 2024)
+        XCTAssertEqual(leapDayComponents.month, 2)
+        XCTAssertEqual(leapDayComponents.day, 29)
+        XCTAssertNotEqual(
+            leapDayComponents.year,
+            ChekinanaBirthdayEditorPolicy.unknownYearCarrier
         )
     }
 
@@ -2498,7 +5563,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: directory) }
         let storeURL = directory.appendingPathComponent("Reorder.store")
-        let schema = Schema([Idol.self, Event.self, Cheki.self])
+        let schema = Schema([Idol.self, Event.self, MediaItem.self])
         let configuration = ModelConfiguration(
             "Reorder",
             schema: schema,
@@ -2520,9 +5585,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             let idol = Idol(id: idolID, name: "Reorder")
             context.insert(idol)
             let records = [
-                Cheki(id: firstID, date: date, idx: 1),
-                Cheki(id: secondID, date: date, idx: 2),
-                Cheki(id: thirdID, date: date, idx: 3),
+                MediaItem(id: firstID, date: date, idx: 1, imageRef: "first.jpg"),
+                MediaItem(id: secondID, date: date, idx: 2, imageRef: "second.jpg"),
+                MediaItem(id: thirdID, date: date, idx: 3, imageRef: "third.jpg"),
             ]
             for record in records {
                 context.insert(record)
@@ -2557,14 +5622,14 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         let reopenedContext = ModelContext(reopened)
         let ordered = ChekinanaRecordOrdering.orderedChekis(
-            try reopenedContext.fetch(FetchDescriptor<Cheki>())
+            try reopenedContext.fetch(FetchDescriptor<MediaItem>())
         )
         XCTAssertEqual(ordered.map(\.id), [thirdID, firstID, secondID])
         XCTAssertEqual(ordered.compactMap(\.idx), [1, 2, 3])
     }
 
     func testSimpleChekiRecordBatchIncreaseDecreaseAndNoteUseLiveContext() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2658,8 +5723,53 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(afterZero.map(\.id), [unrelated.id])
     }
 
+    func testSimpleChekiRecordBatchCommitPerformsOneDurableSave() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Batch single save")
+        let record = ChekiRecord(
+            idols: [idol],
+            date: utcDate(2026, 8, 2),
+            size: .mini,
+            note: "before",
+            count: 2
+        )
+        setup.insert(idol)
+        setup.insert(record)
+        try setup.save()
+
+        let draft = try ChekinanaIdolNoMediaChekiBatchWriter.draft(
+            selectedRecordIDs: [record.id],
+            allRecords: [record]
+        )
+        let editContext = ModelContext(container)
+        var saveCount = 0
+        let retained = try ChekinanaIdolNoMediaChekiBatchWriter.commit(
+            draft,
+            quantity: 3,
+            note: "after",
+            in: editContext,
+            saveContext: { context in
+                saveCount += 1
+                try context.save()
+            }
+        )
+
+        XCTAssertEqual(saveCount, 1)
+        XCTAssertEqual(retained, [record.id])
+        let persisted = try XCTUnwrap(
+            ModelContext(container).fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(persisted.count, 3)
+        XCTAssertEqual(persisted.note, "after")
+    }
+
     func testSimpleChekiRecordBatchKeepsExplicitEventOutsideNearbyDateWindow() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2703,7 +5813,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testSimpleChekiRecordBatchUndatedRejectsLateMutation() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2715,7 +5825,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let first = ChekiRecord(note: "same")
         let second = ChekiRecord(note: "same")
         let otherBlock = ChekiRecord(note: "other")
-        let media = Cheki(
+        let media = MediaItem(
             imageRef: "managed-existing.jpg",
             note: "media",
             createdAt: createdAt.addingTimeInterval(3)
@@ -2775,7 +5885,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "late mutation"
         )
         XCTAssertEqual(
-            try ModelContext(container).fetch(FetchDescriptor<Cheki>()).first?.imageRef,
+            try ModelContext(container).fetch(FetchDescriptor<MediaItem>()).first?.imageRef,
             "managed-existing.jpg"
         )
 
@@ -2799,7 +5909,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testSimpleChekiRecordBatchNoteCollisionReturnsMergedIdentityForSecondEdit() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2853,7 +5963,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testLargeImportedRecordCanReopenSaveUnchangedAndAcceptDirectInput() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2907,7 +6017,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testSimpleChekiRecordBatchIdentityUsesOnlyRecordBusinessFields() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -2945,7 +6055,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testSimpleChekiRecordBatchRejectsLateMutationWithoutPartialWrite() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -3042,38 +6152,42 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testGalleryGridSizeSliderMapsLargeToOneAndSmallToTenColumns() {
+    func testGalleryGridSizeSliderMapsLeftToTwelveAndRightToOneColumn() {
         XCTAssertEqual(ChekinanaGalleryGridSizePolicy.minimumColumnCount, 1)
-        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.maximumColumnCount, 10)
+        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.maximumColumnCount, 12)
         XCTAssertEqual(ChekinanaGalleryGridSizePolicy.defaultColumnCount, 3)
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: -4),
-            1
+            12
         )
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 1),
-            1
+            12
         )
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 3),
-            3
+            10
         )
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 10),
-            10
+            3
         )
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 14),
-            10
+            1
         )
-        XCTAssertLessThan(
+        XCTAssertGreaterThan(
             ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 1),
-            ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 10)
+            ChekinanaGalleryGridSizePolicy.columnCount(forSliderValue: 12)
         )
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.sliderValue(forColumnCount: 3),
-            3
+            10
         )
+        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.smallerImages(from: 3), 4)
+        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.smallerImages(from: 12), 12)
+        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.largerImages(from: 3), 2)
+        XCTAssertEqual(ChekinanaGalleryGridSizePolicy.largerImages(from: 1), 1)
         XCTAssertEqual(
             ChekinanaGalleryGridSizePolicy.avatarDiameter(forColumnCount: 1),
             72,
@@ -3139,6 +6253,34 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 forDiameter: ChekinanaGalleryGridSizePolicy
                     .avatarDiameter(forColumnCount: 10)
             )
+        )
+    }
+
+    func testGalleryGridControlHitTargetsStayOutsideTheVisibleSliderTrack() {
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.controlWidth, 138)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.controlHeight, 44)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.iconWidth, 16)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.iconVisualSize, 16)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.iconHeight, 44)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.hitTargetSide, 44)
+        XCTAssertEqual(ChekinanaGalleryGridControlLayout.hitTargetOutset, 28)
+        XCTAssertEqual(
+            ChekinanaGalleryGridControlLayout.sliderLeadingX
+                - ChekinanaGalleryGridControlLayout.leadingHitTargetMaxX,
+            ChekinanaGalleryGridControlLayout.spacing
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryGridControlLayout.trailingHitTargetMinX
+                - ChekinanaGalleryGridControlLayout.sliderTrailingX,
+            ChekinanaGalleryGridControlLayout.spacing
+        )
+        XCTAssertLessThan(
+            ChekinanaGalleryGridControlLayout.leadingHitTargetMaxX,
+            ChekinanaGalleryGridControlLayout.sliderLeadingX
+        )
+        XCTAssertGreaterThan(
+            ChekinanaGalleryGridControlLayout.trailingHitTargetMinX,
+            ChekinanaGalleryGridControlLayout.sliderTrailingX
         )
     }
 
@@ -3334,7 +6476,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let idolTitleStringUnit = try XCTUnwrap(
             idolTitleJapanese["stringUnit"] as? [String: Any]
         )
-        XCTAssertEqual(idolTitleStringUnit["value"] as? String, "推し")
+        XCTAssertEqual(idolTitleStringUnit["value"] as? String, "アイドル")
 
         func catalogValue(_ key: String, _ language: String) throws -> String {
             let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
@@ -3431,14 +6573,15 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(ChekinanaAppLanguage.resolve("invalid"), .system)
         XCTAssertEqual(ChekinanaAppLanguage.resolve("system"), .system)
         XCTAssertEqual(ChekinanaAppLanguage.resolve("zh-Hans"), .simplifiedChinese)
+        XCTAssertEqual(ChekinanaAppLanguage.resolve("zh-Hant"), .traditionalChinese)
         XCTAssertEqual(ChekinanaAppLanguage.resolve("en"), .english)
         XCTAssertEqual(ChekinanaAppLanguage.resolve("ja"), .japanese)
         XCTAssertEqual(
             ChekinanaAppLanguage.settingsVisibleCases,
-            [.system, .simplifiedChinese, .japanese]
+            [.system, .simplifiedChinese, .traditionalChinese, .japanese, .english]
         )
         XCTAssertTrue(ChekinanaAppLanguage.allCases.contains(.english))
-        XCTAssertFalse(ChekinanaAppLanguage.settingsVisibleCases.contains(.english))
+        XCTAssertTrue(ChekinanaAppLanguage.settingsVisibleCases.contains(.english))
 
         let suiteName = "ChekinanaLanguageTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -3460,6 +6603,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         for (language, expected) in [
             (ChekinanaAppLanguage.english, "Settings"),
             (.simplifiedChinese, "设置"),
+            (.traditionalChinese, "設定"),
             (.japanese, "設定"),
         ] {
             let bundle = ChekinanaLanguagePreference.localizationBundle(
@@ -3510,7 +6654,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     func testEventChekiGroupCountsUseChekiSpecificClassifiersInEveryLanguage() throws {
         let expectations: [(String, [String])] = [
-            ("en", ["0 chekis", "1 Cheki", "2 chekis"]),
+            ("en", ["0 Cheki", "1 Cheki", "2 Cheki"]),
             ("zh-Hans", ["0张拍立得", "1张拍立得", "2张拍立得"]),
             ("ja", ["チェキ0枚", "チェキ1枚", "チェキ2枚"]),
         ]
@@ -3533,7 +6677,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     func testGlobalChekiCountsUseChekiSpecificClassifiersInEveryLanguage() throws {
         let expectations: [(String, [String])] = [
-            ("en", ["0 chekis", "1 Cheki", "2 chekis"]),
+            ("en", ["0 Cheki", "1 Cheki", "2 Cheki"]),
             ("zh-Hans", ["0张拍立得", "1张拍立得", "2张拍立得"]),
             ("ja", ["チェキ0枚", "チェキ1枚", "チェキ2枚"]),
         ]
@@ -3575,6 +6719,110 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         withExtendedLifetime(cancellable) {}
     }
 
+    func testCalendarGroupListSeparatorUsesProductKeyAndTracksLanguageSwitches() {
+        let store = ChekinanaLanguageStore.shared
+        let original = store.language
+        defer { store.language = original }
+        let first = Idol(name: "First")
+        let second = Idol(name: "Second")
+        let group = ChekinanaCalendarIdolGroup(
+            id: "localized-idol-combination",
+            idol: nil,
+            orderedIdols: [first, second],
+            chekis: []
+        )
+
+        for (language, expected) in [
+            (ChekinanaAppLanguage.english, "First, Second"),
+            (.japanese, "First、Second"),
+            (.simplifiedChinese, "First、Second"),
+        ] {
+            store.language = language
+            XCTAssertEqual(group.name, expected, language.rawValue)
+        }
+    }
+
+    func testLimitedRuntimeLocalizationCatalogMatchesActualProductConsumers() throws {
+        let productDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+        let localizationData = try Data(contentsOf: productDirectory
+            .appendingPathComponent("Localizable.xcstrings"))
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: localizationData) as? [String: Any]
+        )
+        let strings = try XCTUnwrap(root["strings"] as? [String: Any])
+        let scannerBaseKeys = [
+            "assistant.executor.error.edge_detector_asset_unavailable",
+            "assistant.executor.error.edge_detector_adapter_unavailable",
+            "assistant.executor.error.edge_detector_manifest_invalid",
+            "assistant.executor.error.edge_detector_model_unavailable",
+            "assistant.executor.error.edge_detector_output_invalid",
+            "assistant.executor.error.edge_detector_runtime_failed",
+            "assistant.executor.error.edge_detector_invalid_source",
+            "assistant.executor.error.edge_detector_geometry_mismatch",
+            "assistant.executor.error.edge_detector_invalid_quad",
+            "assistant.executor.error.edge_detector_rectification_failed",
+            "assistant.executor.error.edge_detector_no_results",
+        ]
+        let scannerProductKeys = scannerBaseKeys.map { "product.\($0)" }
+        XCTAssertEqual(
+            Set(strings.keys.filter {
+                $0.hasPrefix("product.assistant.executor.error.edge_detector_")
+            }),
+            Set(scannerProductKeys)
+        )
+
+        for key in ["product.assistant.list_separator"] + scannerProductKeys {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let localizations = try XCTUnwrap(
+                entry["localizations"] as? [String: Any],
+                key
+            )
+            XCTAssertEqual(Set(localizations.keys), ["en", "ja", "zh-Hans"], key)
+            for language in ["en", "ja", "zh-Hans"] {
+                let localization = try XCTUnwrap(
+                    localizations[language] as? [String: Any],
+                    "\(key) / \(language)"
+                )
+                let stringUnit = try XCTUnwrap(
+                    localization["stringUnit"] as? [String: Any],
+                    "\(key) / \(language)"
+                )
+                XCTAssertEqual(stringUnit["state"] as? String, "translated")
+                let value = try XCTUnwrap(
+                    stringUnit["value"] as? String,
+                    "\(key) / \(language)"
+                )
+                XCTAssertFalse(value.isEmpty, "\(key) / \(language)")
+                XCTAssertNotEqual(value, key, "\(key) / \(language)")
+            }
+        }
+
+        let scannerSource = try String(
+            contentsOf: productDirectory.appendingPathComponent(
+                "ChekinanaOnDeviceScanner.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertEqual(
+            scannerSource.components(separatedBy: "\"assistant.executor.error.edge_detector_")
+                .count - 1,
+            scannerBaseKeys.count
+        )
+        for key in scannerBaseKeys {
+            XCTAssertEqual(
+                scannerSource.components(separatedBy: "\"\(key)\"").count - 1,
+                1,
+                key
+            )
+        }
+        XCTAssertFalse(scannerSource.contains(
+            "\"product.assistant.executor.error.edge_detector_"
+        ))
+    }
+
     func testBottomTabBarIsSevenPointsShorterWithAccessibleHitTargets() {
         XCTAssertEqual(
             ChekinanaBottomTabBarMetrics.previousMinimumHeight
@@ -3591,6 +6839,86 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 + ChekinanaBottomTabBarMetrics.bottomPadding,
             ChekinanaBottomTabBarMetrics.minimumHeight
         )
+    }
+
+    func testProductTabsUseScanIdolGalleryCalendarEventOrderEverywhere() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains(
+            "@State private var selectedTab: ChekinanaProductTab = .idols"
+        ))
+
+        func slice(_ start: String, _ end: String) throws -> Substring {
+            let startIndex = try XCTUnwrap(source.range(of: start)?.lowerBound)
+            let endIndex = try XCTUnwrap(source.range(
+                of: end,
+                range: startIndex..<source.endIndex
+            )?.lowerBound)
+            return source[startIndex..<endIndex]
+        }
+
+        func assertOrdered(
+            _ needles: [String],
+            in value: Substring,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) throws {
+            var lowerBound = value.startIndex
+            for needle in needles {
+                let match = try XCTUnwrap(
+                    value.range(of: needle, range: lowerBound..<value.endIndex),
+                    file: file,
+                    line: line
+                )
+                lowerBound = match.upperBound
+            }
+        }
+
+        try assertOrdered(
+            ["case scan", "case idols", "case gallery", "case calendar", "case events"],
+            in: slice(
+                "private enum ChekinanaProductTab",
+                "enum ChekinanaFeatureAvailability"
+            )
+        )
+        try assertOrdered(
+            [
+                ".tag(ChekinanaProductTab.scan)",
+                ".tag(ChekinanaProductTab.idols)",
+                ".tag(ChekinanaProductTab.gallery)",
+                ".tag(ChekinanaProductTab.calendar)",
+                ".tag(ChekinanaProductTab.events)",
+            ],
+            in: slice("private var productTabContent", "private func openDrawer")
+        )
+        try assertOrdered(
+            [
+                "tabButton(.scan",
+                "\n                .idols,",
+                "\n                .gallery,",
+                "\n                .calendar,",
+                "tabButton(.events",
+            ],
+            in: slice(
+                "private struct ChekinanaBottomTabBar",
+                "private struct ChekinanaSidebar"
+            )
+        )
+
+        let routing = try slice(
+            "private func applyShellAction",
+            "enum ChekinanaBottomTabBarMetrics"
+        )
+        for tab in ["scan", "idols", "gallery", "calendar", "events"] {
+            XCTAssertTrue(routing.contains("selectedTab = .\(tab)"), tab)
+        }
+        XCTAssertTrue(source.contains(
+            ".accessibilityIdentifier(\"chekinana.shell.tab.\\(tab.rawValue)\")"
+        ))
     }
 
     func testExecutorLocalizesVisibleEmptyCancelAndConfirmationResultsWithoutChangingSentinel() async throws {
@@ -3651,6 +6979,29 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
+    func testDeleteChekiCannotResolveOrDeleteNonChekiWithSameBusinessID() async throws {
+        let fixture = try makeFixture()
+        let sharedID = UUID()
+        let shame = MediaItem(
+            id: sharedID,
+            kind: .shame,
+            mediaRef: "shame-\(sharedID.uuidString.lowercased()).jpg"
+        )
+        fixture.context.insert(shame)
+        try fixture.context.save()
+
+        guard case .text(let response) = await fixture.executor.execute(
+            "deletecheki \(shortID(sharedID))"
+        ) else {
+            return XCTFail("A non-Cheki identity must not produce delete confirmation")
+        }
+        XCTAssertTrue(response.hasPrefix("error:"))
+        let remaining = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.first?.id, sharedID)
+        XCTAssertEqual(remaining.first?.kind, .shame)
+    }
+
     func testExecutorCatalogEnglishPreservesDynamicUserTextAndFormatsCounts() throws {
         let bundle = try localizedAppBundle(language: "en")
         let locale = Locale(identifier: "en")
@@ -3663,7 +7014,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 bundle: bundle,
                 locale: locale
             ),
-            "Prepared 2 chekis from the photo library"
+            "Prepared 2 Cheki from the photo library"
         )
         let note = "原样 note テスト"
         XCTAssertEqual(
@@ -3800,6 +7151,126 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertNil(malformed)
         XCTAssertNil(zeroDimension)
         XCTAssertNil(excessiveDimension)
+    }
+
+    func testFullSizeJPEGReencodingNormalizesAllExifOrientations() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chekinana-avatar-exif-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let expectedCornerLabels = [
+            [0, 1, 2, 3],
+            [1, 0, 3, 2],
+            [3, 2, 1, 0],
+            [2, 3, 0, 1],
+            [0, 2, 1, 3],
+            [2, 0, 3, 1],
+            [3, 1, 2, 0],
+            [1, 3, 0, 2],
+        ]
+
+        for orientation in 1...8 {
+            let input = scannerJPEGDataWithOrientation(
+                orientation,
+                size: CGSize(width: 48, height: 32)
+            )
+            let inputSource = try XCTUnwrap(CGImageSourceCreateWithData(
+                input as CFData,
+                nil
+            ))
+            let inputImage = try XCTUnwrap(
+                CGImageSourceCreateImageAtIndex(inputSource, 0, nil)
+            )
+            let stored = try await ChekinanaIdolReferenceStore.saveAvatar(
+                input,
+                idolID: UUID(),
+                directory: directory
+            )
+            let output = try Data(contentsOf: stored.url)
+            let source = try XCTUnwrap(CGImageSourceCreateWithData(
+                output as CFData,
+                nil
+            ))
+            let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            let swapsDimensions = (5...8).contains(orientation)
+            XCTAssertEqual(
+                image.width,
+                swapsDimensions ? inputImage.height : inputImage.width,
+                "EXIF \(orientation)"
+            )
+            XCTAssertEqual(
+                image.height,
+                swapsDimensions ? inputImage.width : inputImage.height,
+                "EXIF \(orientation)"
+            )
+            XCTAssertEqual(
+                try quadrantColorLabels(output),
+                expectedCornerLabels[orientation - 1],
+                "EXIF \(orientation) must transform each asymmetric corner exactly once"
+            )
+            XCTAssertEqual(
+                ChekinanaImageSourceValidator.effectiveExifOrientation(source: source),
+                1,
+                "EXIF \(orientation) output must be upright"
+            )
+        }
+    }
+
+    func testFullSizeOrientationCoreKeepsIdentityAndDoesNotTransformTwice() async throws {
+        let input = scannerJPEGDataWithOrientation(
+            7,
+            size: CGSize(width: 48, height: 32)
+        )
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(input as CFData, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let identity = try XCTUnwrap(ChekinanaImageWorker.normalizedImageOrientation(
+            decoded,
+            exifOrientation: 1
+        ))
+        XCTAssertTrue(identity === decoded, "EXIF 1 must not redraw or transform pixels")
+
+        let normalized = try XCTUnwrap(ChekinanaImageWorker.normalizedImageOrientation(
+            decoded,
+            exifOrientation: 7
+        ))
+        let normalizedAgain = try XCTUnwrap(
+            ChekinanaImageWorker.normalizedImageOrientation(
+                normalized,
+                exifOrientation: 1
+            )
+        )
+        XCTAssertTrue(
+            normalizedAgain === normalized,
+            "An already-upright image must not be rotated or mirrored again"
+        )
+
+        let firstResult = await ChekinanaImageWorker.reencodedJPEGData(from: input)
+        let firstJPEG = try XCTUnwrap(firstResult)
+        let secondResult = await ChekinanaImageWorker.reencodedJPEGData(from: firstJPEG)
+        let secondJPEG = try XCTUnwrap(secondResult)
+        XCTAssertEqual(try quadrantColorLabels(secondJPEG), try quadrantColorLabels(firstJPEG))
+        let secondSource = try XCTUnwrap(CGImageSourceCreateWithData(
+            secondJPEG as CFData,
+            nil
+        ))
+        XCTAssertEqual(
+            ChekinanaImageSourceValidator.effectiveExifOrientation(source: secondSource),
+            1
+        )
+    }
+
+    func testFullSizeJPEGReencodingDoesNotUseThumbnailDimensionLimit() async throws {
+        let width = ChekinanaImageSourceValidator.maximumThumbnailDimension + 2
+        let input = scannerJPEGData(
+            color: .purple,
+            size: CGSize(width: CGFloat(width), height: 4)
+        )
+        let reencoded = await ChekinanaImageWorker.reencodedJPEGData(from: input)
+        let output = try XCTUnwrap(reencoded)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(output as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+
+        XCTAssertEqual(image.width, width)
+        XCTAssertEqual(image.height, 4)
     }
 
     func testBoundedImageDownloaderReturnsValidImageAndRemovesTemporaryFile() async throws {
@@ -4076,7 +7547,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let defaultIdol = Idol(name: "Default")
         XCTAssertFalse(defaultIdol.isFavorite)
 
-        let schema = Schema([Idol.self, IdolPatternState.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, IdolPatternState.self, Event.self, EventImage.self, MediaItem.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4126,8 +7597,29 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testClearAllLocalDataDeletesRecordsAndManagedFilesButProtectsSibling() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+    func testThumbnailLoadIdentityChangesAfterManagedReferenceInvalidation() async {
+        let imageRef = "thumbnail-revision-\(UUID().uuidString.lowercased()).jpg"
+        let sourceKey = "gallery-card"
+        let before = ChekinanaThumbnailRevisionStore.shared.identity(
+            imageRef: imageRef,
+            sourceKey: sourceKey
+        )
+
+        await ChekinanaThumbnailCache.shared.invalidate(imageRef: imageRef)
+
+        let after = ChekinanaThumbnailRevisionStore.shared.identity(
+            imageRef: imageRef,
+            sourceKey: sourceKey
+        )
+        XCTAssertNotEqual(before, after)
+        XCTAssertEqual(after.imageReference, before.imageReference)
+        XCTAssertEqual(after.sourceKey, before.sourceKey)
+        XCTAssertEqual(after.revision, before.revision + 1)
+    }
+
+    @MainActor
+    func testClearAllLocalDataDeletesRecordsAndManagedFilesButProtectsSibling() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4135,10 +7627,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let context = ModelContext(container)
         let idol = Idol(name: "Clear me", isFavorite: true)
         let event = Event(name: "Clear event")
-        let cheki = Cheki(idols: [idol], event: event, date: Date(), idx: 1)
+        let cheki = MediaItem(idols: [idol], event: event, date: Date(), idx: 1, imageRef: "clear-cheki.jpg")
         let record = ChekiRecord(idols: [idol], event: event, date: Date())
-        let shame = Shame(idols: [idol], note: "clear image")
-        let douga = Douga(idols: [idol], note: "clear video")
+        let shame = MediaItem(imageRef: "clear-shame.jpg", idols: [idol], note: "clear image")
+        let douga = MediaItem(videoRef: "clear-douga.mov", idols: [idol], note: "clear video")
         let travel = TravelSegment(
             mode: .flight,
             operatorName: "Clear airline",
@@ -4161,11 +7653,6 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         context.insert(record)
         context.insert(shame)
         context.insert(douga)
-        context.insert(MediaShotType(
-            mediaID: shame.id,
-            kind: .shame,
-            userAppears: true
-        ))
         context.insert(travel)
         context.insert(IdolPatternState(
             idolID: idol.id,
@@ -4222,7 +7709,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             defaults: defaults
         )
 
-        let result = try ChekinanaLocalDataClearer.clear(
+        let result = try await ChekinanaLocalDataClearer.clear(
             modelContext: context,
             managedImagesDirectory: managed,
             defaults: defaults
@@ -4234,13 +7721,24 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             dougaCount: 1,
             eventCount: 1,
             idolCount: 1,
-            removedFileCount: 4
+            removedFileCount: 4,
+            deletedEntityCounts: .init(
+                idol: 1,
+                idolPatternState: 1,
+                event: 1,
+                eventSchedule: 1,
+                eventImage: 0,
+                calendarGroupOrder: 0,
+                travelSegment: 1,
+                mediaItem: 3,
+                chekiRecord: 1,
+                memory: 0,
+                memoryAttachment: 0,
+                customChekiSize: 0
+            )
         ))
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Cheki>()), 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MediaItem>()), 0)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<ChekiRecord>()), 0)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Shame>()), 0)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Douga>()), 0)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<MediaShotType>()), 0)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<Event>()), 0)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<EventSchedule>()), 0)
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<TravelSegment>()), 0)
@@ -4259,8 +7757,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sibling.path))
     }
 
-    func testClearAllLocalDataDeletesHiddenQuarantineButSkipsHiddenSymlinkAndDirectory() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+    @MainActor
+    func testClearAllLocalDataDeletesHiddenQuarantineButSkipsHiddenSymlinkAndDirectory() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4274,23 +7773,33 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         try FileManager.default.createDirectory(at: hiddenDirectory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let quarantine = managed.appendingPathComponent(".delete-test.quarantine")
+        let originalName = "shame-\(UUID().uuidString.lowercased()).jpg"
+        let quarantine = managed.appendingPathComponent(
+            ".delete-\(UUID().uuidString.lowercased())-\(originalName)"
+        )
+        let unknownHidden = managed.appendingPathComponent(".delete-test.quarantine")
         let outsideTarget = root.appendingPathComponent("outside-target.jpg")
         let hiddenSymlink = managed.appendingPathComponent(".hidden-link.jpg")
         let nestedFile = hiddenDirectory.appendingPathComponent("nested.jpg")
         try Data([0x01]).write(to: quarantine)
+        try Data([0x04]).write(to: unknownHidden)
         try Data([0x02]).write(to: outsideTarget)
         try Data([0x03]).write(to: nestedFile)
         try FileManager.default.createSymbolicLink(
             at: hiddenSymlink,
             withDestinationURL: outsideTarget
         )
+        context.insert(Idol(
+            name: "Outside reference",
+            avatarImageRef: outsideTarget.path
+        ))
+        try context.save()
 
         let suiteName = "ChekinanaClearHiddenTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let result = try ChekinanaLocalDataClearer.clear(
+        let result = try await ChekinanaLocalDataClearer.clear(
             modelContext: context,
             managedImagesDirectory: managed,
             defaults: defaults
@@ -4298,14 +7807,17 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         XCTAssertEqual(result.removedFileCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: quarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unknownHidden.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: hiddenSymlink.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: hiddenDirectory.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: nestedFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: outsideTarget.path))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 0)
     }
 
-    func testClearAllLocalDataDatabaseFailurePreservesFiles() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+    @MainActor
+    func testClearAllLocalDataDatabaseFailurePreservesFiles() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4325,20 +7837,29 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        XCTAssertThrowsError(try ChekinanaLocalDataClearer.clear(
-            modelContext: context,
-            managedImagesDirectory: directory,
-            defaults: defaults,
-            saveContext: { _ in throw NSError(domain: "test.database", code: 1) }
-        )) { error in
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory,
+                defaults: defaults,
+                saveContext: { _ in
+                    throw NSError(domain: "test.database", code: 1)
+                }
+            )
+            XCTFail("Expected the database save to fail")
+        } catch {
             XCTAssertTrue(error.localizedDescription.contains("No data was cleared"))
         }
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
     }
 
-    func testClearAllLocalDataFileFailureKeepsClearedDatabase() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+    @MainActor
+    func testClearAllLocalDataFileFailureKeepsClearedDatabase() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4354,7 +7875,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let orphanID = UUID()
         let orphanReference = "shame-\(orphanID.uuidString.lowercased()).png"
         let file = directory.appendingPathComponent(orphanReference)
+        let removableFile = directory.appendingPathComponent("unowned-removable.jpg")
         try Data([0x01]).write(to: file)
+        try Data([0x02]).write(to: removableFile)
         let suiteName = "ChekinanaClearPartialTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -4365,16 +7888,25 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             defaults: defaults
         )
 
-        XCTAssertThrowsError(try ChekinanaLocalDataClearer.clear(
-            modelContext: context,
-            managedImagesDirectory: directory,
-            defaults: defaults,
-            removeFile: { _ in throw NSError(domain: "test.files", code: 2) }
-        )) { error in
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory,
+                defaults: defaults,
+                removeFile: { url in
+                    if url.lastPathComponent == orphanReference {
+                        throw NSError(domain: "test.files", code: 2)
+                    }
+                    try FileManager.default.removeItem(at: url)
+                }
+            )
+            XCTFail("Expected managed file cleanup to remain queued")
+        } catch {
             XCTAssertTrue(error.localizedDescription.contains("All local records were cleared"))
         }
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: removableFile.path))
         XCTAssertEqual(
             ChekinanaGalleryMediaStore.pendingRestoreRecoveryCount(defaults: defaults),
             0
@@ -4383,10 +7915,713 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ChekinanaGalleryMediaStore.pendingOrphanCleanupCount(defaults: defaults),
             1
         )
+
+        let recovery = await ChekinanaLocalDataClearer.recoverUnfinishedClear(
+            modelContext: ModelContext(container),
+            managedImagesDirectory: directory,
+            defaults: defaults
+        )
+        XCTAssertTrue(recovery.foundIntent)
+        XCTAssertTrue(recovery.databaseCommitted)
+        XCTAssertFalse(recovery.needsRetry)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+    }
+
+    @MainActor
+    func testClearAllLocalDataResumesWhenInterruptedAfterDatabaseCommit() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        context.insert(Memory(title: "Committed before interruption"))
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-post-commit-interruption-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("resume-after-launch.jpg")
+        try Data("resume".utf8).write(to: file)
+
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory,
+                afterDatabaseCommit: {
+                    throw NSError(domain: "test.interruption", code: 1)
+                }
+            )
+            XCTFail("Expected the injected post-commit interruption")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains(
+                "All local records were cleared"
+            ))
+        }
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Memory>()), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+
+        let recovery = await ChekinanaLocalDataClearer.recoverUnfinishedClear(
+            modelContext: ModelContext(container),
+            managedImagesDirectory: directory
+        )
+        XCTAssertTrue(recovery.foundIntent)
+        XCTAssertTrue(recovery.databaseCommitted)
+        XCTAssertFalse(recovery.needsRetry)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+    }
+
+    @MainActor
+    func testClearAllRecoveryDiscardsPrecommitIntentWithoutDeleting() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        context.insert(Idol(name: "Old generation remains current"))
+        try context.save()
+        let oldGeneration = try ChekinanaLibraryGenerationStore.ensureCurrent(
+            in: context
+        )
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-precommit-recovery-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("old-generation-file.jpg")
+        try Data("old generation".utf8).write(to: file)
+        let journal = ChekinanaLocalDataClearJournal(
+            formatVersion: 1,
+            operationID: UUID(),
+            oldGeneration: oldGeneration,
+            newGeneration: UUID(),
+            files: [.init(
+                filename: file.lastPathComponent,
+                identity: try ChekinanaImportFileIdentity.inspect(file)
+            )],
+            protectedFilenames: []
+        )
+        try ChekinanaLocalDataClearJournalStore.persist(
+            journal,
+            in: directory
+        )
+
+        let recovery = await ChekinanaLocalDataClearer.recoverUnfinishedClear(
+            modelContext: ModelContext(container),
+            managedImagesDirectory: directory
+        )
+
+        XCTAssertTrue(recovery.foundIntent)
+        XCTAssertFalse(recovery.databaseCommitted)
+        XCTAssertFalse(recovery.needsRetry)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+    }
+
+    @MainActor
+    func testClearAllLocalDataDeletesAllTwelveEntityTypesAndEverySafeFileClass() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-v16-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let directory = root.appendingPathComponent("ChekiImages", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaClearV16Tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let idol = Idol(
+            name: "All entities",
+            avatarImageRef: "idol-avatar-\(UUID().uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        )
+        let event = Event(
+            name: "All entities",
+            avatarImageRef: "event-avatar-\(UUID().uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        )
+        let eventImage = EventImage(
+            eventID: event.id,
+            imageRef: "event-image-\(event.id.uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg",
+            sortOrder: 0
+        )
+        let travel = TravelSegment(
+            mode: .train,
+            operatorIconRef: "backup-travel-\(UUID().uuidString.lowercased()).jpg",
+            serviceNumber: "T1",
+            departureCity: "A",
+            departureLocation: "A1",
+            arrivalCity: "B",
+            arrivalLocation: "B1",
+            departureTime: Date(timeIntervalSince1970: 1_800_000_000),
+            arrivalTime: Date(timeIntervalSince1970: 1_800_003_600)
+        )
+        let chekiOwner = UUID()
+        let shameOwner = UUID()
+        let videoOwner = UUID()
+        let cheki = MediaItem(
+            mediaOwnerID: chekiOwner,
+            kind: .cheki,
+            idols: [idol],
+            event: event,
+            mediaRef: "\(chekiOwner.uuidString.lowercased()).jpg"
+        )
+        let shame = MediaItem(
+            mediaOwnerID: shameOwner,
+            kind: .shame,
+            idols: [idol],
+            mediaRef: "shame-\(shameOwner.uuidString.lowercased()).jpg"
+        )
+        let douga = MediaItem(
+            mediaOwnerID: videoOwner,
+            kind: .douga,
+            idols: [idol],
+            mediaRef: "douga-\(videoOwner.uuidString.lowercased()).mov"
+        )
+        let record = ChekiRecord(idols: [idol], event: event, count: 2)
+        let memory = Memory(title: "Clear memory", idolIDs: [idol.id])
+        let imageAttachmentID = UUID()
+        let videoAttachmentID = UUID()
+        let imageAttachment = MemoryAttachment(
+            id: imageAttachmentID,
+            memoryID: memory.id,
+            kind: .image,
+            managedRef: "shame-\(imageAttachmentID.uuidString.lowercased()).jpg",
+            sortOrder: 0
+        )
+        let videoAttachment = MemoryAttachment(
+            id: videoAttachmentID,
+            memoryID: memory.id,
+            kind: .video,
+            managedRef: "douga-\(videoAttachmentID.uuidString.lowercased()).mov",
+            sortOrder: 1
+        )
+        let customSize = CustomChekiSize(
+            name: "Clear size",
+            widthRatio: 2,
+            heightRatio: 3
+        )
+        context.insert(idol)
+        context.insert(IdolPatternState(
+            idolID: idol.id,
+            encoderVersion: ChekinanaPatternContract.encoderVersion
+        ))
+        context.insert(event)
+        context.insert(EventSchedule(eventID: event.id, openTime: "12:00"))
+        context.insert(eventImage)
+        context.insert(CalendarGroupOrder(
+            dateKey: "2026-09-06",
+            groupKey: idol.id.uuidString.lowercased(),
+            sortOrder: 0
+        ))
+        context.insert(travel)
+        context.insert(cheki)
+        context.insert(shame)
+        context.insert(douga)
+        context.insert(record)
+        context.insert(memory)
+        context.insert(imageAttachment)
+        context.insert(videoAttachment)
+        context.insert(customSize)
+        try context.save()
+
+        var filenames = Set([
+            try XCTUnwrap(idol.avatarImageRef),
+            try XCTUnwrap(event.avatarImageRef),
+            eventImage.imageRef,
+            try XCTUnwrap(travel.operatorIconRef),
+            cheki.mediaRef,
+            shame.mediaRef,
+            douga.mediaRef,
+            imageAttachment.managedRef,
+            videoAttachment.managedRef,
+            ChekinanaGalleryMediaStore.thumbnailURL(
+                id: videoOwner,
+                directory: directory
+            ).lastPathComponent,
+            ChekinanaGalleryMediaStore.thumbnailURL(
+                id: videoAttachmentID,
+                directory: directory
+            ).lastPathComponent,
+            "unowned-ordinary-file.jpg",
+        ])
+        for (index, filename) in filenames.sorted().enumerated() {
+            try Data("owned-\(index)".utf8).write(
+                to: directory.appendingPathComponent(filename)
+            )
+        }
+        ChekinanaEventMediaJournal.recordPending(
+            eventImage.imageRef,
+            defaults: defaults
+        )
+
+        let registeredID = UUID()
+        let registeredOriginal = "shame-\(registeredID.uuidString.lowercased()).jpg"
+        let registeredURL = directory.appendingPathComponent(registeredOriginal)
+        try Data("registered quarantine".utf8).write(to: registeredURL)
+        let registeredStage = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .shame,
+            id: registeredID,
+            reference: registeredOriginal,
+            directory: directory
+        )
+        ChekinanaGalleryMediaStore.recordRestoreRecovery(
+            registeredStage,
+            directory: directory,
+            defaults: defaults
+        )
+        filenames.insert(registeredStage[0].quarantine.lastPathComponent)
+
+        let unregisteredOriginal = "shame-\(UUID().uuidString.lowercased()).jpg"
+        let unregisteredQuarantine =
+            ".delete-\(UUID().uuidString.lowercased())-\(unregisteredOriginal)"
+        try Data("unregistered quarantine".utf8).write(
+            to: directory.appendingPathComponent(unregisteredQuarantine)
+        )
+        filenames.insert(unregisteredQuarantine)
+
+        let result = try await ChekinanaLocalDataClearer.clear(
+            modelContext: context,
+            managedImagesDirectory: directory,
+            defaults: defaults
+        )
+
+        XCTAssertEqual(result.removedFileCount, filenames.count)
+        XCTAssertEqual(result.deletedEntityCounts, .init(
+            idol: 1,
+            idolPatternState: 1,
+            event: 1,
+            eventSchedule: 1,
+            eventImage: 1,
+            calendarGroupOrder: 1,
+            travelSegment: 1,
+            mediaItem: 3,
+            chekiRecord: 1,
+            memory: 1,
+            memoryAttachment: 2,
+            customChekiSize: 1
+        ))
+        for filename in filenames {
+            XCTAssertFalse(FileManager.default.fileExists(atPath:
+                directory.appendingPathComponent(filename).path
+            ))
+        }
+        let persisted = ModelContext(container)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<Idol>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<IdolPatternState>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<Event>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<EventSchedule>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<EventImage>()), 0)
+        XCTAssertTrue(try persisted.fetch(FetchDescriptor<CalendarGroupOrder>())
+            .filter { !ChekinanaLibraryGenerationStore.isMarker($0) }.isEmpty)
+        XCTAssertNotNil(try ChekinanaLibraryGenerationStore.current(in: persisted))
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<TravelSegment>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<MediaItem>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<ChekiRecord>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<Memory>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<MemoryAttachment>()), 0)
+        XCTAssertEqual(try persisted.fetchCount(FetchDescriptor<CustomChekiSize>()), 0)
+        XCTAssertTrue(ChekinanaEventMediaJournal.pendingRefs(defaults: defaults).isEmpty)
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.pendingRestoreRecoveryCount(defaults: defaults),
+            0
+        )
+
+        let emptySnapshot = try ChekinanaDataExportSnapshot.capture(in: persisted)
+        XCTAssertEqual(emptySnapshot.entityCounts.count, 12)
+        XCTAssertTrue(emptySnapshot.entityCounts.values.allSatisfy { $0 == 0 })
+        let emptyArchive = try await ChekinanaDataExporter.archiveURL(
+            for: emptySnapshot
+        )
+        defer { ChekinanaExportTemporaryFiles.cleanupArchive(at: emptyArchive) }
+        let preparedEmpty = try await ChekinanaDataImporter.prepare(
+            from: emptyArchive
+        )
+        defer { ChekinanaDataImportTemporaryFiles.cleanup(preparedEmpty) }
+        XCTAssertEqual(preparedEmpty.payload.entities.counts.count, 12)
+        XCTAssertTrue(
+            preparedEmpty.payload.entities.counts.values.allSatisfy { $0 == 0 }
+        )
+        let restoredContainer = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let restored = ModelContext(restoredContainer)
+        restored.insert(Idol(name: "Replaced by empty backup"))
+        try restored.save()
+        try await ChekinanaDataImporter.replaceLocalLibrary(
+            with: preparedEmpty,
+            in: restored
+        )
+        XCTAssertEqual(try restored.fetchCount(FetchDescriptor<Idol>()), 0)
+        XCTAssertEqual(try restored.fetchCount(FetchDescriptor<Memory>()), 0)
+        XCTAssertEqual(
+            try restored.fetchCount(FetchDescriptor<MemoryAttachment>()),
+            0
+        )
+    }
+
+    @MainActor
+    func testClearAllLocalDataDirectoryEnumerationFailureDoesNotCommitDatabase() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        context.insert(Idol(name: "Keep when enumeration fails"))
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-enumeration-failure-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("keep.jpg")
+        try Data("keep".utf8).write(to: file)
+
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory,
+                contentsOfDirectory: { _, _, _ in
+                    throw NSError(domain: "test.enumeration", code: 1)
+                }
+            )
+            XCTFail("Expected enumeration to fail before the DB commit")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("No data was cleared"))
+        }
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+    }
+
+    func testImportInitializationPublishesOnlyAReadableJournalAndRecoversEveryCheckpoint() throws {
+        for checkpoint in ChekinanaImportTransactionHandle.InitializationCheckpoint.allCases {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "import-initialization-\(UUID().uuidString)", isDirectory: true
+            )
+            let directory = root.appendingPathComponent("media", isDirectory: true)
+            let restart = root.appendingPathComponent("restart-media", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+            let container = try ModelContainer(for: schema, configurations: [
+                ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+            ])
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            context.insert(Idol(name: "Preserved during initialization"))
+            try context.save()
+            let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+            let original = directory.appendingPathComponent("original.png")
+            let bytes = Data([17, 23])
+            try bytes.write(to: original)
+            XCTAssertThrowsError(try ChekinanaImportTransactionHandle.create(
+                in: directory, oldGeneration: generation, newGeneration: UUID(),
+                language: .english, theme: .purple, hiddenIdolIDs: [], preexistingFiles: [original],
+                initializationCheckpoint: { reached, _ in
+                    let discovered = try ChekinanaImportTransactionHandle.discover(in: directory)
+                    XCTAssertEqual(discovered.count, reached == .published ? 1 : 0)
+                    for handle in discovered { _ = try handle.load() }
+                    guard reached == checkpoint else { return }
+                    try FileManager.default.copyItem(at: directory, to: restart)
+                    throw NSError(domain: "SyntheticInitializationStop", code: 1)
+                }
+            ))
+            let cleanup = ChekinanaImportTransactionHandle.retireUnpublishedInitializations(in: restart)
+            XCTAssertEqual(cleanup.retained, 0)
+            for handle in try ChekinanaImportTransactionHandle.discover(in: restart) {
+                XCTAssertEqual(try handle.recover(currentGeneration: generation), .restoreOld)
+            }
+            XCTAssertTrue(try ChekinanaImportTransactionHandle.discover(in: restart).isEmpty)
+            XCTAssertEqual(try Data(contentsOf: restart.appendingPathComponent("original.png")), bytes)
+            let fresh = ModelContext(container)
+            XCTAssertEqual(try ChekinanaLibraryGenerationStore.current(in: fresh), generation)
+            XCTAssertEqual(try fresh.fetchCount(FetchDescriptor<Idol>()), 1)
+        }
+    }
+
+    func testImportInitializationMkdirJournalAndPublicationFailuresKeepSourceBytes() throws {
+        for failedStep in 0..<5 {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "import-create-failure-\(UUID().uuidString)", isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let original = directory.appendingPathComponent("original.png")
+            let bytes = Data([31, 47])
+            try bytes.write(to: original)
+            var mkdirCount = 0
+            XCTAssertThrowsError(try ChekinanaImportTransactionHandle.create(
+                in: directory, oldGeneration: UUID(), newGeneration: UUID(),
+                language: .english, theme: .purple, hiddenIdolIDs: [], preexistingFiles: [original],
+                createDirectory: { url in
+                    defer { mkdirCount += 1 }
+                    if failedStep == mkdirCount { throw NSError(domain: "SyntheticMkdirFailure", code: 1) }
+                    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+                },
+                initializationCheckpoint: { step, root in
+                    if failedStep == 3 && step == .beforeJournalWrite {
+                        try FileManager.default.createDirectory(
+                            at: root.appendingPathComponent("journal.json"), withIntermediateDirectories: false
+                        )
+                    }
+                },
+                publishDirectory: { from, to in
+                    if failedStep == 4 { throw NSError(domain: "SyntheticPublishFailure", code: 1) }
+                    try FileManager.default.moveItem(at: from, to: to)
+                }
+            ))
+            _ = ChekinanaImportTransactionHandle.retireUnpublishedInitializations(in: directory)
+            XCTAssertTrue(try ChekinanaImportTransactionHandle.discover(in: directory).isEmpty)
+            XCTAssertEqual(try Data(contentsOf: original), bytes)
+        }
+    }
+
+    func testJournalFreeImportRetirementProtectsUnknownNonemptyAndSymbolicLinkTrees() throws {
+        for kind in ["empty", "unknown", "rollback-byte", "symlink", "enumeration-failure", "late-byte"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "import-empty-retirement-\(UUID().uuidString)", isDirectory: true
+            )
+            let root = directory.appendingPathComponent(
+                ChekinanaImportTransactionHandle.directoryPrefix + UUID().uuidString.lowercased(),
+                isDirectory: true
+            )
+            let rollback = root.appendingPathComponent("rollback", isDirectory: true)
+            try FileManager.default.createDirectory(at: rollback, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let source = directory.appendingPathComponent("source.dat")
+            try Data([53]).write(to: source)
+            if kind == "unknown" { try Data([59]).write(to: root.appendingPathComponent("unknown.dat")) }
+            if kind == "rollback-byte" { try Data([61]).write(to: rollback.appendingPathComponent("only-copy.dat")) }
+            if kind == "symlink" {
+                try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("scratch"), withDestinationURL: directory)
+            }
+            let handle = ChekinanaImportTransactionHandle(managedDirectory: directory, rootDirectory: root)
+            let operation = {
+                try handle.retireUnjournalledEmptyRoot(listDirectory: { url in
+                    if kind == "enumeration-failure" { throw NSError(domain: "SyntheticEnumerationFailure", code: 1) }
+                    let entries = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+                    if kind == "late-byte" && url == rollback {
+                        try Data([67]).write(to: rollback.appendingPathComponent("late.dat"))
+                    }
+                    return entries
+                })
+            }
+            if kind == "empty" {
+                XCTAssertTrue(try operation())
+                XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+            } else {
+                XCTAssertThrowsError(try operation())
+                XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+            }
+            XCTAssertEqual(try Data(contentsOf: source), Data([53]))
+        }
+    }
+
+    func testDurableChekiDeletionRecoversBothDatabaseWitnessesAfterFileFailure() throws {
+        for databaseCommitted in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "durable-cheki-delete-\(UUID().uuidString)", isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+            let container = try ModelContainer(for: schema, configurations: [
+                ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+            ])
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            let id = UUID(), owner = UUID()
+            let reference = owner.uuidString.lowercased() + ".png"
+            let original = directory.appendingPathComponent(reference)
+            let bytes = Data([1, 2, 3])
+            try bytes.write(to: original)
+            let item = MediaItem(id: id, mediaOwnerID: owner, kind: .cheki, size: .mini, mediaRef: reference)
+            context.insert(item)
+            try context.save()
+            let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+            var recordedIntent = false
+            XCTAssertThrowsError(try ChekinanaChekiDeletionCoordinator.delete(
+                chekiID: id, expectedUpdatedAt: item.updatedAt, in: context, directory: directory,
+                saveContext: { context in
+                    if databaseCommitted { try context.save() }
+                    throw NSError(domain: "SyntheticDeleteSaveFailure", code: 1)
+                },
+                moveItem: { from, to in
+                    XCTAssertTrue(recordedIntent)
+                    if !databaseCommitted && from.lastPathComponent.hasPrefix(".delete-") {
+                        throw NSError(domain: "SyntheticRestoreFailure", code: 1)
+                    }
+                    try FileManager.default.moveItem(at: from, to: to)
+                },
+                removeItem: { _ in throw NSError(domain: "SyntheticUnlinkFailure", code: 1) },
+                journalPersisted: { journal in
+                    XCTAssertEqual(journal.recordBefore.id, id)
+                    XCTAssertEqual(journal.recordBefore.mediaOwnerID, owner)
+                    XCTAssertEqual(journal.identity, ChekinanaImportFileIdentity(bytes))
+                    XCTAssertEqual(try ChekinanaChekiDeletionJournalStore.discover(in: directory), [journal])
+                    recordedIntent = true
+                }
+            ))
+            if !databaseCommitted { XCTAssertFalse(context.hasChanges) }
+            for _ in 0..<2 {
+                let fresh = ModelContext(container)
+                _ = try ChekinanaChekiDeletionRecovery.recoverUnfinishedDeletion(in: fresh, directory: directory)
+                XCTAssertEqual(try fresh.fetchCount(FetchDescriptor<MediaItem>()), databaseCommitted ? 0 : 1)
+                XCTAssertEqual(try ChekinanaLibraryGenerationStore.current(in: fresh), generation)
+                XCTAssertTrue(try ChekinanaChekiDeletionJournalStore.discover(in: directory).isEmpty)
+                if databaseCommitted {
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+                } else {
+                    XCTAssertEqual(try Data(contentsOf: original), bytes)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testClearAllLocalDataProtectsIndeterminateImportRollback() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        context.insert(Idol(name: "Keep during import recovery"))
+        try context.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-import-protection-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("only-copy.jpg")
+        try Data("only rollback copy".utf8).write(to: original)
+        let transaction = try ChekinanaImportTransactionHandle.create(
+            in: directory,
+            oldGeneration: generation,
+            newGeneration: UUID(),
+            language: .english,
+            theme: .purple,
+            hiddenIdolIDs: [],
+            preexistingFiles: [original]
+        )
+        try transaction.stageOldFiles()
+        let journal = try transaction.load()
+        let rollback = transaction.rollbackDirectory.appendingPathComponent(
+            try XCTUnwrap(journal.oldFiles.first?.rollbackName)
+        )
+        // A recoverable import now converges before an explicitly requested
+        // clear. An unknown generation must still protect its unique bytes.
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: context)
+        try context.save()
+
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory
+            )
+            XCTFail("Expected unfinished import recovery to block clear")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("No data was cleared"))
+        }
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rollback.path))
+        XCTAssertEqual(try Data(contentsOf: rollback), Data("only rollback copy".utf8))
+    }
+
+    @MainActor
+    func testClearAllLocalDataPreservesChangedIdentityAndConverges() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        context.insert(Idol(name: "Clear despite changed file"))
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-clear-identity-conflict-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("changed.jpg")
+        try Data("old bytes".utf8).write(to: file)
+        let replacement = Data("new bytes that must survive".utf8)
+        var didReplace = false
+        var replacementError: Error?
+
+        let result = try await ChekinanaLocalDataClearer.clear(
+            modelContext: context,
+            managedImagesDirectory: directory,
+            beforeCandidateValidation: {
+                guard !didReplace else { return }
+                didReplace = true
+                do {
+                    try replacement.write(to: file, options: [.atomic])
+                } catch {
+                    replacementError = error
+                }
+            }
+        )
+
+        XCTAssertNil(replacementError)
+        XCTAssertEqual(result.removedFileCount, 0)
+        XCTAssertEqual(try Data(contentsOf: file), replacement)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
     }
 
     func testShameAndDougaRoundTripAndUnifiedGalleryOrderingSearch() throws {
-        let schema = Schema([Idol.self, IdolPatternState.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -4396,17 +8631,28 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let event = Event(name: "Summer Live")
         let older = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-02"))
         let newer = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-03"))
-        let cheki = Cheki(idols: [idol], event: event, date: older, isFavorite: true)
-        let shame = Shame(
-            imageRef: "shame.jpg",
+        let cheki = MediaItem(
+            kind: .cheki,
+            idols: [idol],
+            event: event,
+            date: older,
+            mediaRef: "cheki.jpg",
+            isFavorite: true
+        )
+        let shame = MediaItem(
+            kind: .shame,
             idols: [idol],
             date: newer,
+            userAppears: true,
+            mediaRef: "shame.jpg",
+            isFavorite: true,
+            hasPostedToSNS: true,
             note: "phone photo"
         )
-        let douga = Douga(
-            videoRef: "douga.mov",
+        let douga = MediaItem(
+            kind: .douga,
             idols: [idol],
-            date: nil,
+            mediaRef: "douga.mov",
             note: "encore video"
         )
         context.insert(idol)
@@ -4416,22 +8662,26 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         context.insert(douga)
         try context.save()
 
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Shame>()), 1)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Douga>()), 1)
+        let saved = try context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(saved.filter { $0.kind == .shame }.count, 1)
+        XCTAssertEqual(saved.filter { $0.kind == .douga }.count, 1)
         let ordered = ChekinanaGalleryItem.ordered([
             .douga(douga),
             .cheki(cheki),
             .shame(shame),
         ])
-        XCTAssertEqual(ordered.map(\.modelID), [shame.id, cheki.id, douga.id])
+        XCTAssertEqual(ordered.map(\.modelID), [cheki.id, shame.id, douga.id])
         XCTAssertTrue(ChekinanaGalleryItem.shame(shame).matches(query: "Airi"))
         XCTAssertFalse(ChekinanaGalleryItem.shame(shame).matches(query: "Summer"))
         XCTAssertTrue(ChekinanaGalleryItem.shame(shame).matches(query: "2026-08-03"))
         XCTAssertTrue(ChekinanaGalleryItem.douga(douga).matches(query: "encore"))
-        XCTAssertTrue(ChekinanaGalleryItem.douga(douga).matches(query: "Douga"))
+        XCTAssertTrue(ChekinanaGalleryItem.douga(douga).matches(query: "encore"))
         XCTAssertTrue(ChekinanaGalleryItem.cheki(cheki).isFavoriteCheki)
-        XCTAssertFalse(ChekinanaGalleryItem.shame(shame).isFavoriteCheki)
+        XCTAssertTrue(ChekinanaGalleryItem.shame(shame).isFavoriteCheki)
         XCTAssertFalse(ChekinanaGalleryItem.douga(douga).isFavoriteCheki)
+        XCTAssertEqual(ChekinanaGalleryItem.shame(shame).chekiUserAppears, true)
+        XCTAssertEqual(ChekinanaGalleryItem.douga(douga).chekiUserAppears, false)
+        XCTAssertTrue(shame.hasPostedToSNS)
     }
 
     func testLegacyMediaRelationshipsMigrateToExplicitManyToManySchema() throws {
@@ -4640,7 +8890,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         legacyContainer = nil
 
-        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func currentContainer() throws -> ModelContainer {
             try ModelContainer(
                 for: currentSchema,
@@ -4717,7 +8967,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             XCTAssertEqual(eventImage.imageRef, "legacy-event-image.jpg")
             XCTAssertEqual(eventImage.sortOrder, 7)
 
-            let cheki = try XCTUnwrap(context.fetch(FetchDescriptor<Cheki>()).first)
+            let cheki = try XCTUnwrap(
+                context.fetch(FetchDescriptor<MediaItem>()).first { $0.kind == .cheki }
+            )
             XCTAssertEqual(cheki.id, chekiID)
             XCTAssertEqual(Set(cheki.idols.map(\.id)), [firstIdolID])
             XCTAssertEqual(cheki.event?.id, eventID)
@@ -4731,10 +8983,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             XCTAssertEqual(cheki.note, "legacy cheki")
             XCTAssertEqual(cheki.createdAt, chekiCreatedAt)
             XCTAssertEqual(cheki.updatedAt, chekiUpdatedAt)
-            XCTAssertEqual(Set(event.chekis.map(\.id)), [chekiID])
+            XCTAssertEqual(cheki.eventID, eventID)
+            XCTAssertEqual(cheki.mediaOwnerID, chekiID)
 
-            let migratedShames = try context.fetch(FetchDescriptor<Shame>())
-            let migratedDougas = try context.fetch(FetchDescriptor<Douga>())
+            let migratedShames = try context.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .shame }
+            let migratedDougas = try context.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .douga }
             XCTAssertEqual(Set(migratedShames.map(\.id)), Set(legacyShameIDs))
             XCTAssertEqual(Set(migratedDougas.map(\.id)), Set(legacyDougaIDs))
             for record in migratedShames {
@@ -4751,7 +9006,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             }
 
             for (index, id) in newShameIDs.enumerated() {
-                let record = Shame(
+                let record = MediaItem(
                     id: id,
                     imageRef: "new-shame-\(index).jpg",
                     date: mediaDate,
@@ -4761,7 +9016,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 record.idols = index == 2 ? [firstIdol, secondIdol] : [firstIdol]
             }
             for (index, id) in newDougaIDs.enumerated() {
-                let record = Douga(
+                let record = MediaItem(
                     id: id,
                     videoRef: "new-douga-\(index).mov",
                     date: mediaDate,
@@ -4777,8 +9032,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         migratedContainer = try currentContainer()
         do {
             let context = ModelContext(try XCTUnwrap(migratedContainer))
-            let shames = try context.fetch(FetchDescriptor<Shame>())
-            let dougas = try context.fetch(FetchDescriptor<Douga>())
+            let shames = try context.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .shame }
+            let dougas = try context.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .douga }
             XCTAssertTrue(newShameIDs.allSatisfy { id in
                 shames.first(where: { $0.id == id })?.idols.contains(where: {
                     $0.id == firstIdolID
@@ -4800,8 +9057,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             let firstIdol = try XCTUnwrap(
                 context.fetch(FetchDescriptor<Idol>()).first { $0.id == firstIdolID }
             )
-            XCTAssertTrue(Set(newShameIDs).isSubset(of: Set(firstIdol.shames.map(\.id))))
-            XCTAssertTrue(Set(newDougaIDs).isSubset(of: Set(firstIdol.dougas.map(\.id))))
+            XCTAssertTrue(Set(newShameIDs).isSubset(of: Set(
+                shames.filter { $0.idolIDs.contains(firstIdol.id) }.map(\.id)
+            )))
+            XCTAssertTrue(Set(newDougaIDs).isSubset(of: Set(
+                dougas.filter { $0.idolIDs.contains(firstIdol.id) }.map(\.id)
+            )))
             context.delete(firstIdol)
             try context.save()
         }
@@ -4809,19 +9070,23 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         let deleteCheckContainer = try currentContainer()
         let deleteContext = ModelContext(deleteCheckContainer)
-        for record in try deleteContext.fetch(FetchDescriptor<Shame>()) {
+        for record in try deleteContext.fetch(FetchDescriptor<MediaItem>())
+            .filter({ $0.kind == .shame }) {
             XCTAssertFalse(record.idols.contains { $0.id == firstIdolID })
         }
-        for record in try deleteContext.fetch(FetchDescriptor<Douga>()) {
+        for record in try deleteContext.fetch(FetchDescriptor<MediaItem>())
+            .filter({ $0.kind == .douga }) {
             XCTAssertFalse(record.idols.contains { $0.id == firstIdolID })
         }
         XCTAssertEqual(
-            Set(try deleteContext.fetch(FetchDescriptor<Shame>())
+            Set(try deleteContext.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .shame }
                 .first(where: { $0.id == newShameIDs[2] })?.idols.map(\.id) ?? []),
             [secondIdolID]
         )
         XCTAssertEqual(
-            Set(try deleteContext.fetch(FetchDescriptor<Douga>())
+            Set(try deleteContext.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .douga }
                 .first(where: { $0.id == newDougaIDs[2] })?.idols.map(\.id) ?? []),
             [secondIdolID]
         )
@@ -4849,7 +9114,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v7Container))
-            context.insert(Event(id: eventID, name: "Preserved V7 Event"))
+            context.insert(ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "Preserved V7 Event"
+            ))
             try context.save()
         }
         v7Container = nil
@@ -4866,7 +9134,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         let context = ModelContext(v10Container)
         XCTAssertEqual(
-            try context.fetch(FetchDescriptor<Event>()).first?.id,
+            try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Event>()
+            ).first?.id,
             eventID
         )
         XCTAssertTrue(try context.fetch(FetchDescriptor<EventSchedule>()).isEmpty)
@@ -4874,12 +9144,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(try context.fetch(FetchDescriptor<CalendarGroupOrder>()).isEmpty)
     }
 
-    func testPhysicalV7UsesAutomaticMigrationWhenMarkerStillSaysV6() throws {
+    func testPhysicalV7UsesStagedMigrationWhenMarkerStillSaysV6() throws {
         struct Marker: Codable {
             let schemaVersion: Int
             let directoryName: String
         }
-        enum UnexpectedStagedMigration: Error { case invoked }
+        enum UnexpectedAutomaticMigration: Error { case invoked }
 
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(
@@ -4915,7 +9185,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )]
         )
         let v7Context = ModelContext(try XCTUnwrap(v7Container))
-        v7Context.insert(Event(id: eventID, name: "Marker mismatch"))
+        v7Context.insert(ChekinanaLegacyMediaSchema.Event(
+            id: eventID,
+            name: "Marker mismatch"
+        ))
         try v7Context.save()
         v7Container = nil
         try JSONEncoder().encode(Marker(
@@ -4923,26 +9196,25 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             directoryName: directoryName
         )).write(to: paths.activeMarkerURL, options: .atomic)
 
-        let v10Schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let v14Schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let result = ChekinanaDataStore.openPreservingStoreFamily(
             paths: paths,
             inspectStoreVersion: ChekinanaDataStore.physicalStoreVersion,
-            makeAutomaticContainer: { url in
-                try ModelContainer(
-                    for: v10Schema,
-                    configurations: [ModelConfiguration(
-                        "MarkerMismatch",
-                        schema: v10Schema,
-                        url: url,
-                        cloudKitDatabase: .none
-                    )]
-                )
-            }
-        ) { _ in
-            throw UnexpectedStagedMigration.invoked
+            makeAutomaticContainer: { _ in throw UnexpectedAutomaticMigration.invoked }
+        ) { url in
+            try ModelContainer(
+                for: v14Schema,
+                migrationPlan: ChekinanaSchemaMigrationPlan.self,
+                configurations: [ModelConfiguration(
+                    "MarkerMismatch",
+                    schema: v14Schema,
+                    url: url,
+                    cloudKitDatabase: .none
+                )]
+            )
         }
         guard case .success(let container) = result else {
-            return XCTFail("The supported physical V7 store must select automatic migration.")
+            return XCTFail("The supported physical V7 store must select staged migration.")
         }
         XCTAssertEqual(
             try ModelContext(container).fetch(FetchDescriptor<Event>()).first?.id,
@@ -4953,7 +9225,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 Marker.self,
                 from: Data(contentsOf: paths.activeMarkerURL)
             ).schemaVersion,
-            10
+            14
         )
     }
 
@@ -5016,12 +9288,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testV7ActiveMarkerMigratesEventSchedulesAndMediaLinksToV9AndReopensIdempotently() throws {
+    func testV7ActiveMarkerMigratesToV14AndReopensEventScheduleIdempotently() throws {
         struct Marker: Codable {
             let schemaVersion: Int
             let directoryName: String
         }
         enum UnexpectedCopy: Error { case invoked }
+        enum UnexpectedAutomaticMigration: Error { case invoked }
         enum UnexpectedStagedMigration: Error { case invoked }
 
         let fileManager = FileManager.default
@@ -5062,7 +9335,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(oldContainer))
-            context.insert(Event(id: eventID, name: "Frozen V7 Event"))
+            context.insert(ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "Frozen V7 Event"
+            ))
             try context.save()
         }
         oldContainer = nil
@@ -5083,13 +9359,14 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             directoryName: oldDirectoryName
         )).write(to: paths.activeMarkerURL, options: .atomic)
 
-        let v10Schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
-        func openV10Automatically(at url: URL) throws -> ModelContainer {
+        let v14Schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        func openV14(at url: URL) throws -> ModelContainer {
             try ModelContainer(
-                for: v10Schema,
+                for: v14Schema,
+                migrationPlan: ChekinanaSchemaMigrationPlan.self,
                 configurations: [ModelConfiguration(
                     "V7EventSchedule",
-                    schema: v10Schema,
+                    schema: v14Schema,
                     url: url,
                     cloudKitDatabase: .none
                 )]
@@ -5100,22 +9377,20 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let migrated = ChekinanaDataStore.openPreservingStoreFamily(
             paths: paths,
             inspectStoreVersion: ChekinanaDataStore.physicalStoreVersion,
-            makeAutomaticContainer: { url in
-                let container = try openV10Automatically(at: url)
-                migratedContainer = container
-                return container
-            }
-        ) { _ in
-            throw UnexpectedStagedMigration.invoked
+            makeAutomaticContainer: { _ in throw UnexpectedAutomaticMigration.invoked }
+        ) { url in
+            let container = try openV14(at: url)
+            migratedContainer = container
+            return container
         }
         guard case .success = migrated else {
-            return XCTFail("A supported V7 marker must migrate to V9.")
+            return XCTFail("A supported V7 marker must migrate to V14.")
         }
         let marker = try JSONDecoder().decode(
             Marker.self,
             from: Data(contentsOf: paths.activeMarkerURL)
         )
-        XCTAssertEqual(marker.schemaVersion, 12)
+        XCTAssertEqual(marker.schemaVersion, 14)
         let activeURL = try XCTUnwrap(
             ChekinanaDataStore.currentActiveStoreURL(paths: paths)
         )
@@ -5126,7 +9401,6 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 try context.fetch(FetchDescriptor<Event>()).first?.id,
                 eventID
             )
-            XCTAssertTrue(try context.fetch(FetchDescriptor<MediaEventLink>()).isEmpty)
             XCTAssertTrue(try context.fetch(FetchDescriptor<EventSchedule>()).isEmpty)
             try ChekinanaEventSchedulePersistence.set(
                 eventID: eventID,
@@ -5145,13 +9419,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             inspectStoreVersion: ChekinanaDataStore.physicalStoreVersion,
             makeAutomaticContainer: { url in
                 reopenedURL = url
-                return try openV10Automatically(at: url)
+                return try openV14(at: url)
             }
         ) { _ in
             throw UnexpectedStagedMigration.invoked
         }
         guard case .success(let reopenedContainer) = reopened else {
-            return XCTFail("A current V10 marker must reopen in place.")
+            return XCTFail("A current V14 marker must reopen in place.")
         }
         XCTAssertEqual(reopenedURL?.standardizedFileURL, activeURL.standardizedFileURL)
         let reopenedContext = ModelContext(reopenedContainer)
@@ -5223,55 +9497,56 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v5Container))
-            let idol = Idol(id: idolID, name: "Migrated Idol")
-            let event = Event(id: eventID, name: "Migrated Event", date: day)
-            let media = Cheki(
-                id: mediaID,
-                date: day,
-                idx: 9,
-                userAppears: true,
-                size: .wide,
-                imageRef: "media-byte-sentinel.jpg",
-                isFavorite: true,
-                hasPostedToSNS: true,
-                note: "media",
-                createdAt: day.addingTimeInterval(1),
-                updatedAt: day.addingTimeInterval(2)
+            let idol = ChekinanaLegacyMediaSchema.Idol(
+                id: idolID,
+                name: "Migrated Idol"
             )
-            media.userAppears = nil
-            let nilImage = Cheki(
-                id: nilImageID,
-                date: day,
-                idx: 7,
-                userAppears: false,
-                size: .mini,
-                imageRef: nil,
-                isFavorite: true,
-                hasPostedToSNS: true,
-                note: "nil image"
+            let event = ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "Migrated Event"
             )
-            let blankImage = Cheki(
-                id: blankImageID,
-                date: day.addingTimeInterval(2 * 60 * 60),
-                idx: 8,
-                userAppears: true,
-                size: .wide,
-                imageRef: "  \n ",
-                isFavorite: true,
-                hasPostedToSNS: true,
-                note: "blank image"
+            event.date = day
+            let media = ChekinanaLegacyMediaSchema.Cheki(id: mediaID)
+            media.date = day
+            media.idx = 9
+            media.userAppears = true
+            media.sizeRawValue = ChekiSize.wide.rawValue
+            media.imageRef = "media-byte-sentinel.jpg"
+            media.isFavorite = true
+            media.hasPostedToSNS = true
+            media.note = "media"
+            media.createdAt = day.addingTimeInterval(1)
+            media.updatedAt = day.addingTimeInterval(2)
+            media.userAppears = false
+            let nilImage = ChekinanaLegacyMediaSchema.Cheki(id: nilImageID)
+            nilImage.date = day
+            nilImage.idx = 7
+            nilImage.userAppears = false
+            nilImage.sizeRawValue = ChekiSize.mini.rawValue
+            nilImage.imageRef = nil
+            nilImage.isFavorite = true
+            nilImage.hasPostedToSNS = true
+            nilImage.note = "nil image"
+            let blankImage = ChekinanaLegacyMediaSchema.Cheki(id: blankImageID)
+            blankImage.date = day.addingTimeInterval(2 * 60 * 60)
+            blankImage.idx = 8
+            blankImage.userAppears = true
+            blankImage.sizeRawValue = ChekiSize.wide.rawValue
+            blankImage.imageRef = "  \n "
+            blankImage.isFavorite = true
+            blankImage.hasPostedToSNS = true
+            blankImage.note = "blank image"
+            let duplicateNilImage = ChekinanaLegacyMediaSchema.Cheki(
+                id: duplicateNilImageID
             )
-            let duplicateNilImage = Cheki(
-                id: duplicateNilImageID,
-                date: day.addingTimeInterval(60 * 60),
-                idx: 10,
-                userAppears: true,
-                size: .mini,
-                imageRef: nil,
-                isFavorite: false,
-                hasPostedToSNS: false,
-                note: "nil image"
-            )
+            duplicateNilImage.date = day.addingTimeInterval(60 * 60)
+            duplicateNilImage.idx = 10
+            duplicateNilImage.userAppears = true
+            duplicateNilImage.sizeRawValue = ChekiSize.mini.rawValue
+            duplicateNilImage.imageRef = nil
+            duplicateNilImage.isFavorite = false
+            duplicateNilImage.hasPostedToSNS = false
+            duplicateNilImage.note = "nil image"
             context.insert(idol)
             context.insert(event)
             for cheki in [media, nilImage, duplicateNilImage, blankImage] {
@@ -5287,7 +9562,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             directoryName: oldDirectoryName
         )).write(to: paths.activeMarkerURL, options: .atomic)
 
-        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func openCurrent(at url: URL) throws -> ModelContainer {
             try ModelContainer(
                 for: currentSchema,
@@ -5316,10 +9591,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             Marker.self,
             from: Data(contentsOf: paths.activeMarkerURL)
         )
-        XCTAssertEqual(upgradedMarker.schemaVersion, 12)
+        XCTAssertEqual(upgradedMarker.schemaVersion, 14)
         do {
             let context = ModelContext(try XCTUnwrap(migratedContainer))
-            let mediaChekis = try context.fetch(FetchDescriptor<Cheki>())
+            let mediaChekis = try context.fetch(FetchDescriptor<MediaItem>())
             XCTAssertEqual(mediaChekis.map(\.id), [mediaID])
             let media = try XCTUnwrap(mediaChekis.first)
             XCTAssertEqual(media.imageRef, "media-byte-sentinel.jpg")
@@ -5374,7 +9649,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         XCTAssertEqual(reopenedURL?.standardizedFileURL, activeURL.standardizedFileURL)
         let reopened = ModelContext(reopenedContainer)
-        XCTAssertEqual(try reopened.fetchCount(FetchDescriptor<Cheki>()), 1)
+        XCTAssertEqual(try reopened.fetchCount(FetchDescriptor<MediaItem>()), 1)
         XCTAssertEqual(try reopened.fetchCount(FetchDescriptor<ChekiRecord>()), 2)
         XCTAssertEqual(
             ChekinanaChekiRecordStore.totalCount(
@@ -5433,33 +9708,33 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v4Container))
-            let idol = Idol(id: idolID, name: "V4 Idol")
-            let event = Event(id: eventID, name: "V4 Event", date: day)
-            let media = Cheki(
-                id: mediaID,
-                date: day,
-                idx: 7,
-                userAppears: true,
-                size: .wide,
-                imageRef: "v4-media.jpg",
-                isFavorite: true,
-                hasPostedToSNS: true,
-                note: "media sentinel",
-                createdAt: mediaCreatedAt,
-                updatedAt: mediaUpdatedAt
+            let idol = ChekinanaLegacyMediaSchema.Idol(id: idolID, name: "V4 Idol")
+            let event = ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "V4 Event"
             )
-            media.userAppears = nil
-            let noMedia = Cheki(
-                id: recordID,
-                date: day,
-                idx: 99,
-                userAppears: false,
-                size: .mini,
-                imageRef: "  \n ",
-                isFavorite: true,
-                hasPostedToSNS: true,
-                note: "record sentinel"
-            )
+            event.date = day
+            let media = ChekinanaLegacyMediaSchema.Cheki(id: mediaID)
+            media.date = day
+            media.idx = 7
+            media.userAppears = true
+            media.sizeRawValue = ChekiSize.wide.rawValue
+            media.imageRef = "v4-media.jpg"
+            media.isFavorite = true
+            media.hasPostedToSNS = true
+            media.note = "media sentinel"
+            media.createdAt = mediaCreatedAt
+            media.updatedAt = mediaUpdatedAt
+            media.userAppears = false
+            let noMedia = ChekinanaLegacyMediaSchema.Cheki(id: recordID)
+            noMedia.date = day
+            noMedia.idx = 99
+            noMedia.userAppears = false
+            noMedia.sizeRawValue = ChekiSize.mini.rawValue
+            noMedia.imageRef = "  \n "
+            noMedia.isFavorite = true
+            noMedia.hasPostedToSNS = true
+            noMedia.note = "record sentinel"
             context.insert(idol)
             context.insert(event)
             for value in [media, noMedia] {
@@ -5475,7 +9750,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             directoryName: oldDirectoryName
         )).write(to: paths.activeMarkerURL, options: .atomic)
 
-        let v6Schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let v6Schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func openV6(at url: URL) throws -> ModelContainer {
             try ModelContainer(
                 for: v6Schema,
@@ -5508,12 +9783,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             Marker.self,
             from: Data(contentsOf: paths.activeMarkerURL)
         )
-        XCTAssertEqual(upgradedMarker.schemaVersion, 12)
+        XCTAssertEqual(upgradedMarker.schemaVersion, 14)
         XCTAssertEqual(upgradedMarker.directoryName, activeURL.deletingLastPathComponent().lastPathComponent)
 
         do {
             let context = ModelContext(try XCTUnwrap(migratedContainer))
-            let mediaChekis = try context.fetch(FetchDescriptor<Cheki>())
+            let mediaChekis = try context.fetch(FetchDescriptor<MediaItem>())
             XCTAssertEqual(mediaChekis.map(\.id), [mediaID])
             let media = try XCTUnwrap(mediaChekis.first)
             XCTAssertEqual(media.imageRef, "v4-media.jpg")
@@ -5553,7 +9828,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         XCTAssertEqual(reopenedURL?.standardizedFileURL, activeURL.standardizedFileURL)
         let reopenedContext = ModelContext(reopenedContainer)
-        XCTAssertEqual(try reopenedContext.fetchCount(FetchDescriptor<Cheki>()), 1)
+        XCTAssertEqual(try reopenedContext.fetchCount(FetchDescriptor<MediaItem>()), 1)
         XCTAssertEqual(try reopenedContext.fetchCount(FetchDescriptor<ChekiRecord>()), 1)
     }
 
@@ -5612,14 +9887,20 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(oldContainer))
-            context.insert(Idol(id: idolID, name: "V6 Idol"))
-            context.insert(Event(id: eventID, name: "V6 Event", date: day))
-            let legacyMedia = Cheki(
-                id: legacyMediaID,
-                date: day,
-                imageRef: "v6-media.jpg"
+            context.insert(ChekinanaLegacyMediaSchema.Idol(
+                id: idolID,
+                name: "V6 Idol"
+            ))
+            let event = ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "V6 Event"
             )
-            legacyMedia.userAppears = nil
+            event.date = day
+            context.insert(event)
+            let legacyMedia = ChekinanaLegacyMediaSchema.Cheki(id: legacyMediaID)
+            legacyMedia.date = day
+            legacyMedia.imageRef = "v6-media.jpg"
+            legacyMedia.userAppears = false
             context.insert(legacyMedia)
             context.insert(ChekinanaSchemaV6.ChekiRecord(
                 id: nonCanonicalID,
@@ -5653,7 +9934,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             directoryName: oldDirectoryName
         )).write(to: paths.activeMarkerURL, options: .atomic)
 
-        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let currentSchema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func currentContainer(at url: URL) throws -> ModelContainer {
             try ModelContainer(
                 for: currentSchema,
@@ -5682,9 +9963,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             Marker.self,
             from: Data(contentsOf: paths.activeMarkerURL)
         )
-        XCTAssertEqual(marker.schemaVersion, 12)
+        XCTAssertEqual(marker.schemaVersion, 14)
         let context = ModelContext(try XCTUnwrap(migratedContainer))
-        let media = try context.fetch(FetchDescriptor<Cheki>())
+        let media = try context.fetch(FetchDescriptor<MediaItem>())
         XCTAssertEqual(media.map(\.id), [legacyMediaID])
         XCTAssertEqual(media.first?.userAppears, false)
         let records = try context.fetch(FetchDescriptor<ChekiRecord>())
@@ -5723,7 +10004,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             2
         )
         XCTAssertEqual(
-            try ModelContext(reopenedContainer).fetch(FetchDescriptor<Cheki>())
+            try ModelContext(reopenedContainer).fetch(FetchDescriptor<MediaItem>())
                 .first?.userAppears,
             false
         )
@@ -5771,11 +10052,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let sentinelID = UUID()
         do {
             let context = ModelContext(try XCTUnwrap(v4Container))
-            context.insert(Cheki(
-                id: sentinelID,
-                imageRef: "authoritative.jpg",
-                note: "must survive"
-            ))
+            let sentinel = ChekinanaLegacyMediaSchema.Cheki(id: sentinelID)
+            sentinel.imageRef = "authoritative.jpg"
+            sentinel.note = "must survive"
+            context.insert(sentinel)
             try context.save()
         }
         v4Container = nil
@@ -5819,7 +10099,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertEqual(
             try ModelContext(try XCTUnwrap(v4Container))
-                .fetch(FetchDescriptor<Cheki>()).first?.id,
+                .fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Cheki>())
+                .first?.id,
             sentinelID
         )
     }
@@ -5911,7 +10192,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(failure.code, ChekinanaDataStore.OpenFailure.stableCode)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.activeMarkerURL.path))
 
-        let schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let retried = ChekinanaDataStore.openPreservingStoreFamily(paths: paths) { candidateURL in
             try ModelContainer(
                 for: schema,
@@ -5928,13 +10209,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("Retry must publish the successfully reopened container.")
         }
         XCTAssertEqual(
-            try ModelContext(container).fetchCount(FetchDescriptor<Cheki>()),
+            try ModelContext(container).fetchCount(FetchDescriptor<MediaItem>()),
             0
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.activeMarkerURL.path))
     }
 
-    func testCurrentV10ActiveStoreReopensInPlaceWithoutCopyOrRotation() throws {
+    func testCurrentV14ActiveStoreReopensInPlaceWithoutCopyOrRotation() throws {
         enum UnexpectedCopy: Error { case invoked }
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory.appendingPathComponent(
@@ -5947,7 +10228,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             legacyStoreName: "Original.store",
             namespace: "direct-open-test"
         )
-        let schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func diskContainer(at url: URL) throws -> ModelContainer {
             try ModelContainer(
                 for: schema,
@@ -5968,11 +10249,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return container
         }
         guard case .success = created else {
-            return XCTFail("Initial activation must publish a V10 marker.")
+            return XCTFail("Initial activation must publish a V14 marker.")
         }
         let retainedChekiID = UUID()
         let createdContext = ModelContext(try XCTUnwrap(createdContainer))
-        createdContext.insert(Cheki(
+        createdContext.insert(MediaItem(
             id: retainedChekiID,
             imageRef: "direct-open.jpg",
             note: "direct-open sentinel"
@@ -6006,7 +10287,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: paths.activeMarkerURL), markerBefore)
             XCTAssertEqual(
                 try ModelContext(try XCTUnwrap(reopenedContainer))
-                    .fetch(FetchDescriptor<Cheki>())
+                    .fetch(FetchDescriptor<MediaItem>())
                     .first(where: { $0.id == retainedChekiID })?.note,
                 "direct-open sentinel"
             )
@@ -6252,8 +10533,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let secondIdol = Idol(name: "Second")
         fixture.context.insert(firstIdol)
         fixture.context.insert(secondIdol)
-        let legacyShame = Shame(note: "legacy")
-        let legacyDouga = Douga(note: "legacy")
+        let legacyShame = MediaItem(imageRef: "legacy-shame.jpg", note: "legacy")
+        let legacyDouga = MediaItem(videoRef: "legacy-douga.mov", note: "legacy")
         fixture.context.insert(legacyShame)
         fixture.context.insert(legacyDouga)
         legacyShame.idols = [firstIdol]
@@ -6266,7 +10547,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("expected simple Cheki record confirmation")
         }
         try requireSuccess(await fixture.executor.execute("confirm \(addCode)"))
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Cheki>()), 0)
+        XCTAssertEqual(
+            try fixture.context.fetch(FetchDescriptor<MediaItem>())
+                .filter { $0.kind == .cheki }.count,
+            0
+        )
         let simpleRecord = try XCTUnwrap(
             fixture.context.fetch(FetchDescriptor<ChekiRecord>()).first
         )
@@ -6347,8 +10632,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ChekinanaMediaBackedCreationError.shameRequiresImage.localizedDescription
         ))
         XCTAssertNotNil(fixture.ledger.entry(for: staleCode))
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Shame>()), 1)
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Douga>()), 1)
+        let mediaAfterRejectedAdd = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(mediaAfterRejectedAdd.filter { $0.kind == .shame }.count, 1)
+        XCTAssertEqual(mediaAfterRejectedAdd.filter { $0.kind == .douga }.count, 1)
 
         guard case .confirmationText(_, let editCode) = await fixture.executor.execute(
             "editrecord shame target=\(shortID(legacyShame.id)) idols=\(shortID(firstIdol.id)),\(shortID(secondIdol.id))"
@@ -6364,7 +10650,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("expected legacy no-media Douga delete confirmation")
         }
         try requireSuccess(await fixture.executor.execute("confirm \(deleteCode)"))
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Douga>()), 0)
+        let mediaAfterDougaDelete = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(mediaAfterDougaDelete.filter { $0.kind == .shame }.count, 1)
+        XCTAssertFalse(mediaAfterDougaDelete.contains { $0.kind == .douga })
 
         guard case .confirmationText(_, let recordDeleteCode) = await fixture.executor.execute(
             "editrecord cheki target=\(shortID(simpleRecord.id)) count=0"
@@ -6412,6 +10700,43 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             kind: .shame,
             directory: managed
         ))
+
+        for ext in ["tiff", "gif", "webp"] {
+            let candidateID = UUID()
+            let candidateRef = "shame-\(candidateID.uuidString.lowercased()).\(ext)"
+            try Data([0x01]).write(to: managed.appendingPathComponent(candidateRef))
+            XCTAssertNotNil(ChekinanaGalleryMediaStore.managedURL(
+                for: candidateRef,
+                id: candidateID,
+                kind: .shame,
+                directory: managed
+            ))
+        }
+        for ext in ["图像", "abcdefghijklmn", "bad-ext"] {
+            let candidateID = UUID()
+            let candidateRef = "shame-\(candidateID.uuidString.lowercased()).\(ext)"
+            try Data([0x01]).write(to: managed.appendingPathComponent(candidateRef))
+            XCTAssertNil(ChekinanaGalleryMediaStore.managedURL(
+                for: candidateRef,
+                id: candidateID,
+                kind: .shame,
+                directory: managed
+            ))
+        }
+
+        let thumbnailID = UUID()
+        let thumbnailURL = ChekinanaGalleryMediaStore.thumbnailURL(
+            id: thumbnailID,
+            directory: managed
+        )
+        try Data([0x01]).write(to: thumbnailURL)
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.thumbnailReference(
+                id: thumbnailID,
+                directory: managed
+            ),
+            thumbnailURL.lastPathComponent
+        )
         XCTAssertEqual(
             ChekinanaGalleryMediaStore.thumbnailURL(id: id, directory: managed),
             ChekinanaGalleryMediaStore.thumbnailURL(id: id, directory: managed)
@@ -6450,9 +10775,18 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         })
 
         let source = root.appendingPathComponent("source.mov")
-        try Data([0x00, 0x01, 0x02]).write(to: source)
+        let originalVideoData = Data([0x00, 0x01, 0x02])
+        try originalVideoData.write(to: source)
         let stagedVideo = try ChekinanaGalleryMediaStore.makeStagedVideoCopy(from: source)
         XCTAssertTrue(FileManager.default.fileExists(atPath: stagedVideo.path))
+        XCTAssertEqual(stagedVideo.pathExtension, "mov")
+        XCTAssertEqual(try Data(contentsOf: stagedVideo), originalVideoData)
+        let materializedVideo = managed.appendingPathComponent("materialized.mov")
+        _ = try ChekinanaGalleryMediaStore.materializeStagedImport(
+            from: stagedVideo,
+            to: materializedVideo
+        )
+        XCTAssertEqual(try Data(contentsOf: materializedVideo), originalVideoData)
         ChekinanaGalleryMediaStore.cleanupStagedImports()
         XCTAssertFalse(FileManager.default.fileExists(atPath: stagedVideo.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
@@ -6478,18 +10812,28 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         try Data("local-video".utf8).write(
             to: directory.appendingPathComponent(dougaRef)
         )
-        let shame = Shame(id: shameID, imageRef: shameRef)
-        let douga = Douga(id: dougaID, videoRef: dougaRef)
+        let shame = MediaItem(
+            id: shameID,
+            kind: .shame,
+            mediaRef: shameRef
+        )
+        let douga = MediaItem(
+            id: dougaID,
+            kind: .douga,
+            mediaRef: dougaRef
+        )
         fixture.context.insert(shame)
         fixture.context.insert(douga)
         try fixture.context.save()
 
         XCTAssertEqual(
-            try fixture.context.fetch(FetchDescriptor<Shame>()).first?.imageRef,
+            try fixture.context.fetch(FetchDescriptor<MediaItem>())
+                .first { $0.kind == .shame }?.imageRef,
             shameRef
         )
         XCTAssertEqual(
-            try fixture.context.fetch(FetchDescriptor<Douga>()).first?.videoRef,
+            try fixture.context.fetch(FetchDescriptor<MediaItem>())
+                .first { $0.kind == .douga }?.videoRef,
             dougaRef
         )
     }
@@ -6583,6 +10927,405 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: staged[0].quarantine.path))
     }
 
+    func testGalleryDeletionPersistsCompleteVideoIntentBeforeMovingAndRollsBackMoveFailure() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-intent-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaGalleryDeleteIntent.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let ownerID = UUID()
+        let reference = "douga-\(ownerID.uuidString.lowercased()).mov"
+        let original = root.appendingPathComponent(reference)
+        let thumbnail = ChekinanaGalleryMediaStore.thumbnailURL(
+            id: ownerID,
+            directory: root
+        )
+        try Data("video-bytes".utf8).write(to: original)
+        try Data("thumbnail-bytes".utf8).write(to: thumbnail)
+
+        var moveCount = 0
+        XCTAssertThrowsError(try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .douga,
+            id: ownerID,
+            reference: reference,
+            directory: root,
+            libraryGeneration: UUID(),
+            defaults: defaults,
+            journalWriter: { _, _ in throw CocoaError(.fileWriteNoPermission) },
+            moveItem: { _, _ in moveCount += 1 }
+        ))
+        XCTAssertEqual(moveCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thumbnail.path))
+
+        XCTAssertThrowsError(try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .douga,
+            id: ownerID,
+            reference: reference,
+            directory: root,
+            libraryGeneration: UUID(),
+            defaults: defaults,
+            moveItem: { source, destination in
+                moveCount += 1
+                if moveCount == 2 { throw CocoaError(.fileWriteNoPermission) }
+                try FileManager.default.moveItem(at: source, to: destination)
+            }
+        ))
+        XCTAssertEqual(moveCount, 3, "The first move must be reversed after the thumbnail move fails")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thumbnail.path))
+        XCTAssertTrue(try ChekinanaGalleryDeletionJournalStore.discover(in: root).isEmpty)
+    }
+
+    func testGalleryDeletionRecoveryHandlesThumbnailGapCommitWindowAndRepeatedLaunch() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-replay-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ownerID = UUID()
+        let reference = "douga-\(ownerID.uuidString.lowercased()).mov"
+        let item = MediaItem(
+            mediaOwnerID: ownerID,
+            kind: .douga,
+            mediaRef: reference
+        )
+        context.insert(item)
+        try context.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let original = root.appendingPathComponent(reference)
+        let thumbnail = ChekinanaGalleryMediaStore.thumbnailURL(
+            id: ownerID,
+            directory: root
+        )
+        try Data("video".utf8).write(to: original)
+        try Data("thumb".utf8).write(to: thumbnail)
+
+        let operationID = UUID()
+        var interrupted = ChekinanaGalleryDeletionJournal(
+            formatVersion: 1,
+            operationID: operationID,
+            libraryGeneration: generation,
+            phase: .movingFiles,
+            entries: try [original, thumbnail].map { url in
+                .init(
+                    originalName: url.lastPathComponent,
+                    quarantineName: ".delete-\(operationID.uuidString.lowercased())-\(url.lastPathComponent)",
+                    identity: try ChekinanaImportFileIdentity.inspect(url),
+                    stage: .planned
+                )
+            }
+        )
+        try ChekinanaGalleryDeletionJournalStore.persist(interrupted, in: root)
+        let mainQuarantine = root.appendingPathComponent(
+            interrupted.entries[0].quarantineName
+        )
+        try FileManager.default.moveItem(at: original, to: mainQuarantine)
+        interrupted.entries[0].stage = .quarantined
+        try ChekinanaGalleryDeletionJournalStore.persist(interrupted, in: root)
+
+        XCTAssertEqual(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: thumbnail.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mainQuarantine.path))
+
+        let staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .douga,
+            id: ownerID,
+            reference: reference,
+            directory: root,
+            libraryGeneration: generation
+        )
+        context.delete(item)
+        try context.save()
+        // Simulates termination after the DB commit but before the journal's
+        // diagnostic phase is updated.
+        XCTAssertEqual(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+        XCTAssertTrue(staged.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.original.path)
+                && !FileManager.default.fileExists(atPath: $0.quarantine.path)
+        })
+        XCTAssertEqual(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+    }
+
+    func testGalleryDeletionCoordinatorRestoresFilesWhenDatabaseSaveFails() async throws {
+        enum ExpectedFailure: Error { case save }
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-db-failure-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaGalleryDeleteDBFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let ownerID = UUID()
+        let reference = "shame-\(ownerID.uuidString.lowercased()).bin"
+        let original = root.appendingPathComponent(reference)
+        try Data("keep-me".utf8).write(to: original)
+        let item = MediaItem(
+            mediaOwnerID: ownerID,
+            kind: .shame,
+            mediaRef: reference
+        )
+        context.insert(item)
+        try context.save()
+
+        do {
+            try await ChekinanaGalleryDeletionCoordinator.delete(
+                kind: .shame,
+                mediaOwnerID: ownerID,
+                reference: reference,
+                in: context,
+                directory: root,
+                defaults: defaults,
+                saveContext: { _ in throw ExpectedFailure.save },
+                deleteModel: { context.delete(item) }
+            )
+            XCTFail("Expected the injected database save to fail")
+        } catch ExpectedFailure.save {
+            // Expected.
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(try ChekinanaGalleryDeletionJournalStore.discover(in: root).isEmpty)
+        XCTAssertEqual(
+            try ModelContext(container).fetchCount(FetchDescriptor<MediaItem>()),
+            1
+        )
+    }
+
+    func testUnregisteredGalleryQuarantinesAreSafelyReconciledWithoutFollowingLinks() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-unregistered-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let managed = root.appendingPathComponent("managed", isDirectory: true)
+        try FileManager.default.createDirectory(at: managed, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaGalleryDeleteUnregistered.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        func reference(_ id: UUID) -> String {
+            "shame-\(id.uuidString.lowercased()).bin"
+        }
+        func quarantine(_ original: String) -> URL {
+            managed.appendingPathComponent(
+                ".delete-\(UUID().uuidString.lowercased())-\(original)"
+            )
+        }
+        let sameID = UUID()
+        let differentID = UUID()
+        let missingID = UUID()
+        for id in [sameID, differentID, missingID] {
+            context.insert(MediaItem(
+                mediaOwnerID: id,
+                kind: .shame,
+                mediaRef: reference(id)
+            ))
+        }
+        try context.save()
+        _ = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+
+        let sameOriginal = managed.appendingPathComponent(reference(sameID))
+        let sameQuarantine = quarantine(reference(sameID))
+        try Data("same".utf8).write(to: sameOriginal)
+        try Data("same".utf8).write(to: sameQuarantine)
+        let differentOriginal = managed.appendingPathComponent(reference(differentID))
+        let differentQuarantine = quarantine(reference(differentID))
+        try Data("current".utf8).write(to: differentOriginal)
+        try Data("old".utf8).write(to: differentQuarantine)
+        let missingOriginal = managed.appendingPathComponent(reference(missingID))
+        let missingQuarantine = quarantine(reference(missingID))
+        try Data("restore".utf8).write(to: missingQuarantine)
+        let unownedQuarantine = quarantine(reference(UUID()))
+        try Data("remove".utf8).write(to: unownedQuarantine)
+
+        let outside = root.appendingPathComponent("outside.bin")
+        try Data("outside".utf8).write(to: outside)
+        let linkedQuarantine = quarantine(reference(UUID()))
+        try FileManager.default.createSymbolicLink(
+            at: linkedQuarantine,
+            withDestinationURL: outside
+        )
+        let directoryQuarantine = quarantine(reference(UUID()))
+        try FileManager.default.createDirectory(
+            at: directoryQuarantine,
+            withIntermediateDirectories: false
+        )
+
+        let first = ChekinanaLibraryQueueReconciler.cleanupOrdinaryQueuesExclusively(
+            in: context,
+            directory: managed,
+            defaults: defaults
+        )
+        XCTAssertTrue(first.needsRetry, "Different bytes must remain an explicit conflict")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sameOriginal.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sameQuarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: differentOriginal.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: differentQuarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: missingOriginal.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingQuarantine.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unownedQuarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: linkedQuarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directoryQuarantine.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+
+        let second = ChekinanaLibraryQueueReconciler.cleanupOrdinaryQueuesExclusively(
+            in: context,
+            directory: managed,
+            defaults: defaults
+        )
+        XCTAssertTrue(second.needsRetry)
+        XCTAssertEqual(try Data(contentsOf: differentOriginal), Data("current".utf8))
+        XCTAssertEqual(try Data(contentsOf: differentQuarantine), Data("old".utf8))
+    }
+
+    func testCommittedGalleryDeletionNeverRestoresIntoReusedFilename() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-committed-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaGalleryDeleteCommitted.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let ownerID = UUID()
+        let reference = "shame-\(ownerID.uuidString.lowercased()).bin"
+        let original = root.appendingPathComponent(reference)
+        try Data("deleted".utf8).write(to: original)
+        let oldItem = MediaItem(
+            mediaOwnerID: ownerID,
+            kind: .shame,
+            mediaRef: reference
+        )
+        context.insert(oldItem)
+        try context.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .shame,
+            id: ownerID,
+            reference: reference,
+            directory: root,
+            libraryGeneration: generation,
+            defaults: defaults
+        )
+        context.delete(oldItem)
+        try context.save()
+        ChekinanaGalleryMediaStore.recordCommittedDeletion(
+            staged,
+            directory: root,
+            defaults: defaults
+        )
+        context.insert(MediaItem(
+            mediaOwnerID: ownerID,
+            kind: .shame,
+            mediaRef: reference
+        ))
+        try context.save()
+
+        XCTAssertGreaterThan(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged[0].quarantine.path))
+    }
+
+    func testGalleryDeletionRecoveryPreservesByteAndGenerationConflicts() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-delete-conflict-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ownerID = UUID()
+        let reference = "shame-\(ownerID.uuidString.lowercased()).bin"
+        let original = root.appendingPathComponent(reference)
+        try Data("journal-owned".utf8).write(to: original)
+        context.insert(MediaItem(
+            mediaOwnerID: ownerID,
+            kind: .shame,
+            mediaRef: reference
+        ))
+        try context.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+            kind: .shame,
+            id: ownerID,
+            reference: reference,
+            directory: root,
+            libraryGeneration: generation
+        )
+        try Data("unrelated-current".utf8).write(to: original)
+
+        XCTAssertGreaterThan(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+        XCTAssertEqual(try Data(contentsOf: original), Data("unrelated-current".utf8))
+        XCTAssertEqual(
+            try Data(contentsOf: staged[0].quarantine),
+            Data("journal-owned".utf8)
+        )
+
+        try FileManager.default.removeItem(at: original)
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: context)
+        try context.save()
+        XCTAssertGreaterThan(ChekinanaGalleryDeletionRecoveryCoordinator.recoverExclusively(
+            in: context,
+            directory: root
+        ), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged[0].quarantine.path))
+    }
+
     func testGalleryImportCleanupQueueRetriesShameDougaAndThumbnailWithoutEscapingDirectory() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gallery-orphan-cleanup-\(UUID().uuidString)", isDirectory: true)
@@ -6662,6 +11405,78 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnailURL.path))
     }
 
+    func testGalleryManagedCleanupSupportsSafeOriginalExtensionsWithoutBroadeningPaths() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "gallery-original-extension-cleanup-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChekinanaGalleryExtensions.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.safeMediaExtension("TIFF", fallback: "bin"),
+            "tiff"
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.safeMediaExtension("图像", fallback: "bin"),
+            "bin"
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.safeMediaExtension(
+                "extension-is-too-long",
+                fallback: "bin"
+            ),
+            "bin"
+        )
+
+        let imageID = UUID()
+        let imageRef = "shame-\(imageID.uuidString.lowercased()).tiff"
+        let imageURL = root.appendingPathComponent(imageRef)
+        try Data([0x49, 0x49]).write(to: imageURL)
+        ChekinanaGalleryMediaStore.recordOrphanedImport(
+            kind: .shame,
+            id: imageID,
+            reference: imageRef,
+            defaults: defaults
+        )
+
+        let unsafeID = UUID()
+        let unsafeRef = "shame-\(unsafeID.uuidString.lowercased()).图像"
+        try Data([0x01]).write(to: root.appendingPathComponent(unsafeRef))
+        ChekinanaGalleryMediaStore.recordOrphanedImport(
+            kind: .shame,
+            id: unsafeID,
+            reference: unsafeRef,
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            ChekinanaGalleryMediaStore.pendingOrphanCleanupCount(defaults: defaults),
+            1
+        )
+
+        ChekinanaGalleryMediaStore.cleanupOrphanedImports(
+            directory: root,
+            defaults: defaults
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: imageURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(unsafeRef).path
+        ))
+
+        let fullClearID = UUID()
+        let fullClearRef = "shame-\(fullClearID.uuidString.lowercased()).gif"
+        let fullClearURL = root.appendingPathComponent(fullClearRef)
+        let unrelatedURL = root.appendingPathComponent("shame-not-a-managed-file.txt")
+        try Data([0x47, 0x49, 0x46]).write(to: fullClearURL)
+        try Data([0x02]).write(to: unrelatedURL)
+        try ChekinanaGalleryMediaStore.removeAllManagedMediaFiles(directory: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fullClearURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedURL.path))
+    }
+
     func testStagedVideoCopyRejectsZeroAndOversizeBeforeCopyAndAllowsBoundary() throws {
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent("gallery-video-size-\(UUID().uuidString).mov")
@@ -6694,6 +11509,38 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ChekinanaGalleryMediaStore.discardStagedVideo(at: staged)
     }
 
+    func testGalleryManagedMaterializationPrefersLinkAndFallsBackToCopy() throws {
+        let source = URL(fileURLWithPath: "/staged/photo.jpg")
+        let destination = URL(fileURLWithPath: "/managed/photo.jpg")
+        var linkCount = 0
+        var copyCount = 0
+        var removeCount = 0
+        XCTAssertTrue(try ChekinanaGalleryMediaStore.materializeStagedImport(
+            from: source,
+            to: destination,
+            removeItem: { _ in removeCount += 1 },
+            linkItem: { _, _ in linkCount += 1 },
+            copyItem: { _, _ in copyCount += 1 }
+        ))
+        XCTAssertEqual(linkCount, 1)
+        XCTAssertEqual(copyCount, 0)
+        XCTAssertEqual(removeCount, 0)
+
+        XCTAssertFalse(try ChekinanaGalleryMediaStore.materializeStagedImport(
+            from: source,
+            to: destination,
+            removeItem: { _ in removeCount += 1 },
+            linkItem: { _, _ in
+                linkCount += 1
+                throw CocoaError(.fileWriteUnknown)
+            },
+            copyItem: { _, _ in copyCount += 1 }
+        ))
+        XCTAssertEqual(linkCount, 2)
+        XCTAssertEqual(copyCount, 1)
+        XCTAssertEqual(removeCount, 1)
+    }
+
     func testGalleryStagedImageAndManagedCopyUseBackgroundFileIO() async throws {
         let managed = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -6711,15 +11558,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         XCTAssertFalse(ranOnMainThread)
 
-        let staged = try await ChekinanaGalleryMediaStore.makeStagedImageCopy(
-            from: scannerPNGData(color: .orange),
-            filenameExtension: "png"
+        let originalData = scannerPNGData(color: .orange)
+        let originalURL = managed.appendingPathComponent("original.png")
+        try originalData.write(to: originalURL)
+        let staged = try ChekinanaGalleryMediaStore.makeStagedImageCopy(
+            from: originalURL
         )
         XCTAssertEqual(
             staged.deletingLastPathComponent().lastPathComponent,
             "ChekinanaGalleryImports"
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: staged.path))
+        XCTAssertEqual(staged.pathExtension, "png")
+        XCTAssertEqual(try Data(contentsOf: staged), originalData)
         let id = UUID()
         let reference = try await ChekinanaGalleryMediaStore.saveImage(
             from: staged,
@@ -6730,9 +11581,50 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: managed.appendingPathComponent(reference).path
         ))
+        XCTAssertEqual(reference, "shame-\(id.uuidString.lowercased()).png")
+        XCTAssertEqual(
+            try Data(contentsOf: managed.appendingPathComponent(reference)),
+            originalData
+        )
 
         await ChekinanaGalleryMediaStore.discardStagedImport(at: staged)
         XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    func testGalleryImportsCurrentImageAndVideoFileRepresentationsWithoutReencoding() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let galleryStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaGalleryView")?.lowerBound
+        )
+        let galleryEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaMemoryAttachmentDraft",
+            range: galleryStart..<source.endIndex
+        )?.lowerBound)
+        let gallery = source[galleryStart..<galleryEnd]
+
+        XCTAssertTrue(source.contains(
+            "FileRepresentation(importedContentType: .image)"
+        ))
+        XCTAssertTrue(source.contains(
+            "FileRepresentation(importedContentType: .movie)"
+        ))
+        XCTAssertEqual(
+            gallery.components(separatedBy: "preferredItemEncoding: .current").count - 1,
+            2
+        )
+        XCTAssertTrue(gallery.contains(
+            "type: ChekinanaGalleryImageTransfer.self"
+        ))
+        XCTAssertTrue(gallery.contains(
+            "type: ChekinanaGalleryVideoTransfer.self"
+        ))
+        XCTAssertFalse(gallery.contains("ChekinanaProductMediaLoader.load(item)"))
+        XCTAssertFalse(gallery.contains("reencodedJPEGData"))
     }
 
     func testGalleryImportGatesPreventDuplicateWorkAndStaleRequestCompletion() {
@@ -6778,14 +11670,20 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 "direct_processing",
                 directInputEnabled: true
             ),
-            "正在规范化整张 Cheki"
+            ChekinanaProductCopy.text(
+                "scan.phase.direct_processing",
+                "Normalizing full Cheki"
+            )
         )
         XCTAssertNotEqual(
             ChekinanaScannerPhasePresentation.text(
                 "direct_processing",
                 directInputEnabled: true
             ),
-            "后端处理中"
+            ChekinanaProductCopy.text(
+                "scan.phase.processing",
+                "Processing"
+            )
         )
     }
 
@@ -6803,10 +11701,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(registry.sourceIDs, [libraryA, cameraA, libraryB, cameraB])
         XCTAssertTrue(registry.hasCapturedPhoto)
 
-        var mappedResults: [UUID: [UUID]] = [
-            cameraA: [UUID(), UUID()],
-            cameraB: [],
-        ]
+        var mappedResults: [UUID: [UUID]] = [cameraA: [UUID(), UUID()], cameraB: []]
         let first = registry.removeLatestCapturedPhoto { mappedResults[$0] }
         guard case .removed(let firstSource, let firstResults) = first else {
             return XCTFail("expected the newest zero-result camera source")
@@ -6823,10 +11718,87 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(secondResults.count, 2)
         XCTAssertFalse(registry.hasCapturedPhoto)
         XCTAssertEqual(registry.sourceIDs, [libraryA, libraryB])
-        XCTAssertEqual(
-            registry.removeLatestCapturedPhoto { _ in [] },
-            .unavailable
+        XCTAssertEqual(registry.removeLatestCapturedPhoto { _ in [] }, .unavailable)
+    }
+
+    func testScanReviewHandoffClaimsOnlySourcesWithTemporaryCheki() {
+        let successfulCamera = ChekinanaScanSourceDescriptor(
+            id: UUID(),
+            origin: .camera
         )
+        let zeroResultLibrary = ChekinanaScanSourceDescriptor(
+            id: UUID(),
+            origin: .library
+        )
+        let plan = ChekinanaScanReviewInputHandoffPolicy.plan(
+            inputSources: [successfulCamera, zeroResultLibrary],
+            temporarySourceIDs: [successfulCamera.id, successfulCamera.id, nil]
+        )
+
+        XCTAssertEqual(plan.reviewSources, [successfulCamera])
+        XCTAssertEqual(plan.claimedSourceIDs, [successfulCamera.id])
+        XCTAssertEqual(plan.retainedInputSources, [zeroResultLibrary])
+        // Saving, discarding, or closing Review operates only on
+        // `reviewSources`; the zero-result input remains outside its ownership.
+        XCTAssertFalse(plan.claimedSourceIDs.contains(zeroResultLibrary.id))
+    }
+
+    func testDirectImportPartialCancelPublishesEveryProtectedTemporaryInInputOrder() throws {
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 1_024)
+        let sourceA = ChekinanaScanSourceDescriptor(id: UUID(), origin: .library)
+        let sourceB = ChekinanaScanSourceDescriptor(id: UUID(), origin: .library)
+        let sourceC = ChekinanaScanSourceDescriptor(id: UUID(), origin: .camera)
+        var tracker = ChekinanaScanSessionResultTracker()
+
+        func insertCard(source: ChekinanaScanSourceDescriptor, marker: UInt8) throws
+            -> ChekinanaChekiCard {
+            let insertion = try ledger.insertTemporaryChekis(
+                [ChekinanaPendingChekiImage(
+                    data: Data(repeating: marker, count: 16),
+                    filenameExtension: "jpg",
+                    sourceID: source.id,
+                    sourceOrigin: source.origin
+                )],
+                thumbnailImageData: [nil]
+            )
+            let temporary = try XCTUnwrap(insertion.inserted.first)
+            return ChekinanaChekiCard(
+                id: temporary.id,
+                imageRef: nil,
+                createdAt: temporary.createdAt,
+                confirmationCode: nil,
+                thumbnailImageData: nil
+            )
+        }
+
+        // Recognition finishes out of order. These are deliberately protected
+        // before any legacy aggregated-card publication, reproducing the
+        // cancellation window that previously stranded invisible ledger data.
+        let cardB = try insertCard(source: sourceB, marker: 0xB)
+        ledger.protectTemporaryChekisForReview([cardB.id])
+        tracker.record([cardB], at: 1)
+        let cardA = try insertCard(source: sourceA, marker: 0xA)
+        ledger.protectTemporaryChekisForReview([cardA.id])
+        tracker.record([cardA], at: 0)
+
+        let partialReviewCards = ChekinanaScanReviewCardReconciler.existing(
+            tracker.cards,
+            containsTemporaryCheki: ledger.containsTemporaryCheki
+        )
+        let plan = ChekinanaScanReviewInputHandoffPolicy.plan(
+            inputSources: [sourceA, sourceB, sourceC],
+            temporarySourceIDs: partialReviewCards.map {
+                ledger.temporaryCheki($0.id)?.sourceID
+            }
+        )
+
+        XCTAssertEqual(partialReviewCards.map(\.id), [cardA.id, cardB.id])
+        XCTAssertEqual(tracker.temporaryIDs, Set([cardA.id, cardB.id]))
+        XCTAssertEqual(plan.reviewSources, [sourceA, sourceB])
+        XCTAssertEqual(plan.retainedInputSources, [sourceC])
+        XCTAssertTrue(partialReviewCards.allSatisfy {
+            ledger.isTemporaryChekiProtectedForReview($0.id)
+        })
     }
 
     func testBoundedScanPipelineKeepsHighResolutionLoadAndProcessingWindowsAtTwo() async throws {
@@ -6860,6 +11832,62 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertLessThanOrEqual(maximumRetainedSources, 2)
         XCTAssertEqual(maximumProcessorsInFlight, 1)
         XCTAssertEqual(retainedLoadedSources, 0)
+    }
+
+    func testStreamingScanSchedulerStartsNextSourceBeforeRecognitionFinishesAndPreservesOrder() async {
+        var processingInFlight = 0
+        var maximumProcessingInFlight = 0
+        var recognitionFinished = Set<Int>()
+        var recognitionTasks: [Task<Void, Never>] = []
+
+        let outputs = await ChekinanaStreamingScanScheduler.run(
+            sourceCount: 5,
+            limit: 2
+        ) { sourceIndex in
+            processingInFlight += 1
+            maximumProcessingInFlight = max(
+                maximumProcessingInFlight,
+                processingInFlight
+            )
+            if sourceIndex >= 2 {
+                XCTAssertFalse(
+                    recognitionFinished.contains(0) && recognitionFinished.contains(1),
+                    "source 3 must start before recognition for the first window finishes"
+                )
+            }
+            try? await Task.sleep(for: .milliseconds(sourceIndex.isMultiple(of: 2) ? 18 : 8))
+            processingInFlight -= 1
+            recognitionTasks.append(Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(160))
+                recognitionFinished.insert(sourceIndex)
+            })
+            return sourceIndex
+        }
+
+        for task in recognitionTasks { await task.value }
+        XCTAssertEqual(outputs, [0, 1, 2, 3, 4])
+        XCTAssertEqual(maximumProcessingInFlight, 2)
+        XCTAssertEqual(recognitionFinished, Set(0..<5))
+    }
+
+    func testStreamingScanSchedulerCancellationLeavesNoProcessingWorkers() async {
+        var processingInFlight = 0
+        let task = Task { @MainActor in
+            await ChekinanaStreamingScanScheduler.run(sourceCount: 8, limit: 2) { sourceIndex in
+                processingInFlight += 1
+                defer { processingInFlight -= 1 }
+                try? await Task.sleep(for: .seconds(2))
+                return sourceIndex
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(30))
+        task.cancel()
+        _ = await task.value
+        XCTAssertEqual(processingInFlight, 0)
+    }
+
+    func testDirectDateRequestGateDefaultsToSixteenWorkers() {
+        XCTAssertEqual(ChekinanaDirectDateRequestGate.defaultLimit, 16)
     }
 
     func testBoundedScanPipelinePreservesOriginalIndexAfterEarlierLoadFailure() async throws {
@@ -7093,6 +12121,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
         XCTAssertTrue(registry.hasInFlightRotations)
         XCTAssertTrue(registry.isRotating(sourceID: firstID))
+        XCTAssertFalse(registry.allowsInputRemoval(
+            sourceID: firstID,
+            isProcessing: false,
+            hasReviewSession: false
+        ))
+        XCTAssertTrue(registry.allowsInputRemoval(
+            sourceID: secondID,
+            isProcessing: false,
+            hasReviewSession: false
+        ))
         XCTAssertNil(registry.begin(
             sourceID: firstID,
             expectedQuarterTurns: 0
@@ -7133,6 +12171,32 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             isProcessing: false,
             hasReviewSession: true
         ))
+    }
+
+    func testScanPhotoPickerUsesContinuousOrderedSelectionAndStableSourceIDs() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let scanStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaScanView: View")?.lowerBound
+        )
+        let scanEnd = try XCTUnwrap(source.range(
+            of: "enum ChekinanaScannerPhasePresentation",
+            range: scanStart..<source.endIndex
+        )?.lowerBound)
+        let scanView = String(source[scanStart..<scanEnd])
+
+        XCTAssertEqual(
+            scanView.components(separatedBy: "selectionBehavior: .continuousAndOrdered").count - 1,
+            2,
+            "Both Scan photo-library entry points must use the system continuous drag-selection behavior."
+        )
+        XCTAssertTrue(scanView.contains("ForEach(scanInputs) { input in"))
+        XCTAssertTrue(scanView.contains("onDelete: { removeInput(sourceID: input.id) }"))
+        XCTAssertFalse(scanView.contains("removeInput(sourceID: scanInputs["))
     }
 
     func testInputRotationRegistryRejectsStaleRevisionWithoutReleasingTransaction() {
@@ -7417,10 +12481,170 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(ChekinanaNoMediaPolicy.hasNoImage("managed.jpg"))
     }
 
-    func testBatchAttachOverwritesLegacyWhitespaceImageReference() async throws {
+    func testChekiRecordAllocationRequiresExactDayAndIdolSetWithSizeAndEventWildcards() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let date = utcDate(2026, 8, 9)
+        let idolA = UUID()
+        let idolB = UUID()
+        let event = UUID()
+        let media = ChekinanaChekiRecordAllocationPolicy.MediaContext(
+            date: date,
+            idolIDs: [idolA, idolB],
+            eventID: event,
+            size: .wide
+        )
+        func candidate(
+            date candidateDate: Date? = nil,
+            idols: [UUID]? = nil,
+            eventID: UUID? = nil,
+            size: ChekiSize? = nil
+        ) -> ChekinanaChekiRecordAllocationPolicy.Candidate {
+            .init(
+                id: UUID(),
+                date: candidateDate ?? date,
+                idolIDs: idols ?? [idolB, idolA],
+                eventID: eventID,
+                size: size,
+                count: 1
+            )
+        }
+
+        XCTAssertTrue(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(), media: media, calendar: calendar
+        ))
+        XCTAssertTrue(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(eventID: event, size: .wide), media: media, calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(idols: [idolA]), media: media, calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(idols: [idolA, idolB, UUID()]), media: media, calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(date: date.addingTimeInterval(24 * 60 * 60)),
+            media: media,
+            calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(size: .mini), media: media, calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(eventID: UUID()), media: media, calendar: calendar
+        ))
+
+        let nilEventMedia = ChekinanaChekiRecordAllocationPolicy.MediaContext(
+            date: date,
+            idolIDs: [idolA, idolB],
+            eventID: nil,
+            size: .wide
+        )
+        XCTAssertTrue(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(), media: nilEventMedia, calendar: calendar
+        ))
+        XCTAssertFalse(ChekinanaChekiRecordAllocationPolicy.matches(
+            candidate(eventID: event), media: nilEventMedia, calendar: calendar
+        ))
+    }
+
+    func testChekiRecordAllocationExhaustsStablePriorityAndUsesUUIDTieBreak() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let date = utcDate(2026, 8, 9)
+        let idol = UUID()
+        let highID = UUID(uuidString: "00000000-0000-0000-0000-000000000030")!
+        let tieFirstID = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+        let tieSecondID = UUID(uuidString: "00000000-0000-0000-0000-000000000020")!
+        let media = Array(repeating: ChekinanaChekiRecordAllocationPolicy.MediaContext(
+            date: date,
+            idolIDs: [idol],
+            eventID: nil,
+            size: .mini
+        ), count: 6)
+        let candidates = [
+            ChekinanaChekiRecordAllocationPolicy.Candidate(
+                id: tieSecondID, date: date, idolIDs: [idol], eventID: nil,
+                size: .mini, count: 1
+            ),
+            ChekinanaChekiRecordAllocationPolicy.Candidate(
+                id: highID, date: date, idolIDs: [idol], eventID: nil,
+                size: nil, count: 3
+            ),
+            ChekinanaChekiRecordAllocationPolicy.Candidate(
+                id: tieFirstID, date: date, idolIDs: [idol], eventID: nil,
+                size: .mini, count: 1
+            )
+        ]
+        XCTAssertEqual(
+            ChekinanaChekiRecordAllocationPolicy.allocationIDs(
+                media: media,
+                candidates: candidates,
+                calendar: calendar
+            ),
+            [highID, highID, highID, tieFirstID, tieSecondID, nil]
+        )
+    }
+
+    func testMediaItemDefaultsChekiSizeButNeverAddsSizeToPhotoOrVideo() {
+        let cheki = MediaItem(kind: .cheki, size: nil, mediaRef: "cheki.jpg")
+        let shame = MediaItem(kind: .shame, size: .wide, mediaRef: "photo.jpg")
+        let douga = MediaItem(kind: .douga, size: .wide, mediaRef: "video.mp4")
+
+        XCTAssertEqual(cheki.size, .mini)
+        XCTAssertEqual(cheki.sizeRawValue, ChekiSize.mini.rawValue)
+        XCTAssertNil(shame.size)
+        XCTAssertNil(shame.sizeRawValue)
+        XCTAssertNil(douga.size)
+        XCTAssertNil(douga.sizeRawValue)
+    }
+
+    func testNativeBatchAllocationConsumesAcrossRecordsByCountPriority() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let date = utcDate(2026, 8, 9)
+        let idol = Idol(name: "Allocation Idol")
+        let low = ChekiRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000010")!,
+            idols: [idol], date: date, size: .mini, note: "low", count: 2
+        )
+        let high = ChekiRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000020")!,
+            idols: [idol], date: date, size: nil, note: "high", count: 3
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(low)
+        fixture.context.insert(high)
+        try fixture.context.save()
+        let codes = try [UIColor.red, .blue, .green, .orange].map { color in
+            try attachConfirmation(
+                in: fixture,
+                target: low,
+                date: date,
+                imageData: scannerPNGData(color: color)
+            )
+        }
+
+        guard case .chekiCards(let cards) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
+            return XCTFail("expected automatic cross-record consumption")
+        }
+        XCTAssertEqual(cards.count, 4)
+        let records = try fixture.context.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].id, low.id)
+        XCTAssertEqual(records[0].count, 1)
+        let media = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(media.count, 4)
+        XCTAssertEqual(media.filter { $0.note == "high" }.count, 3)
+        XCTAssertEqual(media.filter { $0.note == "low" }.count, 1)
+        XCTAssertTrue(media.allSatisfy { $0.size == .mini })
+    }
+
+    func testBatchAttachConsumesSingleExistingRecord() async throws {
         let fixture = try makeFixture()
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: "  \n ")
+        let target = ChekiRecord(date: date, count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7435,16 +12659,73 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("expected successful existing-record attachment")
         }
 
-        XCTAssertEqual(cards.map(\.id), [target.id])
-        XCTAssertNotNil(target.imageRef?.nonEmpty)
-        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<Cheki>()).count, 1)
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<MediaItem>()).count, 1)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
         cleanupManagedImages(in: fixture.context)
     }
 
-    func testBatchAttachRejectsDuplicateReservationOfOneExistingRecord() async throws {
+    func testBatchAttachDecrementsMultiCountRecordAndPreservesBusinessFields() async throws {
         let fixture = try makeFixture()
-        let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        defer { cleanupManagedImages(in: fixture.context) }
+        let idol = Idol(name: "Attach Idol")
+        let event = Event(name: "Attach Event")
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        let date = utcDate(2026, 8, 10)
+        let target = ChekiRecord(
+            idols: [idol],
+            event: event,
+            date: date,
+            size: .wide,
+            note: "preserved",
+            count: 3
+        )
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let code = try attachConfirmation(
+            in: fixture,
+            target: target,
+            date: date,
+            imageData: scannerPNGData(color: .cyan)
+        )
+
+        guard case .chekiCards(let cards) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: [code]) else {
+            return XCTFail("expected existing-record attachment")
+        }
+        XCTAssertEqual(cards.count, 1)
+        let remaining = try XCTUnwrap(
+            fixture.context.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(remaining.id, target.id)
+        XCTAssertEqual(remaining.count, 2)
+        let media = try XCTUnwrap(
+            fixture.context.fetch(FetchDescriptor<MediaItem>()).first
+        )
+        XCTAssertEqual(media.kind, .cheki)
+        XCTAssertEqual(media.idolIDs, [idol.id])
+        XCTAssertEqual(media.eventID, event.id)
+        XCTAssertEqual(media.date, date)
+        XCTAssertEqual(media.size, .wide)
+        XCTAssertEqual(media.note, "preserved")
+    }
+
+    func testScanReviewBatchAttachConsumesTwoAndFreshIdolDetailFetchIsStable() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let idol = Idol(name: "Batch Detail Idol")
+        let date = utcDate(2026, 8, 10)
+        let event = Event(name: "Batch Detail Event", date: date)
+        let target = ChekiRecord(
+            idols: [idol],
+            date: date,
+            size: .wide,
+            note: "keep every field",
+            count: 3
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
         fixture.context.insert(target)
         try fixture.context.save()
         let codes = try [UIColor.red, .blue].map { color in
@@ -7456,15 +12737,204 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )
         }
 
-        guard case .text(let message) = await fixture.executor
+        guard case .chekiCards(let cards) = await fixture.executor
             .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
-            return XCTFail("expected duplicate reservation rejection")
+            return XCTFail("expected Scan review batch attachment")
         }
-        XCTAssertTrue(message.hasPrefix("error:"))
-        XCTAssertTrue(ChekinanaNoMediaPolicy.hasNoImage(target.imageRef))
+        XCTAssertEqual(cards.count, 2)
+
+        let detailContext = ModelContext(fixture.context.container)
+        let detailMedia = try detailContext.fetch(FetchDescriptor<MediaItem>())
+        let detailRecords = try detailContext.fetch(FetchDescriptor<ChekiRecord>())
+        let detailIdols = try detailContext.fetch(FetchDescriptor<Idol>())
+        XCTAssertEqual(detailMedia.count, 2)
+        XCTAssertEqual(detailRecords.count, 1)
+        XCTAssertEqual(detailRecords[0].count, 1)
+        XCTAssertEqual(detailRecords[0].date, date)
+        XCTAssertEqual(detailRecords[0].idolIDs, [idol.id])
+        // A unique same-day Event does not force an association when the
+        // Media payload explicitly remains unassociated.
+        XCTAssertNil(detailRecords[0].eventID)
+        XCTAssertTrue(detailMedia.allSatisfy { $0.eventID == nil })
+        XCTAssertEqual(detailRecords[0].size, .wide)
+        XCTAssertEqual(detailRecords[0].note, "keep every field")
+        let relationshipIndex = ChekinanaChekiRecordRelationshipIndex(idols: detailIdols)
+        XCTAssertEqual(relationshipIndex.idols(for: detailRecords[0]).map(\.id), [idol.id])
+        XCTAssertEqual(
+            ChekinanaIdolCardChekiCount.countsByIdolID(
+                mediaChekis: detailMedia,
+                simpleRecords: detailRecords,
+                hiddenIDs: []
+            )[idol.id],
+            3
+        )
     }
 
-    func testConcurrentBatchesLockSameExistingTargetBeforeAnySecondFileWrite() async throws {
+    func testScanReviewBatchWithEventPropagatesToPartiallyConsumedNilEventRecord() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let idol = Idol(name: "Propagation Idol")
+        let date = utcDate(2026, 8, 10)
+        let event = Event(name: "Propagation Event", date: date)
+        let target = ChekiRecord(
+            idols: [idol],
+            date: date,
+            size: .wide,
+            note: "preserve fields",
+            count: 2
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let code = try attachConfirmation(
+            in: fixture,
+            target: target,
+            date: date,
+            imageData: scannerPNGData(color: .cyan),
+            payloadEventID: event.id,
+            explicitlyEditedFields: [.event]
+        )
+
+        guard case .chekiCards(let cards) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: [code]) else {
+            return XCTFail("expected Event-associated Scan review attachment")
+        }
+        XCTAssertEqual(cards.count, 1)
+        let records = try fixture.context.fetch(FetchDescriptor<ChekiRecord>())
+        let remaining = try XCTUnwrap(records.first { $0.id == target.id })
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining.eventID, event.id)
+        XCTAssertEqual(remaining.date, date)
+        XCTAssertEqual(remaining.size, .wide)
+        XCTAssertEqual(remaining.note, "preserve fields")
+        let media = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(media.count, 1)
+        XCTAssertEqual(media[0].eventID, event.id)
+        XCTAssertEqual(media[0].date, date)
+        XCTAssertEqual(media[0].size, .wide)
+    }
+
+    func testScanReviewBatchPreservesRecordDateAcrossEveryBoundaryAndStoreReopen() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-record-consumption-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let configuration = ModelConfiguration(
+            "RecordConsumption",
+            schema: schema,
+            url: directory.appendingPathComponent("RecordConsumption.store"),
+            cloudKitDatabase: .none
+        )
+        let date = utcDate(2026, 8, 10)
+        let idolID = UUID()
+        let targetID = UUID()
+        do {
+            let container = try ModelContainer(for: schema, configurations: [configuration])
+            let fixture = try makeFixture(container: container)
+            let idol = Idol(id: idolID, name: "Persistent Batch Idol")
+            let target = ChekiRecord(
+                id: targetID,
+                idols: [idol],
+                date: date,
+                size: .wide,
+                note: "preserved",
+                count: 3
+            )
+            fixture.context.insert(idol)
+            fixture.context.insert(target)
+            try fixture.context.save()
+            let codes = try [UIColor.red, .blue].map { color in
+                try attachConfirmation(
+                    in: fixture,
+                    target: target,
+                    date: date,
+                    imageData: scannerPNGData(color: color)
+                )
+            }
+
+            guard case .chekiCards(let cards) = await fixture.executor
+                .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
+                return XCTFail("expected persistent Scan review batch attachment")
+            }
+            XCTAssertEqual(cards.count, 2)
+        }
+        let reopened = try ModelContainer(for: schema, configurations: [configuration])
+        let reopenedContext = ModelContext(reopened)
+        let record = try XCTUnwrap(
+            try reopenedContext.fetch(FetchDescriptor<ChekiRecord>()).first { $0.id == targetID }
+        )
+        XCTAssertEqual(record.count, 1)
+        XCTAssertEqual(record.date, date)
+        XCTAssertEqual(record.idolIDs, [idolID])
+        XCTAssertEqual(record.size, .wide)
+        XCTAssertEqual(record.note, "preserved")
+        XCTAssertEqual(try reopenedContext.fetch(FetchDescriptor<MediaItem>()).count, 2)
+        cleanupManagedImages(in: reopenedContext)
+    }
+
+    func testBatchAttachConsumesMultipleMediaFromOneExistingRecord() async throws {
+        let fixture = try makeFixture()
+        let date = utcDate(2026, 8, 9)
+        let target = ChekiRecord(date: date, count: 2)
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let codes = try [UIColor.red, .blue].map { color in
+            try attachConfirmation(
+                in: fixture,
+                target: target,
+                date: date,
+                imageData: scannerPNGData(color: color)
+            )
+        }
+
+        guard case .chekiCards(let cards) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
+            return XCTFail("expected multi-photo attachment")
+        }
+        XCTAssertEqual(cards.count, 2)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
+        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<MediaItem>()).count, 2)
+        let detailContext = ModelContext(fixture.context.container)
+        let detailRecords = try detailContext.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertTrue(detailRecords.isEmpty)
+        XCTAssertEqual(try detailContext.fetch(FetchDescriptor<MediaItem>()).count, 2)
+        cleanupManagedImages(in: fixture.context)
+    }
+
+    func testBatchAttachBeyondRemainingCountClampsAtZeroAndKeepsAllMedia() async throws {
+        let fixture = try makeFixture()
+        let date = utcDate(2026, 8, 9)
+        let target = ChekiRecord(date: date, count: 1)
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let codes = try [UIColor.red, .blue].map { color in
+            try attachConfirmation(
+                in: fixture,
+                target: target,
+                date: date,
+                imageData: scannerPNGData(color: color)
+            )
+        }
+
+        guard case .chekiCards(let cards) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
+            return XCTFail("expected attachment to clamp the remaining quantity")
+        }
+        XCTAssertEqual(cards.count, 2)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
+        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<MediaItem>()).count, 2)
+        let detailContext = ModelContext(fixture.context.container)
+        let detailRecords = try detailContext.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertTrue(detailRecords.isEmpty)
+        XCTAssertEqual(try detailContext.fetch(FetchDescriptor<MediaItem>()).count, 2)
+        cleanupManagedImages(in: fixture.context)
+    }
+
+    func testConcurrentBatchesWithSameSelectedTargetUseLiveAutomaticAllocation() async throws {
         let limiter = ChekinanaRemoteRequestLimiter(limit: 1)
         let holderStarted = expectation(description: "hold image preparation")
         let holderRelease = ScannerReleaseGate()
@@ -7478,7 +12948,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         let fixture = try makeFixture(batchImagePreparationLimiter: limiter)
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        let target = ChekiRecord(date: date, count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let firstCode = try attachConfirmation(
@@ -7498,44 +12968,42 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 confirmationCodes: [firstCode]
             )
         }
-        let didReserveTarget = await waitForExistingTargetReservation(
+        let firstReserved = await waitForConfirmationReservation(
             fixture.ledger,
-            targetID: target.id
+            code: firstCode
         )
-        XCTAssertTrue(didReserveTarget)
-
-        guard case .text(let rejection) = await fixture.executor
-            .confirmTemporaryChekiBatch(confirmationCodes: [secondCode]) else {
-            return XCTFail("a second batch must not reserve the same target")
+        XCTAssertTrue(firstReserved)
+        let second = Task {
+            await fixture.executor.confirmTemporaryChekiBatch(
+                confirmationCodes: [secondCode]
+            )
         }
-        XCTAssertTrue(rejection.hasPrefix("error:"))
-        XCTAssertNil(ChekiImageRefResolver.managedChekiFileURL(
-            for: target.imageRef,
-            chekiID: target.id
-        ))
-        XCTAssertNotNil(fixture.ledger.entry(for: secondCode))
+        let secondReserved = await waitForConfirmationReservation(
+            fixture.ledger,
+            code: secondCode
+        )
+        XCTAssertTrue(secondReserved)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
 
         await holderRelease.release()
         _ = try await holder.value
-        guard case .chekiCards(let firstCards) = await first.value else {
-            return XCTFail("the first reserved batch must remain saveable")
-        }
-        XCTAssertEqual(firstCards.map(\.id), [target.id])
-        XCTAssertNotNil(ChekiImageRefResolver.managedChekiFileURL(
-            for: target.imageRef,
-            chekiID: target.id
-        ))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
-        XCTAssertNotNil(fixture.ledger.entry(for: secondCode))
-        XCTAssertTrue(fixture.ledger.cancel(secondCode))
+        let responses = await [first.value, second.value]
+        XCTAssertTrue(responses.allSatisfy {
+            if case .chekiCards(let cards) = $0 { return cards.count == 1 }
+            return false
+        })
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 2)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
+        XCTAssertNil(fixture.ledger.entry(for: firstCode))
+        XCTAssertNil(fixture.ledger.entry(for: secondCode))
         cleanupManagedImages(in: fixture.context)
     }
 
     func testConcurrentBatchesAllowDifferentExistingTargets() async throws {
         let fixture = try makeFixture()
         let date = utcDate(2026, 8, 9)
-        let firstTarget = Cheki(date: date, imageRef: nil)
-        let secondTarget = Cheki(date: date, imageRef: nil)
+        let firstTarget = ChekiRecord(date: date, count: 1)
+        let secondTarget = ChekiRecord(date: date, count: 1)
         fixture.context.insert(firstTarget)
         fixture.context.insert(secondTarget)
         try fixture.context.save()
@@ -7567,10 +13035,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             if case .chekiCards = $0 { return true }
             return false
         })
-        XCTAssertNotNil(firstTarget.imageRef?.nonEmpty)
-        XCTAssertNotNil(secondTarget.imageRef?.nonEmpty)
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(firstTarget.id))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(secondTarget.id))
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 2)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
         cleanupManagedImages(in: fixture.context)
     }
 
@@ -7598,7 +13064,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("automatic idx must be replanned against live records")
         }
         XCTAssertEqual(cards.map(\.idx), [2])
-        let records = try fixture.context.fetch(FetchDescriptor<Cheki>())
+        let records = try fixture.context.fetch(FetchDescriptor<MediaItem>())
         XCTAssertEqual(records.first(where: { $0.id == pending.id })?.idx, 2)
         XCTAssertEqual(records.first(where: { $0.id == injector.insertedID })?.idx, 1)
         XCTAssertEqual(records.first(where: { $0.id == injector.insertedID })?.date, legacySameDayDate)
@@ -7636,7 +13102,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             for: "\(pending.id.uuidString).png",
             chekiID: pending.id
         ))
-        let records = try fixture.context.fetch(FetchDescriptor<Cheki>())
+        let records = try fixture.context.fetch(FetchDescriptor<MediaItem>())
         XCTAssertEqual(records.map(\.id), [injector.insertedID])
         XCTAssertEqual(records.first?.idx, 1)
         XCTAssertEqual(records.first?.date, legacySameDayDate)
@@ -7645,7 +13111,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testBatchLedgerReservationRejectsDuplicateInConstantTimeAndReleases() async throws {
         let fixture = try makeFixture()
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        let target = ChekiRecord(date: date, count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7675,10 +13141,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(fixture.ledger.cancel(code))
     }
 
-    func testBatchAttachRefetchRejectsTargetThatBecameMediaBacked() async throws {
+    func testBatchAttachIgnoresStaleManualSnapshotAndUsesLiveRecordPriority() async throws {
         let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        let target = ChekiRecord(date: date, note: "before", count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7687,21 +13154,29 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             date: date,
             imageData: scannerPNGData(color: .green)
         )
-        target.imageRef = "already-managed.jpg"
+        target.note = "changed"
+        let livePriority = ChekiRecord(date: date, note: "live priority", count: 2)
+        fixture.context.insert(livePriority)
         try fixture.context.save()
 
-        guard case .text(let message) = await fixture.executor
+        guard case .chekiCards(let cards) = await fixture.executor
             .confirmTemporaryChekiBatch(confirmationCodes: [code]) else {
-            return XCTFail("expected media-backed conflict")
+            return XCTFail("expected allocation against the latest live records")
         }
-        XCTAssertTrue(message.hasPrefix("error:"))
-        XCTAssertEqual(target.imageRef, "already-managed.jpg")
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(target.note, "changed")
+        XCTAssertEqual(target.count, 1)
+        XCTAssertEqual(livePriority.count, 1)
+        let media = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(media.count, 1)
+        XCTAssertEqual(media[0].note, "live priority")
+        XCTAssertNil(fixture.ledger.entry(for: code))
     }
 
     func testBatchAttachFilePreparationFailureLeavesExistingRecordRecoverable() async throws {
         let fixture = try makeFixture()
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: " \t ")
+        let target = ChekiRecord(date: date, count: 2)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7716,11 +13191,43 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("expected image preparation failure")
         }
         XCTAssertTrue(message.hasPrefix("error:"))
-        XCTAssertEqual(target.imageRef, " \t ")
+        XCTAssertEqual(target.count, 2)
         XCTAssertNotNil(fixture.ledger.entry(for: code))
         XCTAssertFalse(fixture.ledger.isTemporaryChekiBatchReserved(code))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
         XCTAssertTrue(fixture.ledger.cancel(code))
+    }
+
+    func testBatchAttachDatabasePhaseFailureRestoresRecordAndRemovesPreparedFile() async throws {
+        let fixture = try makeFixture(batchBeforeLiveIndexValidation: {
+            throw ScannerMockError.failed
+        })
+        let date = utcDate(2026, 8, 9)
+        let target = ChekiRecord(date: date, note: "unchanged", count: 2)
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let filesBefore = try managedChekiFilenames()
+        let code = try attachConfirmation(
+            in: fixture,
+            target: target,
+            date: date,
+            imageData: scannerPNGData(color: .magenta)
+        )
+
+        guard case .text(let message) = await fixture.executor
+            .confirmTemporaryChekiBatch(confirmationCodes: [code]) else {
+            return XCTFail("expected injected database-phase failure")
+        }
+        XCTAssertTrue(message.hasPrefix("error:"))
+        let remaining = try XCTUnwrap(
+            fixture.context.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(remaining.id, target.id)
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertEqual(remaining.note, "unchanged")
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
+        XCTAssertEqual(try managedChekiFilenames(), filesBefore)
+        XCTAssertNotNil(fixture.ledger.entry(for: code))
+        XCTAssertFalse(fixture.ledger.isTemporaryChekiBatchReserved(code))
     }
 
     func testBatchCancellationBeforeSaveReleasesReservation() async throws {
@@ -7737,7 +13244,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         let fixture = try makeFixture(batchImagePreparationLimiter: limiter)
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        let target = ChekiRecord(date: date, count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7763,7 +13270,6 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         XCTAssertTrue(message.hasPrefix("error:"))
         XCTAssertFalse(fixture.ledger.isTemporaryChekiBatchReserved(code))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
         XCTAssertNotNil(fixture.ledger.entry(for: code))
         await holderRelease.release()
         _ = try await holder.value
@@ -7772,7 +13278,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testBatchFinalizeRecoveryPreservesCommittedRecordAndManagedFile() async throws {
         let fixture = try makeFixture(simulateBatchFinalizeInvariantFailure: true)
         let date = utcDate(2026, 8, 9)
-        let target = Cheki(date: date, imageRef: nil)
+        let target = ChekiRecord(date: date, count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let code = try attachConfirmation(
@@ -7786,16 +13292,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             .confirmTemporaryChekiBatch(confirmationCodes: [code]) else {
             return XCTFail("a post-save finalization invariant must remain committed")
         }
-        XCTAssertEqual(cards.map(\.id), [target.id])
+        XCTAssertEqual(cards.count, 1)
+        let saved = try XCTUnwrap(fixture.context.fetch(FetchDescriptor<MediaItem>()).first)
         let fileURL = try XCTUnwrap(ChekiImageRefResolver.managedChekiFileURL(
-            for: target.imageRef,
-            chekiID: target.id
+            for: saved.imageRef,
+            chekiID: saved.mediaOwnerID
         ))
         XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
         XCTAssertNil(fixture.ledger.entry(for: code))
         XCTAssertEqual(fixture.ledger.committedTemporaryBatchRecoveryCount, 1)
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
-        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<Cheki>()).count, 1)
+        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<MediaItem>()).count, 1)
         cleanupManagedImages(in: fixture.context)
     }
 
@@ -7929,6 +13435,194 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
     }
 
+    func testCameraLifecycleLateResetCallbacksCannotClearNewCapture() throws {
+        var lifecycle = ChekinanaCameraCaptureLifecycle()
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        let captureA = UUID()
+        XCTAssertTrue(lifecycle.register(
+            systemID: 101,
+            captureID: captureA,
+            filenameExtension: "heic"
+        ))
+
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        let captureB = UUID()
+        XCTAssertTrue(lifecycle.register(
+            systemID: 202,
+            captureID: captureB,
+            filenameExtension: "jpg"
+        ))
+
+        XCTAssertNil(lifecycle.beginProcessing(systemID: 101))
+        XCTAssertEqual(
+            lifecycle.finishCapture(systemID: 101, hasError: true),
+            .ignored
+        )
+        XCTAssertEqual(lifecycle.activeSystemID, 202)
+        XCTAssertEqual(lifecycle.state, .capturing)
+
+        let requestB = try XCTUnwrap(lifecycle.beginProcessing(systemID: 202))
+        XCTAssertEqual(requestB.captureID, captureB)
+        XCTAssertEqual(requestB.filenameExtension, "jpg")
+        XCTAssertEqual(
+            lifecycle.completeProcessingWithDelivery(systemID: 202),
+            .awaitingFinal
+        )
+        guard case .delivery(let deliveryB) = lifecycle.finishCapture(
+            systemID: 202,
+            hasError: false
+        ) else {
+            return XCTFail("The final callback must publish B's completed delivery")
+        }
+        XCTAssertEqual(deliveryB.captureID, captureB)
+        XCTAssertTrue(lifecycle.consume(
+            captureID: captureB,
+            generation: deliveryB.generation
+        ))
+        XCTAssertEqual(lifecycle.state, .ready)
+        XCTAssertTrue(lifecycle.requests.isEmpty)
+    }
+
+    func testCameraLifecycleCallbackOrderAndDuplicatesDeliverAtMostOnce() throws {
+        var lifecycle = ChekinanaCameraCaptureLifecycle()
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        let captureID = UUID()
+        XCTAssertTrue(lifecycle.register(
+            systemID: 303,
+            captureID: captureID,
+            filenameExtension: "heic"
+        ))
+
+        XCTAssertEqual(
+            lifecycle.finishCapture(systemID: 303, hasError: false),
+            .completed
+        )
+        XCTAssertNotNil(lifecycle.beginProcessing(systemID: 303))
+        guard case .delivery(let delivery) = lifecycle.completeProcessingWithDelivery(
+            systemID: 303
+        ) else { return XCTFail("Processing must publish after the final callback") }
+        XCTAssertNil(lifecycle.beginProcessing(systemID: 303))
+        XCTAssertEqual(
+            lifecycle.finishCapture(systemID: 303, hasError: false),
+            .ignored
+        )
+        XCTAssertTrue(lifecycle.consume(
+            captureID: captureID,
+            generation: delivery.generation
+        ))
+        XCTAssertFalse(lifecycle.consume(
+            captureID: captureID,
+            generation: delivery.generation
+        ))
+        XCTAssertEqual(lifecycle.state, .ready)
+        XCTAssertTrue(lifecycle.requests.isEmpty)
+    }
+
+    func testCameraLifecycleConsumptionNeverMasksSessionInterruption() throws {
+        var lifecycle = ChekinanaCameraCaptureLifecycle()
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        let captureID = UUID()
+        XCTAssertTrue(lifecycle.register(
+            systemID: 404,
+            captureID: captureID,
+            filenameExtension: "jpg"
+        ))
+        XCTAssertNotNil(lifecycle.beginProcessing(systemID: 404))
+        XCTAssertEqual(
+            lifecycle.completeProcessingWithDelivery(systemID: 404),
+            .awaitingFinal
+        )
+        guard case .delivery(let delivery) = lifecycle.finishCapture(
+            systemID: 404,
+            hasError: false
+        ) else { return XCTFail("Final callback must publish the stored photo") }
+        lifecycle.setCapability(.interrupted("interrupted"))
+        XCTAssertEqual(lifecycle.state, .interrupted("interrupted"))
+        XCTAssertTrue(lifecycle.isCaptureLocked)
+
+        XCTAssertTrue(lifecycle.consume(
+            captureID: captureID,
+            generation: delivery.generation
+        ))
+        XCTAssertEqual(lifecycle.state, .interrupted("interrupted"))
+        XCTAssertFalse(lifecycle.isCaptureLocked)
+
+        lifecycle.setCapability(.configuring)
+        XCTAssertEqual(lifecycle.state, .configuring)
+        lifecycle.setCapability(.running)
+        XCTAssertEqual(lifecycle.state, .ready)
+    }
+
+    func testCameraLifecycleUnknownAndFailedCallbacksOnlyReleaseTheirOwner() {
+        var lifecycle = ChekinanaCameraCaptureLifecycle()
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        let captureID = UUID()
+        XCTAssertTrue(lifecycle.register(
+            systemID: 505,
+            captureID: captureID,
+            filenameExtension: "jpg"
+        ))
+
+        XCTAssertNil(lifecycle.beginProcessing(systemID: 999))
+        XCTAssertEqual(
+            lifecycle.finishCapture(systemID: 999, hasError: true),
+            .ignored
+        )
+        XCTAssertEqual(lifecycle.activeSystemID, 505)
+        XCTAssertFalse(lifecycle.completeProcessingWithFailure(systemID: 999))
+        XCTAssertEqual(lifecycle.activeSystemID, 505)
+
+        XCTAssertNotNil(lifecycle.beginProcessing(systemID: 505))
+        XCTAssertTrue(lifecycle.completeProcessingWithFailure(systemID: 505))
+        lifecycle.setCapability(.failed("capture failed"))
+        XCTAssertEqual(lifecycle.state, .failed("capture failed"))
+        XCTAssertEqual(
+            lifecycle.finishCapture(systemID: 505, hasError: true),
+            .failed(discardCaptureID: captureID)
+        )
+        XCTAssertTrue(lifecycle.requests.isEmpty)
+    }
+
+    func testCameraLifecycleRepeatedCapturesAndTeardownLeaveNoLocksOrRequests() throws {
+        var lifecycle = ChekinanaCameraCaptureLifecycle()
+        lifecycle.beginNewSession()
+        lifecycle.setCapability(.running)
+        for systemID in Int64(1)...Int64(32) {
+            let captureID = UUID()
+            XCTAssertTrue(lifecycle.register(
+                systemID: systemID,
+                captureID: captureID,
+                filenameExtension: systemID.isMultiple(of: 2) ? "heic" : "jpg"
+            ))
+            XCTAssertNotNil(lifecycle.beginProcessing(systemID: systemID))
+            XCTAssertEqual(
+                lifecycle.completeProcessingWithDelivery(systemID: systemID),
+                .awaitingFinal
+            )
+            guard case .delivery(let delivery) = lifecycle.finishCapture(
+                systemID: systemID,
+                hasError: false
+            ) else { return XCTFail("Final callback must publish capture \(systemID)") }
+            XCTAssertTrue(lifecycle.consume(
+                captureID: captureID,
+                generation: delivery.generation
+            ))
+        }
+        XCTAssertEqual(lifecycle.state, .ready)
+        XCTAssertFalse(lifecycle.isCaptureLocked)
+        XCTAssertTrue(lifecycle.requests.isEmpty)
+
+        lifecycle.tearDown()
+        XCTAssertEqual(lifecycle.state, .idle)
+        XCTAssertFalse(lifecycle.isCaptureLocked)
+        XCTAssertTrue(lifecycle.requests.isEmpty)
+    }
+
     func testEmptyScanReviewCanDiscardWhileNonemptyReviewOnlyCloses() {
         XCTAssertTrue(ChekinanaScanReviewLifecycle.closeDiscardsReview(cardsAreEmpty: true))
         XCTAssertFalse(ChekinanaScanReviewLifecycle.closeDiscardsReview(cardsAreEmpty: false))
@@ -7949,9 +13643,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testCalendarGroupsMediaAndCountedRecordsPerIdolWithStableRouting() {
         let first = Idol(name: "A")
         let second = Idol(name: "B")
-        let shared = Cheki(idols: [first, second], date: Date(), idx: 1)
-        let firstOnly = Cheki(idols: [first], date: Date(), idx: 2)
-        let unassigned = Cheki(date: Date(), idx: 1)
+        let shared = MediaItem(idols: [first, second], date: Date(), idx: 1, imageRef: "shared.jpg")
+        let firstOnly = MediaItem(idols: [first], date: Date(), idx: 2, imageRef: "first-only.jpg")
+        let unassigned = MediaItem(date: Date(), idx: 1, imageRef: "unassigned.jpg")
         let firstRecord = ChekiRecord(idols: [first], date: Date(), count: 3)
         let secondRecord = ChekiRecord(idols: [second], date: Date(), count: 2)
         let secondRecordOtherIdentity = ChekiRecord(
@@ -8005,11 +13699,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let second = Idol(name: "B")
         let firstEvent = Event(name: "First Event")
         let secondEvent = Event(name: "Second Event")
-        let singleMediaA = Cheki(idols: [first], date: Date(), idx: 1)
-        let singleMediaB = Cheki(idols: [first], date: Date(), idx: 2)
+        let singleMediaA = MediaItem(idols: [first], date: Date(), idx: 1, imageRef: "single-a.jpg")
+        let singleMediaB = MediaItem(idols: [first], date: Date(), idx: 2, imageRef: "single-b.jpg")
         let singleRecord = ChekiRecord(idols: [first], date: Date(), count: 3)
-        let multiMediaA = Cheki(idols: [second, first], date: Date(), idx: 3)
-        let multiMediaB = Cheki(idols: [first, second], date: Date(), idx: 4)
+        let multiMediaA = MediaItem(idols: [second, first], date: Date(), idx: 3, imageRef: "multi-a.jpg")
+        let multiMediaB = MediaItem(idols: [first, second], date: Date(), idx: 4, imageRef: "multi-b.jpg")
         let multiRecordA = ChekiRecord(
             idols: [second, first],
             event: firstEvent,
@@ -8024,12 +13718,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             size: .wide,
             count: 5
         )
-        let shame = Shame(
+        let shame = MediaItem(
             imageRef: "shame.jpg",
             idols: [first, second],
             date: Date()
         )
-        let douga = Douga(
+        let douga = MediaItem(
             videoRef: "douga.mov",
             idols: [second, first],
             date: Date()
@@ -8145,7 +13839,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     @MainActor
     func testCalendarGroupOrderPersistsAndUpsertsWithoutDuplicateIdentity() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV10.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -8233,6 +13927,227 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             try XCTUnwrap(result.stops[0].departure),
             try XCTUnwrap(result.stops[2].arrival)
         )
+    }
+
+    func testScheduleClientStrictTimestampParsingUsesCompleteGregorianSemantics() throws {
+        func response(
+            departure: String,
+            arrival: String? = nil
+        ) throws -> ChekinanaScheduleHTTPResponse {
+            let body: [String: Any] = [
+                "operator": "CR",
+                "stops": [
+                    ["name": "Origin", "departure": departure],
+                    ["name": "Destination", "arrival": arrival ?? departure],
+                ],
+            ]
+            return ChekinanaScheduleHTTPResponse(
+                data: try JSONSerialization.data(withJSONObject: body),
+                statusCode: 200
+            )
+        }
+
+        func utcDate(
+            _ year: Int,
+            _ month: Int,
+            _ day: Int,
+            _ hour: Int,
+            _ minute: Int,
+            _ second: Int,
+            fraction: TimeInterval = 0
+        ) throws -> Date {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+            return try XCTUnwrap(
+                calendar.date(
+                    from: DateComponents(
+                        year: year,
+                        month: month,
+                        day: day,
+                        hour: hour,
+                        minute: minute,
+                        second: second
+                    )
+                )
+            ).addingTimeInterval(fraction)
+        }
+
+        struct AcceptedCase {
+            let label: String
+            let timestamp: String
+            let expectedDate: Date
+            let expectedOffset: Int
+        }
+        let accepted = [
+            AcceptedCase(
+                label: "leap day Z",
+                timestamp: "2024-02-29T23:59:59Z",
+                expectedDate: try utcDate(2024, 2, 29, 23, 59, 59),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "equivalent positive zero offset",
+                timestamp: "2024-02-29T23:59:59+00:00",
+                expectedDate: try utcDate(2024, 2, 29, 23, 59, 59),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "negative zero offset",
+                timestamp: "2024-02-29T23:59:59-00:00",
+                expectedDate: try utcDate(2024, 2, 29, 23, 59, 59),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "one fractional digit",
+                timestamp: "2024-02-29T23:59:59.1Z",
+                expectedDate: try utcDate(2024, 2, 29, 23, 59, 59, fraction: 0.1),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "equivalent three fractional digits",
+                timestamp: "2024-02-29T23:59:59.100+00:00",
+                expectedDate: try utcDate(2024, 2, 29, 23, 59, 59, fraction: 0.1),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "long fractional seconds",
+                timestamp: "2024-02-29T23:59:59.123456789012345678Z",
+                expectedDate: try utcDate(
+                    2024,
+                    2,
+                    29,
+                    23,
+                    59,
+                    59,
+                    fraction: 0.123456789012345678
+                ),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "long fractional seconds near next second",
+                timestamp: "2024-02-29T23:59:59.999999999999999999Z",
+                expectedDate: try utcDate(
+                    2024,
+                    2,
+                    29,
+                    23,
+                    59,
+                    59,
+                    fraction: 0.999999999
+                ),
+                expectedOffset: 0
+            ),
+            AcceptedCase(
+                label: "positive offset",
+                timestamp: "2026-08-29T23:50:00+09:00",
+                expectedDate: try utcDate(2026, 8, 29, 14, 50, 0),
+                expectedOffset: 9 * 3_600
+            ),
+            AcceptedCase(
+                label: "negative offset",
+                timestamp: "2026-08-29T05:30:00-04:30",
+                expectedDate: try utcDate(2026, 8, 29, 10, 0, 0),
+                expectedOffset: -(4 * 3_600 + 30 * 60)
+            ),
+            AcceptedCase(
+                label: "maximum representable offset",
+                timestamp: "2026-08-29T18:00:00+18:00",
+                expectedDate: try utcDate(2026, 8, 29, 0, 0, 0),
+                expectedOffset: 18 * 3_600
+            ),
+        ]
+        for item in accepted {
+            let result = try ChekinanaScheduleClient.decode(
+                try response(departure: item.timestamp)
+            )
+            let departure = try XCTUnwrap(result.stops.first?.departure, item.label)
+            let arrival = try XCTUnwrap(result.stops.last?.arrival, item.label)
+            XCTAssertEqual(
+                departure.timeIntervalSinceReferenceDate,
+                item.expectedDate.timeIntervalSinceReferenceDate,
+                accuracy: 0.000_001,
+                item.label
+            )
+            XCTAssertEqual(arrival, departure, item.label)
+            XCTAssertEqual(
+                result.stops.first?.departureTimeZone?.secondsFromGMT(),
+                item.expectedOffset,
+                item.label
+            )
+            XCTAssertEqual(
+                result.stops.last?.arrivalTimeZone?.secondsFromGMT(),
+                item.expectedOffset,
+                item.label
+            )
+        }
+
+        let dateLineRoute = try ChekinanaScheduleClient.decode(
+            try response(
+                departure: "2026-08-30T00:30:00+14:00",
+                arrival: "2026-08-29T23:00:00-10:00"
+            )
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(dateLineRoute.stops.first?.departure),
+            try XCTUnwrap(dateLineRoute.stops.last?.arrival)
+        )
+        XCTAssertEqual(
+            dateLineRoute.stops.first?.departureTimeZone?.secondsFromGMT(),
+            14 * 3_600
+        )
+        XCTAssertEqual(
+            dateLineRoute.stops.last?.arrivalTimeZone?.secondsFromGMT(),
+            -10 * 3_600
+        )
+        XCTAssertNil(dateLineRoute.stops.first?.arrival)
+        XCTAssertNil(dateLineRoute.stops.last?.departure)
+
+        let rejected = [
+            "2026-02-30T12:00:00Z",
+            "2025-02-29T12:00:00Z",
+            "0000-01-01T12:00:00Z",
+            "2026-00-01T12:00:00Z",
+            "2026-13-01T12:00:00Z",
+            "2026-01-00T12:00:00Z",
+            "2026-01-32T12:00:00Z",
+            "2026-08-29T24:00:00Z",
+            "2026-08-29T23:60:00Z",
+            "2026-08-29T23:59:60Z",
+            "2026-08-29T12:00:00+18:01",
+            "2026-08-29T12:00:00-18:01",
+            "2026-08-29T12:00:00+24:00",
+            "2026-08-29T12:00:00+08:60",
+            "2026-08-29T12:00:00+0800",
+            "2026-08-29T12:00:00Z+00:00",
+            "2026-08-29T12:00:00+00:00Z",
+            "2026-08-29T12:00:00+09:00+08:00",
+            "2026-08-29T12:00:00Zgarbage",
+            "2026-08-29T12:00:00Zgarbage+09:00",
+            "2026-08-29T12:00:00Z\n",
+            "2026-08-29T12:00:00+08:00\n",
+            "2026-08-29T12:00:00Z ",
+            " 2026-08-29T12:00:00Z",
+            "2026-08-29T12:00:00.Z",
+            "2026-08-29T12:00:00.fZ",
+            "2026-08-29t12:00:00Z",
+            "2026-08-29T12:00:00z",
+            "2026-08-29 12:00:00Z",
+            "2026-08-29T12:00Z",
+        ]
+        for timestamp in rejected {
+            XCTAssertThrowsError(
+                try ChekinanaScheduleClient.decode(
+                    try response(departure: timestamp)
+                ),
+                timestamp.debugDescription
+            ) {
+                XCTAssertEqual(
+                    $0 as? ChekinanaScheduleClientError,
+                    .invalidSchedule,
+                    timestamp.debugDescription
+                )
+            }
+        }
     }
 
     func testScheduleClientErrorsCancellationSelectionAndOperatorIcons() async throws {
@@ -8411,7 +14326,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             Data([0x03])
         )
 
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -8614,14 +14529,32 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )?.lowerBound
         )
         let viewer = source[viewerStart..<viewerEnd]
-        XCTAssertTrue(viewer.contains("visibleCheki.idols"))
-        XCTAssertTrue(viewer.contains("ChekinanaProductDate.displayString("))
-        XCTAssertTrue(viewer.contains("visibleCheki.date"))
+        let pageEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaLegacyGalleryDetailView",
+                range: viewerEnd..<source.endIndex
+            )?.lowerBound
+        )
+        let page = source[viewerEnd..<pageEnd]
+        let chromeStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaMediaViewerPageChrome")?.lowerBound
+        )
+        let chromeEnd = try XCTUnwrap(
+            source.range(
+                of: "enum ChekinanaGalleryVideoInteractionPolicy",
+                range: chromeStart..<source.endIndex
+            )?.lowerBound
+        )
+        let chrome = source[chromeStart..<chromeEnd]
+        XCTAssertTrue(page.contains("idols: cheki.idols"))
+        XCTAssertTrue(page.contains("date: cheki.date"))
+        XCTAssertTrue(page.contains("ChekinanaMediaViewerPageChrome("))
+        XCTAssertTrue(chrome.contains("ChekinanaProductDate.displayString(date)"))
         XCTAssertTrue(viewer.contains("onChange(of: visibleID)"))
-        XCTAssertTrue(viewer.contains("VStack(alignment: .leading, spacing: 3)"))
-        XCTAssertTrue(viewer.contains("size: 34"))
-        XCTAssertTrue(viewer.contains(".padding(.horizontal, 16)"))
-        XCTAssertTrue(viewer.contains(".padding(.vertical, 8)"))
+        XCTAssertTrue(chrome.contains("VStack(alignment: .leading, spacing: 3)"))
+        XCTAssertTrue(chrome.contains("size: 34"))
+        XCTAssertTrue(chrome.contains(".padding(.horizontal, 16)"))
+        XCTAssertTrue(chrome.contains(".padding(.vertical, 8)"))
         XCTAssertFalse(viewer.contains("ChekinanaRecordKind.cheki.title"))
 
         let detailStart = try XCTUnwrap(
@@ -8718,26 +14651,1044 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             gallery.range(of: "chekinana.gallery.grid-controls")?.lowerBound
         )
         let mediaType = try XCTUnwrap(
-            gallery.range(of: "Picker(\"Media type\"")?.lowerBound
+            gallery.range(of: "Picker(ChekinanaL10n.message(\"Media type\")")?.lowerBound
         )
         XCTAssertLessThan(galleryTitle, gridControls)
         XCTAssertLessThan(gridControls, mediaType)
-        XCTAssertTrue(gallery.contains("private var filteredChekis: [Cheki]"))
-        XCTAssertTrue(gallery.contains("chekis: filteredChekis"))
+        XCTAssertTrue(gallery.contains(
+            "@State private var filteredChekisSnapshot: [MediaItem]"
+        ))
+        XCTAssertTrue(gallery.contains("chekis: filteredChekisSnapshot"))
 
         let idolGroupStart = try XCTUnwrap(
             source.range(of: "private struct ChekinanaIdolMediaDateGroupView")?.lowerBound
         )
         let idolGroupEnd = try XCTUnwrap(
             source.range(
-                of: "private struct ChekinanaIdolNoMediaChekiGroupView",
+                of: "struct ChekinanaChekiRecordSelection",
                 range: idolGroupStart..<source.endIndex
             )?.lowerBound
         )
         let idolGroup = source[idolGroupStart..<idolGroupEnd]
-        XCTAssertTrue(idolGroup.contains("private var dateGroupMediaChekis: [Cheki]"))
-        XCTAssertTrue(idolGroup.contains("chekis: dateGroupMediaChekis"))
+        XCTAssertTrue(idolGroup.contains("private var dateGroupMediaChekis: [MediaItem]"))
+        XCTAssertTrue(idolGroup.contains("ChekinanaIdolChekiPagerScope.items("))
+        XCTAssertTrue(idolGroup.contains("from: dateGroupMediaChekis"))
+        XCTAssertTrue(idolGroup.contains("matching: value"))
         XCTAssertTrue(idolGroup.contains("initialID: value.id"))
+        XCTAssertTrue(idolGroup.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertFalse(source.contains("private struct ChekinanaIdolNoMediaChekiGroupView"))
+    }
+
+    func testIdolChekiPagerScopeMatchesExactDateAndCompleteIdolSet() {
+        let idolA = Idol(id: UUID(), name: "A")
+        let idolB = Idol(id: UUID(), name: "B")
+        let selectedDate = utcDate(2026, 8, 30)
+        let otherDate = utcDate(2026, 8, 29)
+        let selected = MediaItem(
+            idols: [idolA],
+            date: selectedDate,
+            imageRef: "selected.jpg"
+        )
+        let sameGroup = MediaItem(
+            idols: [idolA],
+            date: selectedDate,
+            imageRef: "same-group.jpg"
+        )
+        let reorderedSameSet = MediaItem(
+            idols: [idolB, idolA],
+            date: selectedDate,
+            imageRef: "reordered-set.jpg"
+        )
+        let sameSet = MediaItem(
+            idols: [idolA, idolB],
+            date: selectedDate,
+            imageRef: "same-set.jpg"
+        )
+        let differentCombination = MediaItem(
+            idols: [idolA, idolB],
+            date: selectedDate,
+            imageRef: "different-combination.jpg"
+        )
+        let differentDate = MediaItem(
+            idols: [idolA],
+            date: otherDate,
+            imageRef: "different-date.jpg"
+        )
+
+        XCTAssertEqual(
+            ChekinanaIdolChekiPagerScope.items(
+                from: [differentCombination, selected, differentDate, sameGroup],
+                matching: selected
+            ).map(\.id),
+            [selected.id, sameGroup.id]
+        )
+        XCTAssertEqual(
+            ChekinanaIdolChekiPagerScope.items(
+                from: [reorderedSameSet, sameSet, selected],
+                matching: sameSet
+            ).map(\.id),
+            [reorderedSameSet.id, sameSet.id]
+        )
+    }
+
+    func testCalendarChekiOrderUsesSignedPersistentIndex() throws {
+        let idol = Idol(name: "Calendar order")
+        let date = utcDate(2026, 8, 30)
+        let base = Date(timeIntervalSince1970: 1_000)
+        let standardFirst = MediaItem(
+            idols: [idol], date: date, idx: 1,
+            imageRef: "standard-first.jpg", createdAt: base
+        )
+        let favoriteSecond = MediaItem(
+            idols: [idol], date: date, idx: -1,
+            imageRef: "favorite-second.jpg", isFavorite: true,
+            createdAt: base.addingTimeInterval(1)
+        )
+        let standardSecond = MediaItem(
+            idols: [idol], date: date, idx: 3,
+            imageRef: "standard-second.jpg", createdAt: base.addingTimeInterval(2)
+        )
+        let favoriteFirst = MediaItem(
+            idols: [idol], date: date, idx: -2,
+            imageRef: "favorite-first.jpg", isFavorite: true,
+            createdAt: base.addingTimeInterval(3)
+        )
+        let input = [standardSecond, favoriteSecond, standardFirst, favoriteFirst]
+
+        XCTAssertEqual(
+            ChekinanaRecordOrdering.orderedChekis(input).map(\.id),
+            [favoriteFirst.id, favoriteSecond.id, standardFirst.id, standardSecond.id]
+        )
+        let group = try XCTUnwrap(ChekinanaCalendarIdolGroup.groups(
+            for: input,
+            records: [],
+            relationshipIndex: .init(idols: [idol]),
+            groupsByExactIdolCombination: true
+        ).first)
+        XCTAssertEqual(
+            group.chekis.map(\.id),
+            [favoriteFirst.id, favoriteSecond.id, standardFirst.id, standardSecond.id]
+        )
+    }
+
+    func testUnifiedChekiOrderKeepsFavoritesFirstAndReordersOnlyWithinPartition() throws {
+        let favoriteA = UUID()
+        let favoriteB = UUID()
+        let standardA = UUID()
+        let standardB = UUID()
+        let base = Date(timeIntervalSince1970: 1_000)
+        let values = [
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: standardA,
+                isFavorite: false,
+                idx: 1,
+                createdAt: base
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: favoriteA,
+                isFavorite: true,
+                idx: -2,
+                createdAt: base
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: standardB,
+                isFavorite: false,
+                idx: 2,
+                createdAt: base
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: favoriteB,
+                isFavorite: true,
+                idx: -1,
+                createdAt: base
+            ),
+        ]
+
+        XCTAssertEqual(
+            ChekinanaUnifiedChekiOrderPolicy.orderedIDs(values),
+            [favoriteA, favoriteB, standardA, standardB]
+        )
+        XCTAssertEqual(
+            try ChekinanaUnifiedChekiOrderPolicy.reorderedIDs(
+                moving: standardB,
+                toPartitionIndex: 0,
+                values: values
+            ),
+            [favoriteA, favoriteB, standardB, standardA]
+        )
+        XCTAssertEqual(
+            try ChekinanaUnifiedChekiOrderPolicy.reorderedIDs(
+                moving: favoriteB,
+                toPartitionIndex: 0,
+                values: values
+            ),
+            [favoriteB, favoriteA, standardA, standardB]
+        )
+
+        let reorderedIDs = try ChekinanaUnifiedChekiOrderPolicy.reorderedIDs(
+            moving: standardB,
+            toPartitionIndex: 0,
+            values: values
+        )
+        let group = try XCTUnwrap(ChekinanaChekiGroupKey(
+            idolIDs: [UUID()],
+            date: utcDate(2026, 8, 10)
+        ))
+        let assignments = try ChekinanaIdolChekiReorderPlan.assignments(
+            for: reorderedIDs.map { [$0] },
+            liveSnapshots: values.map {
+                ChekinanaIdolChekiReorderSnapshot(
+                    chekiID: $0.id,
+                    group: group,
+                    idx: $0.idx
+                )
+            }
+        )
+        let reopened = values.map {
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: $0.id,
+                isFavorite: $0.isFavorite,
+                idx: assignments[$0.id],
+                createdAt: $0.createdAt
+            )
+        }
+        XCTAssertEqual(
+            ChekinanaUnifiedChekiOrderPolicy.orderedIDs(reopened),
+            [favoriteA, favoriteB, standardB, standardA]
+        )
+    }
+
+    func testSharedLongPressReorderStateClampsPreviewToFavoritePartition() {
+        let favoriteA = UUID()
+        let favoriteB = UUID()
+        let standardA = UUID()
+        let order = [favoriteA, favoriteB, standardA]
+        let partitions = [
+            favoriteA: true,
+            favoriteB: true,
+            standardA: false,
+        ]
+
+        var state = ChekinanaLongPressReorderState()
+        state.begin(id: favoriteA, orderedIDs: order)
+        state.update(
+            translationY: 500,
+            rowStride: ChekinanaUnifiedChekiRowLayout.rowStride,
+            partitionByID: partitions
+        )
+        XCTAssertEqual(state.previewOrderIDs, [favoriteB, favoriteA, standardA])
+
+        state.clear()
+        state.begin(id: standardA, orderedIDs: order)
+        state.update(
+            translationY: -500,
+            rowStride: ChekinanaUnifiedChekiRowLayout.rowStride,
+            partitionByID: partitions
+        )
+        XCTAssertEqual(state.previewOrderIDs, order)
+    }
+
+    func testChekiRecordListCopyLocalizesTitleAndTrimmedNotePresence() throws {
+        let expectations = [
+            (
+                language: "en",
+                title: "Cheki record",
+                note: "Note",
+                noNote: "No note"
+            ),
+            (
+                language: "ja",
+                title: "チェキ記録",
+                note: "メモ",
+                noNote: "メモなし"
+            ),
+            (
+                language: "zh-Hans",
+                title: "拍立得记录",
+                note: "备注",
+                noNote: "无备注"
+            ),
+            (
+                language: "zh-Hant",
+                title: "拍立得記錄",
+                note: "備註",
+                noNote: "無備註"
+            ),
+        ]
+
+        for expectation in expectations {
+            let bundle = try localizedAppBundle(language: expectation.language)
+            XCTAssertEqual(
+                ChekinanaChekiRecordListCopy.title(bundle: bundle),
+                expectation.title,
+                expectation.language
+            )
+            XCTAssertEqual(
+                ChekinanaChekiRecordListCopy.noteStatus(
+                    note: "private note text",
+                    bundle: bundle
+                ),
+                "private note text",
+                expectation.language
+            )
+            for blankNote in ["", "   ", "\n\t "] {
+                XCTAssertEqual(
+                    ChekinanaChekiRecordListCopy.noteStatus(
+                        note: blankNote,
+                        bundle: bundle
+                    ),
+                    expectation.noNote,
+                    expectation.language
+                )
+            }
+        }
+    }
+
+    func testSingleLineNoteNormalizesPastedLineBreaksWithoutChangingOtherText() {
+        let cases = [
+            ("line one\nline two", "line one line two"),
+            ("one\r\ntwo", "one two"),
+            ("one\rtwo", "one two"),
+            ("one\u{2028}two\u{2029}three", "one two three"),
+            ("备注  with spaces", "备注  with spaces"),
+            ("", ""),
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(ChekinanaSingleLineNotePolicy.normalize(input), expected)
+        }
+    }
+
+    func testChekiRecordListRowsUseUnifiedNotePresenceCopy() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        let rowsStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupRows"
+        )?.lowerBound)
+        let recordRowsStart = try XCTUnwrap(source.range(
+            of: "ForEach(group.records)",
+            range: rowsStart..<source.endIndex
+        )?.lowerBound)
+        let recordRowsEnd = try XCTUnwrap(source.range(
+            of: "private func mediaRow(_ cheki: MediaItem)",
+            range: recordRowsStart..<source.endIndex
+        )?.lowerBound)
+        let recordRows = String(source[recordRowsStart..<recordRowsEnd])
+        XCTAssertTrue(recordRows.contains(
+            "Text(ChekinanaChekiRecordListCopy.title())"
+        ))
+        XCTAssertTrue(recordRows.contains(
+            "ChekinanaChekiRecordListCopy.noteStatus("
+        ))
+        XCTAssertTrue(recordRows.contains("note: record.note"))
+        XCTAssertFalse(recordRows.contains("common.no_media"))
+        XCTAssertFalse(recordRows.contains("record.note.nonEmpty"))
+
+        let undatedStart = try XCTUnwrap(source.range(
+            of: "private enum ChekinanaCalendarNoMediaRecord"
+        )?.lowerBound)
+        let undatedEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaCalendarNoMediaRecordEditor",
+            range: undatedStart..<source.endIndex
+        )?.lowerBound)
+        let undated = String(source[undatedStart..<undatedEnd])
+        XCTAssertTrue(undated.contains(
+            "ChekinanaChekiRecordListCopy.title()"
+        ))
+        XCTAssertTrue(undated.contains(
+            "ChekinanaChekiRecordListCopy.noteStatus("
+        ))
+        XCTAssertTrue(undated.contains("Text(record.listTitle)"))
+        XCTAssertTrue(undated.contains("Text(record.listSubtitle)"))
+        XCTAssertFalse(undated.contains("record.note.nonEmpty"))
+        XCTAssertTrue(undated.contains(
+            "case .shame(let value), .douga(let value):"
+        ))
+    }
+
+    func testUnifiedEventChekiRowsUseCalendarSnapshotReorderAndKeepRecordsSeparate() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let rowsStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupRows"
+        )?.lowerBound)
+        let rowsEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupPage",
+            range: rowsStart..<source.endIndex
+        )?.lowerBound)
+        let rows = String(source[rowsStart..<rowsEnd])
+        let mediaRowStart = try XCTUnwrap(rows.range(
+            of: "private func mediaRow(_ cheki: MediaItem)"
+        )?.lowerBound)
+        let mediaRowEnd = try XCTUnwrap(rows.range(
+            of: "private func commitSnapshotReorder(",
+            range: mediaRowStart..<rows.endIndex
+        )?.lowerBound)
+        let mediaRow = String(rows[mediaRowStart..<mediaRowEnd])
+
+        XCTAssertFalse(rows.contains(".draggable("))
+        XCTAssertFalse(rows.contains(".dropDestination("))
+        XCTAssertTrue(rows.contains(".accessibilityAction { selectCheki(cheki) }"))
+        XCTAssertTrue(rows.contains("onTap: { _, _ in selectCheki(cheki) }"))
+        XCTAssertTrue(rows.contains("ChekinanaSnapshotReorderGestureSurface("))
+        XCTAssertTrue(rows.contains("requiresAllItemsVisible: false"))
+        XCTAssertTrue(rows.contains("commitSnapshotReorder("))
+        XCTAssertTrue(rows.contains("reorderPartition(containing: cheki)"))
+        XCTAssertTrue(rows.contains("candidate.isFavorite == cheki.isFavorite"))
+        XCTAssertTrue(rows.contains("ChekinanaIdolChekiReorderGroupIdentity("))
+        XCTAssertFalse(rows.contains("ChekinanaLongPressReorderHandle("))
+        XCTAssertFalse(rows.contains("line.3.horizontal"))
+        XCTAssertFalse(rows.contains("reorderState"))
+        XCTAssertTrue(rows.contains("ChekinanaUnifiedChekiRowLayout.rowStride"))
+        XCTAssertEqual(ChekinanaUnifiedChekiRowLayout.rowStride, 78)
+        XCTAssertTrue(rows.contains("group.chekis.map"))
+        XCTAssertTrue(rows.contains("ForEach(group.records)"))
+        XCTAssertTrue(mediaRow.contains("Text(ChekinanaRecordKind.cheki.title)"))
+        XCTAssertFalse(mediaRow.contains("idx"))
+        XCTAssertFalse(mediaRow.contains("#"))
+
+        let idolRowStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaIdolRow"
+        )?.lowerBound)
+        let idolRowEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaIdolDetailView",
+            range: idolRowStart..<source.endIndex
+        )?.lowerBound)
+        let idolRow = String(source[idolRowStart..<idolRowEnd])
+        XCTAssertTrue(idolRow.contains("ChekinanaLongPressReorderHandle("))
+        XCTAssertFalse(idolRow.contains(".highPriorityGesture(dragGesture)"))
+        XCTAssertTrue(source.contains("reorderEnabled: false"))
+        XCTAssertEqual(
+            source.components(
+                separatedBy: "LongPressGesture(minimumDuration: 0.25, maximumDistance: 18)"
+            ).count - 1,
+            1
+        )
+    }
+
+    func testEventMultiIdolGroupDisplaysAllAssignedIdolsAndSharedRoute() throws {
+        let first = Idol(name: "First", sortOrder: 1)
+        let second = Idol(name: "Second", sortOrder: 2)
+        let cheki = MediaItem(
+            idols: [second, first],
+            date: utcDate(2026, 8, 10),
+            imageRef: "multi-idol.jpg"
+        )
+        let groups = ChekinanaCalendarIdolGroup.groups(
+            for: [cheki],
+            records: [],
+            relationshipIndex: .init(idols: [first, second]),
+            groupsByExactIdolCombination: true,
+            chekiCountsByIdolID: [first.id: 2, second.id: 1]
+        )
+        let group = try XCTUnwrap(groups.first)
+        XCTAssertNil(group.idol)
+        XCTAssertEqual(group.orderedIdols.map(\.id), [first.id, second.id])
+        XCTAssertEqual(Set(group.orderedIdols.map(\.id)), Set([first.id, second.id]))
+        XCTAssertFalse(group.name.isEmpty)
+        XCTAssertNotEqual(
+            group.name,
+            ChekinanaProductCopy.text("common.unassigned", "Unassigned")
+        )
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let sharedViewStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupHeader"
+        )?.lowerBound)
+        let sharedViewEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupSections",
+            range: sharedViewStart..<source.endIndex
+        )?.lowerBound)
+        let sharedView = String(source[sharedViewStart..<sharedViewEnd])
+        XCTAssertTrue(sharedView.contains("ChekinanaIdolAvatarRow("))
+        XCTAssertTrue(sharedView.contains("idols: group.orderedIdols"))
+        XCTAssertTrue(sharedView.contains("showsNames: false"))
+        XCTAssertFalse(sharedView.contains("Text(group.name)"))
+        XCTAssertFalse(sharedView.contains("idols: group.idol.map { [$0] } ?? []"))
+
+        let idolRouteStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaIdolEventChekiView"
+        )?.lowerBound)
+        let idolRouteEnd = try XCTUnwrap(source.range(
+            of: "private typealias ChekinanaIdolMediaKind",
+            range: idolRouteStart..<source.endIndex
+        )?.lowerBound)
+        let eventRouteStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventDetailView"
+        )?.lowerBound)
+        let eventRouteEnd = try XCTUnwrap(source.range(
+            of: "struct ChekinanaUnifiedChekiOrderSnapshot",
+            range: eventRouteStart..<source.endIndex
+        )?.lowerBound)
+        XCTAssertTrue(source[idolRouteStart..<idolRouteEnd].contains(
+            "ChekinanaUnifiedChekiGroupPage("
+        ))
+        XCTAssertTrue(source[eventRouteStart..<eventRouteEnd].contains(
+            "ChekinanaUnifiedChekiGroupPage("
+        ))
+    }
+
+    func testUnifiedIdolOrderingUsesFavoriteThenChekiCountAcrossCombinations() {
+        let base = utcDate(2026, 8, 10)
+        let favoriteLow = Idol(
+            name: "Favorite Low",
+            isFavorite: true,
+            sortOrder: 3,
+            createdAt: base
+        )
+        let favoriteHigh = Idol(
+            name: "Favorite High",
+            isFavorite: true,
+            sortOrder: 4,
+            createdAt: base.addingTimeInterval(1)
+        )
+        let standardLow = Idol(
+            name: "Standard Low",
+            sortOrder: 1,
+            createdAt: base.addingTimeInterval(2)
+        )
+        let standardHigh = Idol(
+            name: "Standard High",
+            sortOrder: 2,
+            createdAt: base.addingTimeInterval(3)
+        )
+        let counts = [
+            favoriteLow.id: 1,
+            favoriteHigh.id: 7,
+            standardLow.id: 2,
+            standardHigh.id: 20,
+        ]
+        let ordering = ChekinanaIdolOrdering.Context(
+            chekiCountsByIdolID: counts
+        )
+
+        XCTAssertEqual(
+            ordering.ordered([
+                standardLow,
+                favoriteLow,
+                standardHigh,
+                favoriteHigh,
+            ]).map(\.id),
+            [favoriteHigh.id, favoriteLow.id, standardHigh.id, standardLow.id]
+        )
+        XCTAssertEqual(
+            ordering.orderedUnique([
+                standardLow,
+                favoriteHigh,
+                standardLow,
+                standardHigh,
+            ]).map(\.id),
+            [favoriteHigh.id, standardHigh.id, standardLow.id]
+        )
+        XCTAssertEqual(
+            ordering.combinationPrecedes(
+                [standardHigh, favoriteLow],
+                [standardLow]
+            ),
+            true
+        )
+    }
+
+    func testIdolDateAndEventRoutesUseSameGroupSectionsAndEventKeepsOtherMedia() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        func slice(_ start: String, _ end: String) throws -> Substring {
+            let lower = try XCTUnwrap(source.range(of: start)?.lowerBound)
+            let upper = try XCTUnwrap(source.range(
+                of: end,
+                range: lower..<source.endIndex
+            )?.lowerBound)
+            return source[lower..<upper]
+        }
+
+        let idolDate = try slice(
+            "private struct ChekinanaIdolMediaDateGroupView",
+            "struct ChekinanaChekiRecordSelection"
+        )
+        let idolEvent = try slice(
+            "private struct ChekinanaIdolEventChekiView",
+            "private typealias ChekinanaIdolMediaKind"
+        )
+        let eventDetail = try slice(
+            "private struct ChekinanaEventDetailView",
+            "struct ChekinanaUnifiedChekiOrderSnapshot"
+        )
+        let sharedPage = try slice(
+            "private struct ChekinanaUnifiedChekiGroupPage",
+            "enum ChekinanaUnifiedChekiGroupHeaderLayout"
+        )
+        let sharedHeader = try slice(
+            "private struct ChekinanaUnifiedChekiGroupHeader",
+            "private struct ChekinanaUnifiedChekiGroupSections"
+        )
+        let sharedSections = try slice(
+            "private struct ChekinanaUnifiedChekiGroupSections",
+            "private struct ChekinanaUnifiedOtherMediaRow"
+        )
+
+        XCTAssertTrue(idolDate.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertFalse(idolDate.contains("ChekinanaUnifiedChekiGroupSections("))
+        XCTAssertFalse(idolDate.contains("Text(group.name)"))
+        XCTAssertTrue(idolEvent.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertTrue(idolEvent.contains("shames: scopedOtherMedia(shames)"))
+        XCTAssertTrue(idolEvent.contains("dougas: scopedOtherMedia(dougas)"))
+        XCTAssertTrue(eventDetail.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertTrue(sharedPage.contains("List {"))
+        XCTAssertTrue(sharedPage.contains("ChekinanaUnifiedChekiGroupSections("))
+        XCTAssertTrue(sharedPage.contains(".listStyle(.plain)"))
+        XCTAssertTrue(sharedHeader.contains("ChekinanaIdolAvatarRow("))
+        XCTAssertTrue(sharedHeader.contains("idols: group.orderedIdols"))
+        XCTAssertTrue(sharedHeader.contains("showsNames: false"))
+        XCTAssertFalse(sharedHeader.contains("showsNames: true"))
+        XCTAssertTrue(sharedHeader.contains("group.chekiCount"))
+        XCTAssertTrue(sharedHeader.contains(".fixedSize(horizontal: true"))
+        XCTAssertTrue(sharedHeader.contains(
+            "maxHeight: ChekinanaUnifiedChekiGroupHeaderLayout.height"
+        ))
+        XCTAssertTrue(sharedSections.contains("ChekinanaUnifiedChekiGroupHeader("))
+        XCTAssertTrue(sharedSections.contains("ForEach(group.shames + group.dougas)"))
+        XCTAssertEqual(ChekinanaUnifiedChekiGroupHeaderLayout.avatarSize, 36)
+        XCTAssertEqual(ChekinanaUnifiedChekiGroupHeaderLayout.height, 42)
+        XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.idolAvatarSize, 46)
+        XCTAssertTrue(sharedHeader.contains(".foregroundStyle(.primary)"))
+        XCTAssertFalse(sharedHeader.contains(".foregroundStyle(.secondary)"))
+    }
+
+    func testEventMediaPresenterUsesExactSelectionAndFullEventKindScopeAcrossGroups() throws {
+        let event = Event(name: "Scoped Event")
+        let otherEvent = Event(name: "Other Event")
+        let idolA = Idol(name: "A")
+        let idolB = Idol(name: "B")
+        let hiddenIdol = Idol(name: "Hidden")
+        let shameA = MediaItem(
+            kind: .shame,
+            idols: [idolA],
+            event: event,
+            mediaRef: "a.jpg"
+        )
+        let shameB = MediaItem(
+            kind: .shame,
+            idols: [idolB],
+            event: event,
+            mediaRef: "b.jpg"
+        )
+        let shameAB = MediaItem(
+            kind: .shame,
+            idols: [idolA, idolB],
+            event: event,
+            mediaRef: "ab.jpg"
+        )
+        let hiddenShame = MediaItem(
+            kind: .shame,
+            idols: [hiddenIdol],
+            event: event,
+            mediaRef: "hidden.jpg"
+        )
+        let otherEventShame = MediaItem(
+            kind: .shame,
+            idols: [idolA],
+            event: otherEvent,
+            mediaRef: "other-event.jpg"
+        )
+        let dougaA = MediaItem(
+            kind: .douga,
+            idols: [idolA],
+            event: event,
+            mediaRef: "a.mov"
+        )
+        let cheki = MediaItem(
+            idols: [idolA],
+            event: event,
+            imageRef: "cheki.jpg"
+        )
+        let shames = [
+            shameA,
+            shameB,
+            shameAB,
+            hiddenShame,
+            otherEventShame,
+        ]
+        let visibleShames = ChekinanaEventMediaPresenterPolicy.visibleItems(
+            in: shames,
+            eventID: event.id,
+            hiddenIDs: [hiddenIdol.id]
+        )
+        let groups = ChekinanaCalendarIdolGroup.groups(
+            for: [],
+            records: [],
+            relationshipIndex: .init(
+                idols: [idolA, idolB, hiddenIdol],
+                events: [event, otherEvent]
+            ),
+            groupsByExactIdolCombination: true,
+            shames: visibleShames
+        )
+        let groupAItem = try XCTUnwrap(
+            groups.first { $0.combinationKey == ChekinanaIdolCombinationKey([idolA.id]) }?
+                .shames.first
+        )
+        let groupBItem = try XCTUnwrap(
+            groups.first { $0.combinationKey == ChekinanaIdolCombinationKey([idolB.id]) }?
+                .shames.first
+        )
+        let selectionA = try XCTUnwrap(
+            ChekinanaEventMediaPresenterPolicy.Selection(media: groupAItem)
+        )
+        let selectionB = try XCTUnwrap(
+            ChekinanaEventMediaPresenterPolicy.Selection(media: groupBItem)
+        )
+
+        XCTAssertEqual(selectionA.id, shameA.id)
+        XCTAssertEqual(selectionB.id, shameB.id)
+        XCTAssertEqual(selectionB.kind, .shame)
+        XCTAssertNil(ChekinanaEventMediaPresenterPolicy.Selection(media: cheki))
+
+        let scopeFromGroupA = ChekinanaEventMediaPresenterPolicy.pagerItems(
+            for: selectionA,
+            eventID: event.id,
+            shames: shames + [dougaA],
+            dougas: [dougaA],
+            hiddenIDs: [hiddenIdol.id]
+        )
+        let scopeFromGroupB = ChekinanaEventMediaPresenterPolicy.pagerItems(
+            for: selectionB,
+            eventID: event.id,
+            shames: shames + [dougaA],
+            dougas: [dougaA],
+            hiddenIDs: [hiddenIdol.id]
+        )
+        XCTAssertEqual(
+            scopeFromGroupA.map(\.id),
+            [shameA.id, shameB.id, shameAB.id]
+        )
+        XCTAssertEqual(scopeFromGroupB.map(\.id), scopeFromGroupA.map(\.id))
+        XCTAssertTrue(scopeFromGroupB.contains { $0.id == selectionB.id })
+        XCTAssertEqual(
+            ChekinanaMediaPagerPolicy.initialID(
+                requested: selectionB.id,
+                available: scopeFromGroupB.map(\.id)
+            ),
+            shameB.id
+        )
+
+        let videoSelection = try XCTUnwrap(
+            ChekinanaEventMediaPresenterPolicy.Selection(media: dougaA)
+        )
+        XCTAssertEqual(
+            ChekinanaEventMediaPresenterPolicy.pagerItems(
+                for: videoSelection,
+                eventID: event.id,
+                shames: shames,
+                dougas: [dougaA],
+                hiddenIDs: []
+            ).map(\.id),
+            [dougaA.id]
+        )
+    }
+
+    func testEventMediaPresenterReconcilesRefreshedAndRemovedSelections() throws {
+        let event = Event(name: "Selection Event")
+        let idolA = Idol(name: "A")
+        let idolB = Idol(name: "B")
+        let original = MediaItem(
+            kind: .shame,
+            idols: [idolA],
+            event: event,
+            mediaRef: "original.jpg"
+        )
+        let selected = try XCTUnwrap(
+            ChekinanaEventMediaPresenterPolicy.Selection(media: original)
+        )
+
+        let refreshed = MediaItem(
+            id: original.id,
+            kind: .shame,
+            idols: [idolB],
+            event: event,
+            mediaRef: "updated.jpg",
+            note: "Updated in another Idol group"
+        )
+        let refreshedSelection = try XCTUnwrap(
+            ChekinanaEventMediaPresenterPolicy.Selection(media: refreshed)
+        )
+        XCTAssertEqual(
+            ChekinanaEventMediaPresenterPolicy.reconciledSelection(
+                selected,
+                available: [refreshedSelection]
+            ),
+            selected
+        )
+        let hiddenAfterRefresh = ChekinanaEventMediaPresenterPolicy.visibleItems(
+            in: [refreshed],
+            eventID: event.id,
+            hiddenIDs: [idolB.id]
+        ).compactMap {
+            ChekinanaEventMediaPresenterPolicy.Selection(media: $0)
+        }
+        XCTAssertNil(ChekinanaEventMediaPresenterPolicy.reconciledSelection(
+            selected,
+            available: hiddenAfterRefresh
+        ))
+        XCTAssertNil(ChekinanaEventMediaPresenterPolicy.reconciledSelection(
+            selected,
+            available: []
+        ))
+
+        let movedToAnotherEvent = MediaItem(
+            id: original.id,
+            kind: .shame,
+            idols: [idolB],
+            event: Event(name: "Moved Event"),
+            mediaRef: "moved.jpg"
+        )
+        let stillAvailable = ChekinanaEventMediaPresenterPolicy.visibleItems(
+            in: [movedToAnotherEvent],
+            eventID: event.id,
+            hiddenIDs: []
+        ).compactMap {
+            ChekinanaEventMediaPresenterPolicy.Selection(media: $0)
+        }
+        XCTAssertNil(ChekinanaEventMediaPresenterPolicy.reconciledSelection(
+            selected,
+            available: stillAvailable
+        ))
+    }
+
+    func testEventOtherMediaPresenterIsSharedAboveCombinationBranches() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let detailStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventDetailView"
+        )?.lowerBound)
+        let detailEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupPage",
+            range: detailStart..<source.endIndex
+        )?.lowerBound)
+        let detail = String(source[detailStart..<detailEnd])
+        let branchReconciliation = try XCTUnwrap(
+            detail.range(of: ".onChange(of: chekiGroups.map(\\.id))")
+        )
+        let commonRecordSheet = try XCTUnwrap(
+            detail.range(of: ".sheet(item: $selectedChekiRecord)")
+        )
+        let commonOtherMediaCover = try XCTUnwrap(
+            detail.range(of: ".fullScreenCover(item: $selectedOtherMedia)")
+        )
+
+        XCTAssertTrue(detail.contains("selectOtherMedia: presentOtherMedia"))
+        XCTAssertTrue(detail.contains(
+            "@State private var selectedOtherMedia: ChekinanaEventMediaPresenterPolicy.Selection?"
+        ))
+        XCTAssertLessThan(branchReconciliation.lowerBound, commonRecordSheet.lowerBound)
+        XCTAssertLessThan(commonRecordSheet.lowerBound, commonOtherMediaCover.lowerBound)
+        XCTAssertEqual(
+            detail.components(
+                separatedBy: ".fullScreenCover(item: $selectedOtherMedia)"
+            ).count - 1,
+            1
+        )
+        XCTAssertTrue(detail.contains("initialID: selection.id"))
+        XCTAssertTrue(detail.contains(
+            "ChekinanaEventMediaPresenterPolicy.pagerItems("
+        ))
+        XCTAssertTrue(detail.contains(
+            ".onChange(of: visibleOtherMediaSelections)"
+        ))
+        XCTAssertTrue(detail.contains(".sheet(item: $selectedMemory)"))
+        XCTAssertTrue(detail.contains(".fullScreenCover(item: $selectedEventImage)"))
+
+        let sharedPage = String(source[detailEnd...])
+        let sharedPageEnd = try XCTUnwrap(sharedPage.range(
+            of: "enum ChekinanaUnifiedChekiGroupHeaderLayout"
+        )?.lowerBound)
+        XCTAssertFalse(sharedPage[..<sharedPageEnd].contains("fullScreenCover"))
+    }
+
+    func testMediaPlaybackUsesPlaybackAudioSessionBeforePlaying() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+        let sourceDirectory = testsDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+        let presentation = try String(
+            contentsOf: sourceDirectory.appendingPathComponent(
+                "ChekinanaPresentation.swift"
+            ),
+            encoding: .utf8
+        )
+        let productShell = try String(
+            contentsOf: sourceDirectory.appendingPathComponent(
+                "ChekinanaProductShell.swift"
+            ),
+            encoding: .utf8
+        )
+        let matchGame = try String(
+            contentsOf: sourceDirectory.appendingPathComponent(
+                "MatchGameView.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(presentation.contains("session.setCategory(.playback"))
+        XCTAssertTrue(presentation.contains("session.setActive(true)"))
+        XCTAssertTrue(productShell.contains(
+            "ChekinanaMediaPlaybackAudioSession.activate(mode: .moviePlayback)"
+        ))
+        XCTAssertTrue(matchGame.contains(
+            "ChekinanaMediaPlaybackAudioSession.activate(mode: .default)"
+        ))
+    }
+
+    func testIdolMediaScalarPolicyPreservesTargetHiddenAndExactGroupSemantics() {
+        let targetID = UUID()
+        let partnerID = UUID()
+        let otherID = UUID()
+
+        XCTAssertTrue(ChekinanaIdolMediaScalarPolicy.includes(
+            idolIDs: [targetID],
+            targetIdolID: targetID,
+            hiddenIDs: []
+        ))
+        XCTAssertTrue(ChekinanaIdolMediaScalarPolicy.includes(
+            idolIDs: [partnerID, targetID],
+            targetIdolID: targetID,
+            hiddenIDs: []
+        ))
+        XCTAssertFalse(ChekinanaIdolMediaScalarPolicy.includes(
+            idolIDs: [partnerID, targetID],
+            targetIdolID: targetID,
+            hiddenIDs: [partnerID]
+        ))
+        XCTAssertFalse(ChekinanaIdolMediaScalarPolicy.includes(
+            idolIDs: [otherID],
+            targetIdolID: targetID,
+            hiddenIDs: []
+        ))
+
+        let namesByID = [targetID: "Zeta", partnerID: "Alpha"]
+        XCTAssertEqual(
+            ChekinanaIdolMediaScalarPolicy.groupTitle(
+                idolIDs: [targetID, partnerID],
+                namesByID: namesByID,
+                unassignedTitle: "Unassigned"
+            ),
+            "Alpha · Zeta"
+        )
+        XCTAssertEqual(
+            ChekinanaIdolMediaScalarPolicy.groupTitle(
+                idolIDs: [targetID],
+                namesByID: namesByID,
+                unassignedTitle: "Unassigned"
+            ),
+            "Zeta"
+        )
+        XCTAssertEqual(
+            ChekinanaIdolMediaScalarPolicy.groupTitle(
+                idolIDs: [],
+                namesByID: namesByID,
+                unassignedTitle: "Unassigned"
+            ),
+            "Unassigned"
+        )
+        XCTAssertNotEqual(Set([targetID]), Set([targetID, partnerID]))
+    }
+
+    func testIdolMediaDateHotPathsUsePersistedScalarIdolKeys() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let dateViewStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaIdolMediaDateView")?.lowerBound
+        )
+        let groupViewStart = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaIdolMediaDateGroupView",
+                range: dateViewStart..<source.endIndex
+            )?.lowerBound
+        )
+        let groupViewEnd = try XCTUnwrap(
+            source.range(
+                of: "struct ChekinanaChekiRecordSelection",
+                range: groupViewStart..<source.endIndex
+            )?.lowerBound
+        )
+        let dateView = source[dateViewStart..<groupViewStart]
+        let groupView = source[groupViewStart..<groupViewEnd]
+
+        XCTAssertTrue(dateView.contains("idolIDs: $0.idolIDs"))
+        XCTAssertFalse(dateView.contains("$0.idols.contains"))
+        XCTAssertFalse(dateView.contains("includesRecord(idols:"))
+        XCTAssertTrue(groupView.contains("idolIDs: $0.idolIDs"))
+        XCTAssertTrue(groupView.contains("@Query private var allIdols: [Idol]"))
+        XCTAssertTrue(groupView.contains("ChekinanaCalendarIdolGroup.groups("))
+        XCTAssertTrue(groupView.contains("groupsByExactIdolCombination: true"))
+        XCTAssertTrue(groupView.contains("ChekinanaChekiRecordRelationshipIndex("))
+        XCTAssertFalse(groupView.contains("Dictionary(grouping: values)"))
+        XCTAssertFalse(groupView.contains("$0.idols.contains"))
+        XCTAssertFalse(groupView.contains("Set(cheki.idols.map(\\.id))"))
+        XCTAssertFalse(groupView.contains("values.first?.idols"))
+        XCTAssertFalse(groupView.contains("includesRecord(idols:"))
+        XCTAssertTrue(groupView.contains("ChekinanaUnifiedChekiGroupPage("))
+        XCTAssertFalse(source.contains("private struct ChekinanaIdolNoMediaChekiGroupView"))
+        XCTAssertFalse(source.contains("ChekinanaChekiRecordOpenDiagnostics"))
+        XCTAssertFalse(source.contains("ChekiRecordOpen"))
+    }
+
+    func testReachableChekiInterfacesDoNotExposeInternalIndex() throws {
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+        let productSource = try String(
+            contentsOf: sourceRoot.appendingPathComponent(
+                "ChekinanaProductShell.swift"
+            ),
+            encoding: .utf8
+        )
+        let contentSource = try String(
+            contentsOf: sourceRoot.appendingPathComponent("ContentView.swift"),
+            encoding: .utf8
+        )
+
+        for forbidden in [
+            "product.scan.review.editor.index_optional",
+            "product.scan.review.editor.current_index",
+            " · #\\(",
+        ] {
+            XCTAssertFalse(productSource.contains(forbidden))
+        }
+        for forbidden in [
+            "assistant.index_optional",
+            "assistant.cheki.index",
+            "Cheki #\\(",
+        ] {
+            XCTAssertFalse(contentSource.contains(forbidden))
+        }
     }
 
     @MainActor
@@ -8749,7 +15700,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let storeURL = root.appendingPathComponent("travel.store")
-        let schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         func container() throws -> ModelContainer {
             try ModelContainer(
                 for: schema,
@@ -8868,7 +15819,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     @MainActor
     func testExpiredTravelIsExcludedAndPersistentlyPrunedWhileFutureTravelStaysOrdered() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -8973,8 +15924,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v10Container))
-            context.insert(Idol(id: idolID, name: "Preserved"))
-            context.insert(Event(id: eventID, name: "Preserved Event"))
+            context.insert(ChekinanaLegacyMediaSchema.Idol(id: idolID, name: "Preserved"))
+            context.insert(ChekinanaLegacyMediaSchema.Event(id: eventID, name: "Preserved Event"))
             context.insert(CalendarGroupOrder(
                 dateKey: "2027-01-03",
                 groupKey: idolID.uuidString.lowercased(),
@@ -8987,7 +15938,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let v11Schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
         var v11Container: ModelContainer? = try ModelContainer(
             for: v11Schema,
-            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            migrationPlan: ChekinanaV10ToV11TestMigrationPlan.self,
             configurations: [ModelConfiguration(
                 "V10TravelMigration",
                 schema: v11Schema,
@@ -8998,11 +15949,15 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         do {
             let context = ModelContext(try XCTUnwrap(v11Container))
             XCTAssertEqual(
-                try context.fetch(FetchDescriptor<Idol>()).first?.id,
+                try context.fetch(
+                    FetchDescriptor<ChekinanaLegacyMediaSchema.Idol>()
+                ).first?.id,
                 idolID
             )
             XCTAssertEqual(
-                try context.fetch(FetchDescriptor<Event>()).first?.id,
+                try context.fetch(
+                    FetchDescriptor<ChekinanaLegacyMediaSchema.Event>()
+                ).first?.id,
                 eventID
             )
             XCTAssertEqual(
@@ -9020,97 +15975,495 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testV11MigratesMediaShotTypeToV12WithoutLosingData() throws {
+    func testV11V12SchemaListsKeepFrozenMediaAndAddShotTypeOnlyInV12() {
+        let v11 = Set(ChekinanaSchemaV11.models.map(ObjectIdentifier.init))
+        let v12 = Set(ChekinanaSchemaV12.models.map(ObjectIdentifier.init))
+        let frozenMedia = [
+            ChekinanaLegacyMediaSchema.Cheki.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
+        ].map(ObjectIdentifier.init)
+
+        XCTAssertTrue(frozenMedia.allSatisfy(v11.contains))
+        XCTAssertTrue(frozenMedia.allSatisfy(v12.contains))
+        XCTAssertFalse(v11.contains(ObjectIdentifier(MediaShotType.self)))
+        XCTAssertTrue(v12.contains(ObjectIdentifier(MediaShotType.self)))
+        XCTAssertFalse(v12.contains(ObjectIdentifier(MediaItem.self)))
+    }
+
+    func testV12MediaFixtureMigratesToV14WithFieldsCountsAndCollisionPreserved() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "chekinana-v11-v12-media-shot-\(UUID().uuidString)",
+            "chekinana-v12-v14-media-item-\(UUID().uuidString)",
             isDirectory: true
         )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let storeURL = root.appendingPathComponent("migration.store")
         let idolID = UUID()
-        let shameID = UUID()
+        let eventID = UUID()
+        let sharedMediaID = UUID()
+        let emptyChekiID = UUID()
+        let existingRecordID = UUID()
         let dougaID = UUID()
         let day = try XCTUnwrap(
-            ChekinanaDateOnly.canonicalDate(year: 2027, month: 3, day: 4)
+            ChekinanaDateOnly.canonicalDate(year: 2027, month: 4, day: 5)
         )
-
-        let v11Schema = Schema(versionedSchema: ChekinanaSchemaV11.self)
-        var v11Container: ModelContainer? = try ModelContainer(
-            for: v11Schema,
-            configurations: [ModelConfiguration(
-                "V11MediaShotMigration",
-                schema: v11Schema,
-                url: storeURL,
-                cloudKitDatabase: .none
-            )]
+        let createdAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let updatedAt = createdAt.addingTimeInterval(3600)
+        let managedDirectory = try ChekiImageRefResolver.chekiImagesDirectory()
+        let chekiRef = "\(sharedMediaID.uuidString.lowercased()).png"
+        let shameRef = "shame-\(sharedMediaID.uuidString.lowercased()).png"
+        let dougaRef = "douga-\(dougaID.uuidString.lowercased()).mov"
+        let dougaThumbnail = ChekinanaGalleryMediaStore.thumbnailURL(
+            id: dougaID,
+            directory: managedDirectory
         )
-        do {
-            let context = ModelContext(try XCTUnwrap(v11Container))
-            let idol = Idol(id: idolID, name: "Preserved")
-            context.insert(idol)
-            context.insert(Shame(
-                id: shameID,
-                imageRef: "preserved.jpg",
-                idols: [idol],
-                date: day,
-                note: "shame-note"
-            ))
-            context.insert(Douga(
-                id: dougaID,
-                videoRef: "preserved.mov",
-                idols: [idol],
-                date: day,
-                note: "douga-note"
-            ))
-            try context.save()
-        }
-        v11Container = nil
+        let managedFixtureURLs = [
+            managedDirectory.appendingPathComponent(chekiRef),
+            managedDirectory.appendingPathComponent(shameRef),
+            managedDirectory.appendingPathComponent(dougaRef),
+            dougaThumbnail,
+        ]
+        defer { managedFixtureURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        try scannerPNGData(color: .red).write(to: managedFixtureURLs[0], options: .atomic)
+        try scannerPNGData(color: .blue).write(to: managedFixtureURLs[1], options: .atomic)
+        try Data([0x00, 0x01, 0x02]).write(to: managedFixtureURLs[2], options: .atomic)
+        try scannerPNGData(color: .green).write(to: managedFixtureURLs[3], options: .atomic)
 
         let v12Schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
-        let v12Container = try ModelContainer(
+        var v12Container: ModelContainer? = try ModelContainer(
             for: v12Schema,
-            migrationPlan: ChekinanaSchemaMigrationPlan.self,
             configurations: [ModelConfiguration(
-                "V11MediaShotMigration",
+                "V12MediaItemMigration",
                 schema: v12Schema,
                 url: storeURL,
                 cloudKitDatabase: .none
             )]
         )
-        let context = ModelContext(v12Container)
-        let shame = try XCTUnwrap(
-            try context.fetch(FetchDescriptor<Shame>()).first
+        do {
+            let context = ModelContext(try XCTUnwrap(v12Container))
+            let idol = ChekinanaLegacyMediaSchema.Idol(id: idolID, name: "Preserved")
+            let event = ChekinanaLegacyMediaSchema.Event(id: eventID, name: "Preserved Event")
+            let cheki = ChekinanaLegacyMediaSchema.Cheki(id: sharedMediaID)
+            cheki.idols = [idol]
+            cheki.event = event
+            cheki.date = day
+            cheki.idx = 7
+            cheki.userAppears = true
+            cheki.sizeRawValue = ChekiSize.wide.rawValue
+            cheki.imageRef = chekiRef
+            cheki.isFavorite = true
+            cheki.hasPostedToSNS = true
+            cheki.note = "cheki-note"
+            cheki.createdAt = createdAt
+            cheki.updatedAt = updatedAt
+
+            let emptyCheki = ChekinanaLegacyMediaSchema.Cheki(id: emptyChekiID)
+            emptyCheki.idols = [idol]
+            emptyCheki.event = event
+            emptyCheki.date = day
+            emptyCheki.sizeRawValue = ChekiSize.mini.rawValue
+            emptyCheki.note = "converted-record"
+
+            let existingRecord = ChekiRecord(
+                id: existingRecordID,
+                idols: [],
+                event: nil,
+                date: day,
+                size: .mini,
+                note: "converted-record",
+                count: 2
+            )
+            existingRecord.idolIDs = [idolID]
+            existingRecord.eventID = eventID
+
+            let shame = ChekinanaLegacyMediaSchema.Shame(id: sharedMediaID)
+            shame.imageRef = shameRef
+            shame.idols = [idol]
+            shame.date = day
+            shame.note = "shame-note"
+
+            let douga = ChekinanaLegacyMediaSchema.Douga(id: dougaID)
+            douga.videoRef = dougaRef
+            douga.idols = [idol]
+            douga.date = day
+            douga.note = "douga-note"
+
+            context.insert(idol)
+            context.insert(event)
+            context.insert(cheki)
+            context.insert(emptyCheki)
+            context.insert(existingRecord)
+            context.insert(shame)
+            context.insert(douga)
+            context.insert(MediaEventLink(
+                mediaID: shame.id,
+                kind: .shame,
+                eventID: eventID
+            ))
+            context.insert(MediaEventLink(
+                mediaID: douga.id,
+                kind: .douga,
+                eventID: eventID
+            ))
+            context.insert(MediaShotType(
+                mediaID: shame.id,
+                kind: .shame,
+                userAppears: true
+            ))
+            try context.save()
+        }
+        v12Container = nil
+
+        let v14Schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        var v14Container: ModelContainer? = try ModelContainer(
+            for: v14Schema,
+            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            configurations: [ModelConfiguration(
+                "V12MediaItemMigration",
+                schema: v14Schema,
+                url: storeURL,
+                cloudKitDatabase: .none
+            )]
         )
-        let douga = try XCTUnwrap(
-            try context.fetch(FetchDescriptor<Douga>()).first
+        do {
+            let context = ModelContext(try XCTUnwrap(v14Container))
+            let media = try context.fetch(FetchDescriptor<MediaItem>())
+            XCTAssertEqual(media.count, 3)
+            XCTAssertEqual(Dictionary(grouping: media, by: \.kind).mapValues(\.count), [
+                .cheki: 1, .shame: 1, .douga: 1,
+            ])
+            XCTAssertEqual(Set(media.map(\.id)).count, 3)
+
+            let cheki = try XCTUnwrap(media.first { $0.kind == .cheki })
+            XCTAssertEqual(cheki.id, sharedMediaID)
+            XCTAssertEqual(cheki.idolIDs, [idolID])
+            XCTAssertEqual(cheki.eventID, eventID)
+            XCTAssertEqual(cheki.date, day)
+            XCTAssertEqual(cheki.idx, 7)
+            XCTAssertTrue(cheki.userAppears)
+            XCTAssertEqual(cheki.size, .wide)
+            XCTAssertEqual(cheki.mediaRef, chekiRef)
+            XCTAssertEqual(cheki.mediaOwnerID, sharedMediaID)
+            XCTAssertEqual(
+                ChekiImageRefResolver.managedChekiFileURL(
+                    for: cheki.imageRef,
+                    chekiID: cheki.mediaOwnerID
+                ),
+                managedFixtureURLs[0]
+            )
+            XCTAssertTrue(cheki.isFavorite)
+            XCTAssertTrue(cheki.hasPostedToSNS)
+            XCTAssertEqual(cheki.note, "cheki-note")
+            XCTAssertEqual(cheki.createdAt, createdAt)
+            XCTAssertEqual(cheki.updatedAt, updatedAt)
+
+            let shame = try XCTUnwrap(media.first { $0.kind == .shame })
+            XCTAssertNotEqual(shame.id, sharedMediaID)
+            XCTAssertEqual(shame.mediaOwnerID, sharedMediaID)
+            XCTAssertEqual(shame.eventID, eventID)
+            XCTAssertTrue(shame.userAppears)
+            XCTAssertEqual(shame.mediaRef, shameRef)
+            XCTAssertEqual(
+                ChekinanaGalleryMediaStore.managedURL(
+                    for: shame.mediaRef,
+                    id: shame.mediaOwnerID,
+                    kind: .shame,
+                    directory: managedDirectory
+                ),
+                managedFixtureURLs[1]
+            )
+            XCTAssertNil(shame.sizeRawValue)
+            XCTAssertNil(shame.idx)
+
+            let douga = try XCTUnwrap(media.first { $0.kind == .douga })
+            XCTAssertEqual(douga.id, dougaID)
+            XCTAssertEqual(douga.mediaOwnerID, dougaID)
+            XCTAssertEqual(douga.eventID, eventID)
+            XCTAssertFalse(douga.userAppears)
+            XCTAssertEqual(douga.mediaRef, dougaRef)
+            XCTAssertEqual(
+                ChekinanaGalleryMediaStore.managedURL(
+                    for: douga.mediaRef,
+                    id: douga.mediaOwnerID,
+                    kind: .douga,
+                    directory: managedDirectory
+                ),
+                managedFixtureURLs[2]
+            )
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: ChekinanaGalleryMediaStore.thumbnailURL(
+                    id: douga.mediaOwnerID,
+                    directory: managedDirectory
+                ).path
+            ))
+            XCTAssertNil(douga.sizeRawValue)
+            XCTAssertNil(douga.idx)
+
+            let records = try context.fetch(FetchDescriptor<ChekiRecord>())
+            XCTAssertEqual(records.count, 1)
+            let converted = try XCTUnwrap(records.first { $0.id == existingRecordID })
+            XCTAssertEqual(converted.idolIDs, [idolID])
+            XCTAssertEqual(converted.eventID, eventID)
+            XCTAssertEqual(converted.date, day)
+            XCTAssertEqual(converted.size, .mini)
+            XCTAssertEqual(converted.note, "converted-record")
+            XCTAssertEqual(converted.count, 3)
+
+            let staged = try ChekinanaGalleryMediaStore.stageFilesForDeletion(
+                kind: .shame,
+                id: shame.mediaOwnerID,
+                reference: shame.mediaRef,
+                directory: managedDirectory
+            )
+            try ChekinanaGalleryMediaStore.finalizeStagedDeletion(staged)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: managedFixtureURLs[1].path))
+        }
+        v14Container = nil
+
+        v14Container = try ModelContainer(
+            for: v14Schema,
+            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            configurations: [ModelConfiguration(
+                "V12MediaItemMigration",
+                schema: v14Schema,
+                url: storeURL,
+                cloudKitDatabase: .none
+            )]
         )
-        XCTAssertEqual(shame.id, shameID)
-        XCTAssertEqual(shame.imageRef, "preserved.jpg")
-        XCTAssertEqual(shame.idols.map(\.id), [idolID])
-        XCTAssertEqual(shame.date, day)
-        XCTAssertEqual(shame.note, "shame-note")
-        XCTAssertEqual(douga.id, dougaID)
-        XCTAssertEqual(douga.videoRef, "preserved.mov")
-        XCTAssertEqual(douga.idols.map(\.id), [idolID])
-        XCTAssertEqual(douga.date, day)
-        XCTAssertEqual(douga.note, "douga-note")
-        let shotTypes = try context.fetch(FetchDescriptor<MediaShotType>())
-        XCTAssertTrue(shotTypes.isEmpty)
-        XCTAssertFalse(ChekinanaMediaShotTypeStore.userAppears(
-            mediaID: shameID,
-            kind: .shame,
-            values: shotTypes
-        ))
-        XCTAssertFalse(ChekinanaMediaShotTypeStore.userAppears(
-            mediaID: dougaID,
-            kind: .douga,
-            values: shotTypes
-        ))
+        let reopened = ModelContext(try XCTUnwrap(v14Container))
+        XCTAssertEqual(try reopened.fetchCount(FetchDescriptor<MediaItem>()), 3)
+        XCTAssertEqual(try reopened.fetchCount(FetchDescriptor<ChekiRecord>()), 1)
         XCTAssertEqual(
             try ChekinanaDataStore.physicalStoreVersion(at: storeURL),
-            .v12
+            .v14
         )
+    }
+
+    func testV12SparseMediaKindCountsMigrateToV14AndReopenIdempotently() throws {
+        enum Scenario: String, CaseIterable {
+            case empty
+            case eventOnly
+            case chekiOnly
+            case shameOnly
+            case dougaOnly
+
+            var expectedKinds: [MediaItemKind] {
+                switch self {
+                case .empty, .eventOnly: []
+                case .chekiOnly: [.cheki]
+                case .shameOnly: [.shame]
+                case .dougaOnly: [.douga]
+                }
+            }
+        }
+
+        for scenario in Scenario.allCases {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "chekinana-v12-sparse-\(scenario.rawValue)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let storeURL = root.appendingPathComponent("migration.store")
+            let configurationName = "V12Sparse-\(scenario.rawValue)"
+            let v12Schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+            var v12Container: ModelContainer? = try ModelContainer(
+                for: v12Schema,
+                configurations: [ModelConfiguration(
+                    configurationName,
+                    schema: v12Schema,
+                    url: storeURL,
+                    cloudKitDatabase: .none
+                )]
+            )
+            do {
+                let context = ModelContext(try XCTUnwrap(v12Container))
+                switch scenario {
+                case .empty:
+                    break
+                case .eventOnly:
+                    context.insert(ChekinanaLegacyMediaSchema.Event(name: "Only Event"))
+                case .chekiOnly:
+                    let cheki = ChekinanaLegacyMediaSchema.Cheki()
+                    cheki.imageRef = "only-cheki.jpg"
+                    context.insert(cheki)
+                case .shameOnly:
+                    let shame = ChekinanaLegacyMediaSchema.Shame()
+                    shame.imageRef = "only-shame.jpg"
+                    context.insert(shame)
+                case .dougaOnly:
+                    let douga = ChekinanaLegacyMediaSchema.Douga()
+                    douga.videoRef = "only-douga.mov"
+                    context.insert(douga)
+                }
+                try context.save()
+            }
+            v12Container = nil
+
+            let v14Schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+            var v14Container: ModelContainer? = try ModelContainer(
+                for: v14Schema,
+                migrationPlan: ChekinanaSchemaMigrationPlan.self,
+                configurations: [ModelConfiguration(
+                    configurationName,
+                    schema: v14Schema,
+                    url: storeURL,
+                    cloudKitDatabase: .none
+                )]
+            )
+            let migrated = try ModelContext(try XCTUnwrap(v14Container))
+                .fetch(FetchDescriptor<MediaItem>())
+            XCTAssertEqual(migrated.map(\.kind), scenario.expectedKinds, scenario.rawValue)
+            v14Container = nil
+
+            let reopenedContainer = try ModelContainer(
+                for: v14Schema,
+                configurations: [ModelConfiguration(
+                    configurationName,
+                    schema: v14Schema,
+                    url: storeURL,
+                    cloudKitDatabase: .none
+                )]
+            )
+            let reopened = try ModelContext(reopenedContainer)
+                .fetch(FetchDescriptor<MediaItem>())
+            XCTAssertEqual(reopened.map(\.kind), scenario.expectedKinds, scenario.rawValue)
+            XCTAssertEqual(
+                try ChekinanaDataStore.physicalStoreVersion(at: storeURL),
+                .v14,
+                scenario.rawValue
+            )
+        }
+    }
+
+    func testNewMediaShotDefaultsApplyOnlyAtCreation() {
+        XCTAssertFalse(MediaItem(kind: .cheki, mediaRef: "cheki.jpg").userAppears)
+        XCTAssertTrue(MediaItem(kind: .shame, mediaRef: "photo.jpg").userAppears)
+        XCTAssertFalse(MediaItem(kind: .douga, mediaRef: "video.mov").userAppears)
+        XCTAssertFalse(MediaItem(
+            kind: .shame,
+            userAppears: false,
+            mediaRef: "explicit-solo.jpg"
+        ).userAppears)
+    }
+
+    func testMediaRelationshipCacheInvalidatesAndResolverKeepsKindExact() throws {
+        let schema = Schema([Idol.self, Event.self, MediaItem.self])
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let first = Idol(name: "First")
+        let second = Idol(name: "Second")
+        let firstEvent = Event(name: "First event")
+        let secondEvent = Event(name: "Second event")
+        [first, second].forEach(context.insert)
+        [firstEvent, secondEvent].forEach(context.insert)
+        let media = MediaItem(
+            kind: .shame,
+            idols: [first],
+            event: firstEvent,
+            mediaRef: "cache.jpg"
+        )
+        context.insert(media)
+        try context.save()
+
+        XCTAssertEqual(media.idols.map(\.id), [first.id])
+        XCTAssertEqual(media.event?.id, firstEvent.id)
+        media.idolIDs = [second.id]
+        media.eventID = secondEvent.id
+        XCTAssertEqual(media.idols.map(\.id), [second.id])
+        XCTAssertEqual(media.event?.id, secondEvent.id)
+        XCTAssertEqual(
+            try ChekinanaModelContextResolver.shame(id: media.id, in: context).id,
+            media.id
+        )
+        XCTAssertThrowsError(
+            try ChekinanaModelContextResolver.douga(id: media.id, in: context)
+        )
+    }
+
+    func testUnifiedMediaItemPersistsCommonFieldsAndEnforcesKindMetadata() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let first = Idol(name: "First")
+        let second = Idol(name: "Second")
+        let event = Event(name: "Shared")
+        context.insert(first)
+        context.insert(second)
+        context.insert(event)
+        let date = try XCTUnwrap(
+            ChekinanaDateOnly.canonicalDate(year: 2027, month: 5, day: 6)
+        )
+        let cheki = MediaItem(
+            kind: .cheki,
+            idols: [first, first, second],
+            event: event,
+            date: date,
+            idx: 4,
+            userAppears: true,
+            size: .wide,
+            mediaRef: "cheki.jpg",
+            isFavorite: true,
+            hasPostedToSNS: true,
+            note: "cheki"
+        )
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [second],
+            event: event,
+            date: date,
+            userAppears: true,
+            mediaRef: "shame.png",
+            isFavorite: true,
+            hasPostedToSNS: true,
+            note: "shame"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [first],
+            event: event,
+            date: date,
+            userAppears: true,
+            mediaRef: "douga.mov",
+            isFavorite: true,
+            hasPostedToSNS: true,
+            note: "douga"
+        )
+        [cheki, shame, douga].forEach(context.insert)
+        try context.save()
+
+        let reopened = ModelContext(container)
+        let values = try reopened.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(values.count, 3)
+        for value in values {
+            XCTAssertEqual(value.eventID, event.id)
+            XCTAssertEqual(value.date, date)
+            XCTAssertTrue(value.userAppears)
+            XCTAssertTrue(value.isFavorite)
+            XCTAssertTrue(value.hasPostedToSNS)
+            XCTAssertNoThrow(try value.validateInvariant())
+        }
+        let savedCheki = try XCTUnwrap(values.first { $0.kind == .cheki })
+        XCTAssertEqual(savedCheki.idolIDs, [first.id, second.id])
+        XCTAssertEqual(savedCheki.size, .wide)
+        XCTAssertEqual(savedCheki.idx, 4)
+        for nonCheki in values.filter({ $0.kind != .cheki }) {
+            XCTAssertNil(nonCheki.sizeRawValue)
+            XCTAssertNil(nonCheki.idx)
+            XCTAssertThrowsError(try nonCheki.setChekiMetadata(size: .mini, idx: 1)) {
+                XCTAssertEqual(
+                    $0 as? ChekinanaMediaItemInvariantError,
+                    .nonChekiMetadata
+                )
+            }
+        }
     }
 
     func testTimelineOrderingUsesEventStartThenOpenAndTravelDeparture() throws {
@@ -9189,22 +16542,38 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertTrue(
             ChekinanaCalendarDayContentPolicy.usesSecondaryDateNumber(
-                isInDisplayedMonth: false
+                isInDisplayedMonth: false,
+                isSelected: false
             )
         )
         XCTAssertFalse(
             ChekinanaCalendarDayContentPolicy.usesSecondaryDateNumber(
-                isInDisplayedMonth: true
+                isInDisplayedMonth: true,
+                isSelected: false
+            )
+        )
+        XCTAssertFalse(
+            ChekinanaCalendarDayContentPolicy.usesSecondaryDateNumber(
+                isInDisplayedMonth: false,
+                isSelected: true
             )
         )
         XCTAssertTrue(
             ChekinanaCalendarDayContentPolicy.usesSecondaryChekiCount(
-                isInDisplayedMonth: false
+                isInDisplayedMonth: false,
+                isSelected: false
             )
         )
         XCTAssertFalse(
             ChekinanaCalendarDayContentPolicy.usesSecondaryChekiCount(
-                isInDisplayedMonth: true
+                isInDisplayedMonth: true,
+                isSelected: false
+            )
+        )
+        XCTAssertFalse(
+            ChekinanaCalendarDayContentPolicy.usesSecondaryChekiCount(
+                isInDisplayedMonth: false,
+                isSelected: true
             )
         )
 
@@ -9231,6 +16600,44 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(calendar.contains("chekiCountForeground"))
         XCTAssertTrue(calendar.contains("usesSecondaryChekiCount"))
         XCTAssertFalse(calendar.contains("TravelSegment"))
+        XCTAssertTrue(calendar.contains("@State private var selectedEvent: Event?"))
+        XCTAssertTrue(calendar.contains("Button {\n                            selectedEvent = event"))
+        XCTAssertTrue(calendar.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(calendar.contains("chekinana.calendar.event.\\(event.id)"))
+        XCTAssertTrue(calendar.contains(
+            ".sheet(item: $selectedEvent, onDismiss: deletePendingEvent)"
+        ))
+        XCTAssertTrue(calendar.contains("ChekinanaEventDetailView(event: event)"))
+        XCTAssertTrue(calendar.contains("pendingEventDeletionID = eventID"))
+        XCTAssertTrue(calendar.contains("selectedEvent = nil"))
+        XCTAssertTrue(calendar.contains("ChekinanaEventPersistence.delete("))
+        XCTAssertTrue(calendar.contains("await Task.yield()"))
+
+        let eventRowsStart = try XCTUnwrap(
+            calendar.range(of: "ForEach(selectedEvents) { event in")?.lowerBound
+        )
+        let eventRowsEnd = try XCTUnwrap(calendar.range(
+            of: "ForEach(displayedGroups) { group in",
+            range: eventRowsStart..<calendar.endIndex
+        )?.lowerBound)
+        let eventRows = calendar[eventRowsStart..<eventRowsEnd]
+        let eventRowPadding = try XCTUnwrap(eventRows.range(of: ".padding(12)"))
+        let eventRowBackground = try XCTUnwrap(eventRows.range(
+            of: ".background(ChekinanaProductTheme.softAccent.opacity(0.72))",
+            range: eventRowPadding.upperBound..<eventRows.endIndex
+        ))
+        XCTAssertNotNil(eventRows.range(
+            of: ".contentShape(Rectangle())",
+            range: eventRowBackground.upperBound..<eventRows.endIndex
+        ))
+
+        let groupsStart = try XCTUnwrap(
+            calendar.range(of: "ForEach(displayedGroups) { group in")?.lowerBound
+        )
+        let groupsSource = calendar[groupsStart...]
+        XCTAssertTrue(groupsSource.contains("ChekinanaCalendarGroupGestureSurface("))
+        XCTAssertTrue(groupsSource.contains("onReorderEnded:"))
+        XCTAssertTrue(groupsSource.contains("handleCalendarGroupTap("))
     }
 
     func testEventsTimelineSourceHasTravelRoutesAndNoOrderButton() throws {
@@ -9259,32 +16666,94 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(eventsView.contains("ascending: true"))
         XCTAssertTrue(eventsView.contains("ascending: false"))
         XCTAssertTrue(eventsView.contains("segment.departureTime"))
-        XCTAssertTrue(eventsView.contains("ChekinanaTravelTimelinePolicy.futureSegments("))
-        XCTAssertTrue(eventsView.contains("pruneExpiredTravelSegments(from:"))
-        let pastStart = try XCTUnwrap(
-            eventsView.range(of: "private var past:")?.lowerBound
+        XCTAssertTrue(eventsView.contains(".font(timelineTitleFont(entry))"))
+        XCTAssertTrue(eventsView.contains(".font(timelineTitleFont(entry))"))
+        XCTAssertTrue(eventsView.contains("case .event, .travel:"))
+        XCTAssertTrue(eventsView.contains(".system(size: 14, weight: .semibold)"))
+        XCTAssertFalse(eventsView.contains("case .event:\n            .headline"))
+        XCTAssertTrue(eventsView.contains(
+            ".frame(maxWidth: .infinity, alignment: .leading)\n                            .layoutPriority(1)"
+        ))
+        XCTAssertTrue(eventsView.contains(
+            "width: showsRemainingDays ? 54 : 68,\n                                    alignment: .trailing"
+        ))
+        XCTAssertFalse(eventsView.contains("Text(verbatim: \"チェキ999枚\")"))
+        XCTAssertFalse(eventsView.contains(".overlay(alignment: .trailing)"))
+        XCTAssertFalse(eventsView.contains(".foregroundStyle(.clear)"))
+        XCTAssertFalse(eventsView.contains("showsRemainingDays ? 54 : 72"))
+        XCTAssertTrue(eventsView.contains("Spacer().frame(width: 10)"))
+        XCTAssertTrue(eventsView.contains("HStack(spacing: 0)"))
+        XCTAssertTrue(eventsView.contains("Spacer(minLength: 0)"))
+        XCTAssertTrue(eventsView.contains("Spacer().frame(width: 12)"))
+        XCTAssertTrue(eventsView.contains(
+            "Spacer(minLength: 0)\n                                .frame(idealWidth: 6, maxWidth: 6)"
+        ))
+        XCTAssertFalse(eventsView.contains(".frame(idealWidth: 12, maxWidth: 12)"))
+        XCTAssertFalse(eventsView.contains("Spacer().frame(width: 6)"))
+        XCTAssertTrue(eventsView.contains(
+            "Image(systemName: \"chevron.right\").font(.caption).foregroundStyle(.tertiary)\n                        }\n                        .frame(maxWidth: .infinity, alignment: .leading)\n                        .contentShape(Rectangle())\n                        .frame(height: 62)"
+        ))
+        let eventSectionStart = try XCTUnwrap(
+            eventsView.range(of: "private func eventSection")?.lowerBound
         )
-        let pastEnd = try XCTUnwrap(
+        let eventSectionEnd = try XCTUnwrap(
             eventsView.range(
-                of: "private var undated:",
-                range: pastStart..<eventsView.endIndex
+                of: "private func timelineTrailingText",
+                range: eventSectionStart..<eventsView.endIndex
             )?.lowerBound
         )
-        let pastPartition = eventsView[pastStart..<pastEnd]
-        XCTAssertTrue(pastPartition.contains("datedEvents.filter"))
-        XCTAssertTrue(pastPartition.contains(") < 0"))
-        XCTAssertFalse(pastPartition.contains("TravelSegment"))
+        XCTAssertFalse(eventsView[eventSectionStart..<eventSectionEnd].contains(
+            ".frame(width: 181"
+        ))
+        let subtitleStart = try XCTUnwrap(
+            eventsView.range(of: "private func timelineSubtitle")?.lowerBound
+        )
+        let subtitleEnd = try XCTUnwrap(
+            eventsView.range(
+                of: "private func timelineTitleFont",
+                range: subtitleStart..<eventsView.endIndex
+            )?.lowerBound
+        )
+        XCTAssertFalse(
+            eventsView[subtitleStart..<subtitleEnd].contains("segment.serviceNumber")
+        )
+        XCTAssertTrue(eventsView.contains("ChekinanaTravelTimelinePolicy.futureSegments("))
+        XCTAssertTrue(eventsView.contains("pruneExpiredTravelSegments(from:"))
+        let snapshotStart = try XCTUnwrap(
+            eventsView.range(of: "private var timelineSnapshot:")?.lowerBound
+        )
+        let snapshotEnd = try XCTUnwrap(
+            eventsView.range(
+                of: "private var travelCleanupSignature:",
+                range: snapshotStart..<eventsView.endIndex
+            )?.lowerBound
+        )
+        let snapshot = eventsView[snapshotStart..<snapshotEnd]
+        XCTAssertTrue(snapshot.contains("let past = fixedOrder(datedEvents.filter"))
+        XCTAssertTrue(snapshot.contains(") < 0"))
+        XCTAssertTrue(snapshot.contains("let undated = events.filter"))
+        XCTAssertTrue(snapshot.contains("ascending: false"))
+        let pastStart = try XCTUnwrap(snapshot.range(of: "let past ="))
+        let undatedStart = try XCTUnwrap(snapshot.range(
+            of: "let undated =",
+            range: pastStart.upperBound..<snapshot.endIndex
+        ))
+        let pastPartition = snapshot[pastStart.lowerBound..<undatedStart.lowerBound]
+        XCTAssertFalse(pastPartition.contains("futureTravel"))
         XCTAssertFalse(pastPartition.contains("futureSegments"))
-        XCTAssertTrue(
-            source.contains(
-                #""\(segment.displayedDepartureLocation) → \(segment.displayedArrivalLocation)""#
-            )
+        XCTAssertEqual(
+            ChekinanaEventListPresentation.travelTimelineTitle(
+                departure: "杭州萧山T3",
+                arrival: "广州白云T3"
+            ),
+            "杭州萧山T3 → 广州白云T3"
         )
         XCTAssertFalse(eventsView.contains("chekinana.events.sort"))
         XCTAssertFalse(eventsView.contains("sortsAscending"))
     }
 
-    func testCalendarMonthYearWheelSelectsImmediatelyAndClampsDay() throws {
+    @MainActor
+    func testCalendarMonthYearWheelUsesLocalDraftThenCommitsAndClampsDay() throws {
         let january31 = utcDate(2027, 1, 31)
         let commonYear = try XCTUnwrap(
             ChekinanaCalendarMonthYearWheelPolicy.selection(
@@ -9324,6 +16793,33 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             month: 13,
             preservingDayFrom: january31
         ))
+        XCTAssertNil(ChekinanaCalendarMonthYearWheelPolicy.selection(
+            year: 2201,
+            month: 1,
+            preservingDayFrom: january31
+        ))
+
+        let initiallyDisplayed = utcDate(2027, 1, 1)
+        let draft = ChekinanaCalendarMonthYearDraft(
+            displayedMonth: initiallyDisplayed
+        )
+        draft.year = 2028
+        draft.month = 2
+        XCTAssertEqual(
+            ChekinanaCalendarMonthYearWheelPolicy.month(in: initiallyDisplayed),
+            1,
+            "Changing the wheel draft must not mutate the displayed month."
+        )
+        let committedDraft = try XCTUnwrap(
+            draft.selection(preservingDayFrom: january31)
+        )
+        XCTAssertEqual(
+            ChekinanaProductDate.calendar.dateComponents(
+                [.year, .month, .day],
+                from: committedDraft.selectedDate
+            ),
+            DateComponents(year: 2028, month: 2, day: 29)
+        )
 
         let productSourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -9341,10 +16837,15 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )?.lowerBound
         )
         let calendar = String(source[calendarStart..<calendarEnd])
-        XCTAssertTrue(calendar.contains("isMonthYearWheelExpanded.toggle()"))
+        XCTAssertTrue(calendar.contains("toggleMonthYearWheel()"))
+        XCTAssertTrue(calendar.contains("commitMonthYearWheelDraft()"))
         XCTAssertTrue(calendar.contains("ChekinanaCalendarMonthYearWheels("))
         XCTAssertFalse(calendar.contains("ChekinanaMonthPicker("))
         XCTAssertFalse(calendar.contains("isPickingMonth"))
+        XCTAssertTrue(calendar.contains(
+            "ChekinanaCalendarDateBoundaryPolicy.adjacentDisplayedMonth("
+        ))
+        XCTAssertTrue(calendar.contains(".disabled(!isSelectable)"))
 
         let wheelsStart = try XCTUnwrap(
             source.range(of: "private struct ChekinanaCalendarMonthYearWheels")?.lowerBound
@@ -9356,19 +16857,107 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )?.lowerBound
         )
         let wheels = String(source[wheelsStart..<wheelsEnd])
-        XCTAssertTrue(wheels.contains(".pickerStyle(.wheel)"))
+        XCTAssertTrue(wheels.contains("ChekinanaCalendarLazyWheel("))
         XCTAssertTrue(wheels.contains("month-year.year-wheel"))
         XCTAssertTrue(wheels.contains("month-year.month-wheel"))
-        XCTAssertTrue(wheels.contains("displayedMonth = next.displayedMonth"))
-        XCTAssertTrue(wheels.contains("selectedDate = next.selectedDate"))
+        XCTAssertTrue(wheels.contains("@State private var draftYear"))
+        XCTAssertTrue(wheels.contains("@State private var draftMonth"))
+        XCTAssertTrue(wheels.contains("draft.year = newValue"))
+        XCTAssertTrue(wheels.contains("draft.month = newValue"))
+        XCTAssertFalse(wheels.contains("ForEach("))
+        XCTAssertFalse(wheels.contains("month-year.commit"))
+        XCTAssertFalse(wheels.contains("common.done"))
+        XCTAssertFalse(wheels.contains("Button("))
+        XCTAssertFalse(wheels.contains("@Binding var displayedMonth"))
+        XCTAssertFalse(wheels.contains("displayedMonth ="))
+
+        let lazyWheelStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaCalendarLazyWheel")?.lowerBound
+        )
+        let lazyWheelEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaCalendarMonthYearWheels",
+                range: lazyWheelStart..<source.endIndex
+            )?.lowerBound
+        )
+        let lazyWheel = String(source[lazyWheelStart..<lazyWheelEnd])
+        XCTAssertTrue(lazyWheel.contains("UIViewRepresentable"))
+        XCTAssertTrue(lazyWheel.contains("UIPickerViewDataSource"))
+        XCTAssertTrue(lazyWheel.contains("numberOfRowsInComponent"))
+        XCTAssertTrue(lazyWheel.contains("parent.range.count"))
+        XCTAssertTrue(lazyWheel.contains("titleForRow row"))
+        XCTAssertFalse(lazyWheel.contains("ForEach("))
+        XCTAssertTrue(lazyWheel.contains("func sizeThatFits("))
+        XCTAssertTrue(lazyWheel.contains("guard let width = proposal.width"))
+        XCTAssertTrue(lazyWheel.contains("CGSize(width: width, height: 132)"))
+
+        let policyStart = try XCTUnwrap(
+            source.range(of: "enum ChekinanaCalendarMonthYearWheelPolicy")?.lowerBound
+        )
+        let policyEnd = try XCTUnwrap(
+            source.range(
+                of: "final class ChekinanaCalendarMonthYearDraft",
+                range: policyStart..<source.endIndex
+            )?.lowerBound
+        )
+        let policy = source[policyStart..<policyEnd]
+        XCTAssertTrue(policy.contains("englishMonthTitles"))
+        XCTAssertTrue(policy.contains("identifier.hasPrefix(\"ja\")"))
+        XCTAssertTrue(policy.contains("identifier.hasPrefix(\"zh\")"))
+        XCTAssertFalse(policy.contains("DateFormatter"))
+    }
+
+    @MainActor
+    func testCalendarMonthMetricsAggregatesEachDayOnce() {
+        let day = utcDate(2026, 8, 24)
+        let otherDay = utcDate(2026, 8, 25)
+        let imageCheki = MediaItem(imageRef: "managed.jpg")
+        imageCheki.date = day
+        let otherCheki = MediaItem(imageRef: "other.jpg")
+        otherCheki.date = otherDay
+        let record = ChekiRecord(date: day, count: 3)
+        let event = Event(name: "Same day", date: day)
+
+        let metrics = ChekinanaCalendarMonthMetrics(
+            chekis: [imageCheki, otherCheki],
+            records: [record],
+            events: [event],
+            hiddenIDs: []
+        )
+
+        XCTAssertTrue(metrics.hasEvent(on: day))
+        XCTAssertFalse(metrics.hasEvent(on: otherDay))
+        XCTAssertEqual(metrics.chekiCount(on: day), 4)
+        XCTAssertEqual(metrics.chekiCount(on: otherDay), 1)
+    }
+
+    @MainActor
+    func testCalendarMonthMetricsSaturatesByDateAndIgnoresNegativeCounts() {
+        let saturatedDay = utcDate(2026, 8, 26)
+        let invalidDay = utcDate(2026, 8, 27)
+        let media = MediaItem(imageRef: "same-day.jpg")
+        media.date = saturatedDay
+        let maximum = ChekiRecord(date: saturatedDay, count: Int.max)
+        let negative = ChekiRecord(date: invalidDay)
+        negative.count = -1
+
+        let metrics = ChekinanaCalendarMonthMetrics(
+            chekis: [media],
+            records: [maximum, negative],
+            events: [],
+            hiddenIDs: []
+        )
+
+        XCTAssertEqual(metrics.chekiCount(on: saturatedDay), Int.max)
+        XCTAssertEqual(metrics.chekiCount(on: invalidDay), 0)
     }
 
     func testIdolCardChekiCountAddsRecordQuantityInsteadOfRecordRows() {
         let target = Idol(name: "Target")
         let other = Idol(name: "Other")
-        let firstMedia = Cheki(idols: [target], imageRef: "first.jpg")
-        let secondMedia = Cheki(idols: [target], imageRef: "second.jpg")
-        let sharedMedia = Cheki(idols: [other, target], imageRef: "shared.jpg")
+        let firstMedia = MediaItem(idols: [target], imageRef: "first.jpg")
+        let secondMedia = MediaItem(idols: [target], imageRef: "second.jpg")
+        let sharedMedia = MediaItem(idols: [other, target], imageRef: "shared.jpg")
         let countedRecord = ChekiRecord(
             idols: [target, other],
             count: 3
@@ -9395,13 +16984,23 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testSimpleRecordsRemainLinkedWhileGalleryOnlyAcceptsMediaModels() {
         let idol = Idol(name: "Local")
         let record = ChekiRecord(idols: [idol], date: Date(), size: .mini)
-        let cheki = Cheki(idols: [idol], date: Date(), imageRef: "media.jpg")
-        let shame = Shame(idols: [idol], date: Date())
-        let douga = Douga(idols: [idol], date: Date())
+        let cheki = MediaItem(idols: [idol], date: Date(), imageRef: "media.jpg")
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            date: Date(),
+            mediaRef: "shame.jpg"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [idol],
+            date: Date(),
+            mediaRef: "douga.mov"
+        )
 
         XCTAssertTrue(ChekinanaGalleryItem.cheki(cheki).hasMedia)
-        XCTAssertFalse(ChekinanaGalleryItem.shame(shame).hasMedia)
-        XCTAssertFalse(ChekinanaGalleryItem.douga(douga).hasMedia)
+        XCTAssertTrue(ChekinanaGalleryItem.shame(shame).hasMedia)
+        XCTAssertTrue(ChekinanaGalleryItem.douga(douga).hasMedia)
         XCTAssertEqual(cheki.idols.map(\.id), [idol.id])
         XCTAssertEqual(record.idols.map(\.id), [idol.id])
         XCTAssertEqual(shame.idols.map(\.id), [idol.id])
@@ -9409,35 +17008,59 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testSimpleRecordsPersistEditAndDeleteInMemory() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
         let context = ModelContext(container)
         let idol = Idol(name: "Persisted")
         let record = ChekiRecord(idols: [idol], date: Date(), size: .mini, note: "before")
-        let shame = Shame(idols: [idol], date: Date(), note: "before")
-        let douga = Douga(idols: [idol], date: Date())
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            date: Date(),
+            mediaRef: "shame.jpg",
+            note: "before"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [idol],
+            date: Date(),
+            mediaRef: "douga.mov"
+        )
         context.insert(idol); context.insert(record); context.insert(shame); context.insert(douga)
         try context.save()
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Cheki>()), 0)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<MediaItem>()).filter { $0.kind == .cheki }.count,
+            0
+        )
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<ChekiRecord>()), 1)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Shame>()), 1)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Douga>()), 1)
-        XCTAssertFalse(ChekinanaGalleryItem.shame(shame).hasMedia)
-        XCTAssertFalse(ChekinanaGalleryItem.douga(douga).hasMedia)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<MediaItem>()).filter { $0.kind == .shame }.count,
+            1
+        )
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<MediaItem>()).filter { $0.kind == .douga }.count,
+            1
+        )
+        XCTAssertTrue(ChekinanaGalleryItem.shame(shame).hasMedia)
+        XCTAssertTrue(ChekinanaGalleryItem.douga(douga).hasMedia)
         record.note = "after"; try context.save()
         XCTAssertEqual(try context.fetch(FetchDescriptor<ChekiRecord>()).first?.note, "after")
         context.delete(record); context.delete(douga); try context.save()
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<ChekiRecord>()), 0)
-        XCTAssertEqual(try context.fetchCount(FetchDescriptor<Douga>()), 0)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<MediaItem>()).filter { $0.kind == .douga }.count,
+            0
+        )
     }
 
     func testChekiRecordExpectedSnapshotRejectsLateIncrementAndDeletionWithoutPartialWrite() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
         )
         let editorContext = ModelContext(container)
+        editorContext.autosaveEnabled = false
         let idol = Idol(name: "Snapshot Idol")
         let day = utcDate(2026, 8, 24)
         let record = ChekiRecord(
@@ -9454,12 +17077,21 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             note: "delete target",
             count: 1
         )
+        let staleDeleteRecord = ChekiRecord(
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "stale delete target",
+            count: 4
+        )
         editorContext.insert(idol)
         editorContext.insert(record)
         editorContext.insert(deletedRecord)
+        editorContext.insert(staleDeleteRecord)
         try editorContext.save()
         let staleSnapshot = ChekinanaChekiRecordSnapshot(record)
         let deletedSnapshot = ChekinanaChekiRecordSnapshot(deletedRecord)
+        let staleDeleteSnapshot = ChekinanaChekiRecordSnapshot(staleDeleteRecord)
 
         let importerContext = ModelContext(container)
         try ChekinanaChekiRecordStore.withMutationLock {
@@ -9470,6 +17102,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             live.count += 3
             try importerContext.save()
         }
+
+        idol.name = "unsaved sentinel"
 
         XCTAssertThrowsError(try ChekinanaChekiRecordStore.update(
             record,
@@ -9487,6 +17121,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 .changedRecord
             )
         }
+        XCTAssertEqual(
+            idol.name,
+            "unsaved sentinel",
+            "Read-only stale validation must not roll back unrelated UI edits."
+        )
         var verification = ModelContext(container)
         var values = try verification.fetch(FetchDescriptor<ChekiRecord>())
         let incremented = try XCTUnwrap(values.first { $0.id == record.id })
@@ -9523,6 +17162,235 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         values = try verification.fetch(FetchDescriptor<ChekiRecord>())
         XCTAssertNil(values.first { $0.id == deletedRecord.id })
         XCTAssertEqual(values.first { $0.id == record.id }?.count, 5)
+
+        let staleDeleteMutationContext = ModelContext(container)
+        try ChekinanaChekiRecordStore.withMutationLock {
+            let live = try XCTUnwrap(
+                staleDeleteMutationContext.fetch(FetchDescriptor<ChekiRecord>())
+                    .first { $0.id == staleDeleteRecord.id }
+            )
+            live.note = "changed elsewhere"
+            try staleDeleteMutationContext.save()
+        }
+        XCTAssertThrowsError(try ChekinanaChekiRecordStore.delete(
+            staleDeleteRecord,
+            expected: staleDeleteSnapshot,
+            in: editorContext
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiRecordMutationError,
+                .changedRecord
+            )
+        }
+        XCTAssertEqual(
+            idol.name,
+            "unsaved sentinel",
+            "Stale delete validation must not roll back unrelated UI edits."
+        )
+        verification = ModelContext(container)
+        values = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(
+            values.first { $0.id == staleDeleteRecord.id }?.note,
+            "changed elsewhere"
+        )
+    }
+
+    func testChekiRecordUpdatePerformsOneAtomicSave() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Single Save Idol")
+        let day = utcDate(2026, 8, 24)
+        let event = Event(name: "Single Save Event", date: day)
+        let record = ChekiRecord(
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "before",
+            count: 1
+        )
+        context.insert(idol)
+        context.insert(event)
+        context.insert(record)
+        try context.save()
+
+        var saveCount = 0
+        let updated = try ChekinanaChekiRecordStore.update(
+            record,
+            idols: [idol],
+            event: event,
+            date: day,
+            size: .wide,
+            note: "after",
+            count: 3,
+            expected: ChekinanaChekiRecordSnapshot(record),
+            in: context,
+            saveContext: { context in
+                saveCount += 1
+                try context.save()
+            }
+        )
+
+        XCTAssertEqual(saveCount, 1)
+        XCTAssertEqual(updated?.eventID, event.id)
+        XCTAssertEqual(updated?.size, .wide)
+        XCTAssertEqual(updated?.note, "after")
+        XCTAssertEqual(updated?.count, 3)
+    }
+
+    func testChekiRecordScalarUpdateMergesOnlyMatchingIdentityCandidates() throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Targeted update")
+        let day = utcDate(2026, 8, 24)
+        let otherDay = utcDate(2026, 8, 25)
+        let target = ChekiRecord(
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "target",
+            count: 2
+        )
+        let collision = ChekiRecord(
+            idols: [idol],
+            date: day,
+            size: .mini,
+            note: "target",
+            count: 3
+        )
+        let unrelatedSameNote = ChekiRecord(
+            idols: [idol],
+            date: otherDay,
+            size: .mini,
+            note: "target",
+            count: 7
+        )
+        context.insert(idol)
+        [target, collision, unrelatedSameNote].forEach(context.insert)
+        try context.save()
+
+        let updated = try ChekinanaChekiRecordStore.update(
+            recordID: target.id,
+            idolIDs: [idol.id],
+            eventID: nil,
+            date: day,
+            size: .mini,
+            note: "target",
+            count: 2,
+            expected: ChekinanaChekiRecordSnapshot(target),
+            in: context
+        )
+
+        XCTAssertEqual(updated?.count, 5)
+        let saved = try context.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(saved.count, 2)
+        XCTAssertNil(saved.first { $0.id == collision.id })
+        XCTAssertEqual(saved.first { $0.id == unrelatedSameNote.id }?.count, 7)
+        XCTAssertEqual(saved.first { $0.id == unrelatedSameNote.id }?.date, otherDay)
+    }
+
+    func testChekiRecordEventUpdatePersistsAllFieldsAndPropagatesWithoutSwiftDataError() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-record-event-update-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let configuration = ModelConfiguration(
+            "RecordEventUpdate",
+            schema: schema,
+            url: directory.appendingPathComponent("RecordEventUpdate.store"),
+            cloudKitDatabase: .none
+        )
+        var container: ModelContainer? = try ModelContainer(
+            for: schema,
+            configurations: [configuration]
+        )
+        let idolID = UUID()
+        let eventID = UUID()
+        let sourceID = UUID()
+        let targetRecordID = UUID()
+        let targetMediaID = UUID()
+        let oldDay = utcDate(2026, 8, 23)
+        let newDay = utcDate(2026, 8, 24)
+
+        do {
+            let context = ModelContext(try XCTUnwrap(container))
+            let idol = Idol(id: idolID, name: "Persisted Idol")
+            let event = Event(id: eventID, name: "Persisted Event", date: newDay)
+            let source = ChekiRecord(
+                id: sourceID,
+                idols: [idol],
+                date: oldDay,
+                size: .mini,
+                note: "before",
+                count: 1
+            )
+            let targetRecord = ChekiRecord(
+                id: targetRecordID,
+                idols: [idol],
+                date: newDay,
+                size: .wide,
+                note: "target",
+                count: 2
+            )
+            let targetMedia = MediaItem(
+                id: targetMediaID,
+                kind: .shame,
+                idols: [idol],
+                date: newDay,
+                mediaRef: "record-event-target.jpg"
+            )
+            context.insert(idol)
+            context.insert(event)
+            context.insert(source)
+            context.insert(targetRecord)
+            context.insert(targetMedia)
+            try context.save()
+
+            let snapshot = ChekinanaChekiRecordSnapshot(source)
+            do {
+                _ = try ChekinanaChekiRecordStore.update(
+                    source,
+                    idols: [idol],
+                    event: event,
+                    date: newDay,
+                    size: .wide,
+                    note: "after",
+                    count: 7,
+                    expected: snapshot,
+                    in: context
+                )
+            } catch {
+                let underlying = (error as NSError).userInfo[NSUnderlyingErrorKey]
+                XCTFail("Unexpected record save error: \(error); underlying: \(String(describing: underlying))")
+            }
+        }
+
+        container = nil
+        container = try ModelContainer(for: schema, configurations: [configuration])
+        let verification = ModelContext(try XCTUnwrap(container))
+        let records = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        let source = try XCTUnwrap(records.first { $0.id == sourceID })
+        XCTAssertEqual(source.eventID, eventID)
+        XCTAssertEqual(source.date, newDay)
+        XCTAssertEqual(source.size, .wide)
+        XCTAssertEqual(source.note, "after")
+        XCTAssertEqual(source.count, 7)
+        XCTAssertEqual(records.first { $0.id == targetRecordID }?.eventID, eventID)
+        XCTAssertEqual(
+            try verification.fetch(FetchDescriptor<MediaItem>())
+                .first { $0.id == targetMediaID }?.eventID,
+            eventID
+        )
     }
 
     func testChekiRecordSaveFailuresRollbackEveryMutationAndReleaseGate() throws {
@@ -9535,7 +17403,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let storeURL = directory.appendingPathComponent("Records.store")
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let configuration = ModelConfiguration(
             "Records",
             schema: schema,
@@ -9583,10 +17451,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         do {
             let context = ModelContext(try XCTUnwrap(container))
+            context.autosaveEnabled = false
             let idol = try XCTUnwrap(context.fetch(FetchDescriptor<Idol>()).first)
             let record = try XCTUnwrap(context.fetch(FetchDescriptor<ChekiRecord>()).first)
             let snapshot = ChekinanaChekiRecordSnapshot(record)
             XCTAssertEqual(record.count, 2)
+            idol.name = "must roll back"
             XCTAssertThrowsError(try ChekinanaChekiRecordStore.update(
                 record,
                 idols: [idol],
@@ -9599,19 +17469,31 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 in: context,
                 saveContext: { _ in throw InjectedFailure.save }
             ))
+            XCTAssertEqual(idol.name, "Rollback Idol")
+            XCTAssertEqual(record.note, "original")
+            XCTAssertEqual(record.size, .mini)
+            XCTAssertEqual(record.count, 2)
         }
         do {
             let context = ModelContext(try XCTUnwrap(container))
+            context.autosaveEnabled = false
+            let idol = try XCTUnwrap(context.fetch(FetchDescriptor<Idol>()).first)
             let record = try XCTUnwrap(context.fetch(FetchDescriptor<ChekiRecord>()).first)
             XCTAssertEqual(record.count, 2)
             XCTAssertEqual(record.note, "original")
             XCTAssertEqual(record.size, .mini)
+            idol.name = "delete must roll back"
             XCTAssertThrowsError(try ChekinanaChekiRecordStore.delete(
                 record,
                 expected: ChekinanaChekiRecordSnapshot(record),
                 in: context,
                 saveContext: { _ in throw InjectedFailure.save }
             ))
+            XCTAssertEqual(idol.name, "Rollback Idol")
+            XCTAssertNotNil(
+                try context.fetch(FetchDescriptor<ChekiRecord>())
+                    .first { $0.id == recordID }
+            )
         }
         do {
             let context = ModelContext(try XCTUnwrap(container))
@@ -9641,7 +17523,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testChekiRecordMutationRejectsRelationshipsDeletedAfterResolveWithoutDanglingKeys() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -9748,7 +17630,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(retained.count, 2)
     }
 
-    func testSimpleRecordLinksPersistAcrossRestartAndGateIdolEventDeletion() throws {
+    func testSimpleRecordLinksPersistAcrossRestartGateIdolAndUnbindDeletedEvent() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "chekinana-simple-record-links-\(UUID().uuidString)",
             isDirectory: true
@@ -9759,7 +17641,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: directory) }
         let storeURL = directory.appendingPathComponent("Records.store")
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let configuration = ModelConfiguration(
             "Records",
             schema: schema,
@@ -9812,15 +17694,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 idol,
                 from: context
             ))
-            XCTAssertThrowsError(try ChekinanaEventPersistence.delete(
+            XCTAssertNoThrow(try ChekinanaEventPersistence.delete(
                 event,
                 from: context
             ))
             XCTAssertEqual(try context.fetchCount(FetchDescriptor<Idol>()), 1)
-            XCTAssertEqual(try context.fetchCount(FetchDescriptor<Event>()), 1)
+            XCTAssertEqual(try context.fetchCount(FetchDescriptor<Event>()), 0)
+            XCTAssertNil(record.eventID)
+            XCTAssertNil(record.event)
 
             record.idols = []
-            record.event = nil
             try context.save()
         }
         container = nil
@@ -9871,22 +17754,568 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(deleted.generation, 4)
         XCTAssertTrue(deleted.removesAvatar)
         XCTAssertFalse(deleted.isPreparingCatalogueAvatar)
-        XCTAssertFalse(ChekinanaIdolAvatarSelectionPolicy.acceptsPreview(
-            generation: 3,
-            currentGeneration: 4,
-            itemMatches: true
-        ))
-        XCTAssertTrue(ChekinanaIdolAvatarSelectionPolicy.acceptsPreview(
-            generation: 4,
-            currentGeneration: 4,
-            itemMatches: true
-        ))
-        XCTAssertFalse(ChekinanaIdolAvatarSelectionPolicy.acceptsPreview(
-            generation: 4,
-            currentGeneration: 4,
-            itemMatches: false
-        ))
+        var local = ChekinanaLocalAvatarPreparationState()
+        let owner = local.begin(selectionID: UUID())
+        XCTAssertTrue(local.invalidate(ifOwnedBy: owner, reason: .avatarRemoved))
+        XCTAssertFalse(local.completeSuccess(ifOwnedBy: owner))
+        XCTAssertTrue(local.allowsSave(preparedOwner: nil))
         XCTAssertFalse(ChekinanaIdolAvatarSelectionPolicy.shouldReadExistingAvatar(explicitlyRemoving: true))
+    }
+
+    func testReferenceOnlyNewManualIdolInitializesAvatar() async throws {
+        let referenceData = Data("reference".utf8)
+        let idol = Idol(name: "New Manual")
+        let target = ChekinanaCatalogueIdolTarget(idol: idol, shouldInsert: true)
+        XCTAssertEqual(
+            ChekinanaIdolReferenceAvatarPolicy.targetKind(for: target),
+            .newManual
+        )
+        var stagedData: Data?
+        let stored = ChekinanaIdolReferenceStore.StoredAvatar(
+            ref: ChekinanaIdolReferenceStore.managedFilename(idolID: idol.id),
+            url: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+        )
+
+        let result = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+            referenceData: referenceData,
+            explicitAvatarData: nil,
+            targetKind: .newManual,
+            targetHasManagedAvatar: false,
+            explicitlyRemovingAvatar: false,
+            encodeReference: { _ in [0.25] },
+            stageAvatar: { data in
+                stagedData = data
+                return stored
+            }
+        )
+
+        XCTAssertEqual(result.encodedReferencePattern, [0.25])
+        XCTAssertEqual(result.stagedAvatar, stored)
+        XCTAssertTrue(result.initializedAvatarFromReference)
+        XCTAssertEqual(stagedData, referenceData)
+    }
+
+    func testExplicitAvatarWinsOverReferenceForNewManualIdol() async throws {
+        let referenceData = Data("reference".utf8)
+        let explicitAvatarData = Data("explicit-avatar".utf8)
+        var stagedData: Data?
+        let idolID = UUID()
+        let stored = ChekinanaIdolReferenceStore.StoredAvatar(
+            ref: ChekinanaIdolReferenceStore.managedFilename(idolID: idolID),
+            url: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+        )
+
+        let result = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+            referenceData: referenceData,
+            explicitAvatarData: explicitAvatarData,
+            targetKind: .newManual,
+            targetHasManagedAvatar: false,
+            explicitlyRemovingAvatar: false,
+            encodeReference: { _ in [0.5] },
+            stageAvatar: { data in
+                stagedData = data
+                return stored
+            }
+        )
+
+        XCTAssertEqual(result.encodedReferencePattern, [0.5])
+        XCTAssertEqual(result.stagedAvatar, stored)
+        XCTAssertFalse(result.initializedAvatarFromReference)
+        XCTAssertEqual(stagedData, explicitAvatarData)
+    }
+
+    func testReusedCatalogueTargetNeverUsesReferenceAsAvatar() async throws {
+        let reused = Idol(sourceId: "directory-id", name: "Directory Idol")
+        let target = ChekinanaCatalogueIdolTarget(idol: reused, shouldInsert: false)
+        let targetKind = ChekinanaIdolReferenceAvatarPolicy.targetKind(for: target)
+        XCTAssertEqual(targetKind, .reusedCatalogue)
+        var stageCount = 0
+
+        let result = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+            referenceData: Data("reference".utf8),
+            explicitAvatarData: nil,
+            targetKind: targetKind,
+            targetHasManagedAvatar: false,
+            explicitlyRemovingAvatar: false,
+            encodeReference: { _ in [0.75] },
+            stageAvatar: { _ in
+                stageCount += 1
+                throw ScannerMockError.failed
+            }
+        )
+
+        XCTAssertEqual(result.encodedReferencePattern, [0.75])
+        XCTAssertNil(result.stagedAvatar)
+        XCTAssertFalse(result.initializedAvatarFromReference)
+        XCTAssertEqual(stageCount, 0)
+    }
+
+    func testExplicitAvatarRemovalPreservesClearAndReferenceSemantics() async throws {
+        var encodeCount = 0
+        var stageCount = 0
+        let result = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+            referenceData: Data("reference".utf8),
+            explicitAvatarData: Data("avatar".utf8),
+            targetKind: .existingManual,
+            targetHasManagedAvatar: true,
+            explicitlyRemovingAvatar: true,
+            encodeReference: { _ in
+                encodeCount += 1
+                return [1]
+            },
+            stageAvatar: { _ in
+                stageCount += 1
+                throw ScannerMockError.failed
+            }
+        )
+
+        XCTAssertNil(result.encodedReferencePattern)
+        XCTAssertNil(result.stagedAvatar)
+        XCTAssertFalse(result.initializedAvatarFromReference)
+        XCTAssertEqual(encodeCount, 0)
+        XCTAssertEqual(stageCount, 0)
+    }
+
+    func testReferenceEncodingFailureStagesNoAvatar() async throws {
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let idolID = UUID()
+        let oldRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
+        let oldURL = directory.appendingPathComponent(oldRef)
+        let oldData = Data("old-avatar".utf8)
+        try oldData.write(to: oldURL)
+        var stageCount = 0
+
+        do {
+            _ = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+                referenceData: Data("bad-reference".utf8),
+                explicitAvatarData: Data("new-avatar".utf8),
+                targetKind: .existingManual,
+                targetHasManagedAvatar: true,
+                explicitlyRemovingAvatar: false,
+                encodeReference: { _ in throw ScannerMockError.failed },
+                stageAvatar: { _ in
+                    stageCount += 1
+                    throw ScannerMockError.failed
+                }
+            )
+            XCTFail("Reference encoding must fail before any avatar is staged.")
+        } catch {
+            XCTAssertEqual(stageCount, 0)
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertEqual(try Data(contentsOf: oldURL), oldData)
+    }
+
+    func testIdolAvatarStagingRollbackCoversEveryPrecommitExit() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suiteName = "ChekinanaIdolAvatarExit.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        for exit in ["throw", "cancel", "early-return", "generation-invalidated"] {
+            let transaction = try ChekinanaIdolAvatarStagingTransaction(
+                in: fixture.context,
+                directory: directory,
+                defaults: defaults
+            )
+            let staged = try await transaction.stage(
+                scannerPNGData(color: .systemPurple),
+                idolID: UUID()
+            )
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: staged.url.path),
+                exit
+            )
+            XCTAssertEqual(
+                ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+                1,
+                exit
+            )
+
+            XCTAssertNil(transaction.rollback(), exit)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: staged.url.path),
+                exit
+            )
+            XCTAssertEqual(
+                ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+                0,
+                exit
+            )
+        }
+    }
+
+    func testIdolAvatarConcurrentStagingLeasesIsolateAAndB() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suiteName = "ChekinanaIdolAvatarConcurrent.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let idolID = UUID()
+        let transactionA = try ChekinanaIdolAvatarStagingTransaction(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults
+        )
+        let transactionB = try ChekinanaIdolAvatarStagingTransaction(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults
+        )
+        let stagedA = try await transactionA.stage(
+            scannerPNGData(color: .systemRed),
+            idolID: idolID
+        )
+        let stagedB = try await transactionB.stage(
+            scannerPNGData(color: .systemBlue),
+            idolID: idolID
+        )
+        XCTAssertNotEqual(stagedA.ref, stagedB.ref)
+
+        XCTAssertEqual(ChekinanaIdolAvatarCleanupQueue.cleanupNow(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults
+        ), 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedA.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedB.url.path))
+
+        XCTAssertNil(transactionA.rollback())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedA.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedB.url.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            1
+        )
+
+        XCTAssertNil(transactionB.rollback())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedB.url.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            0
+        )
+    }
+
+    func testIdolAvatarDatabaseAndCleanupFailureResumeAfterRestart() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suiteName = "ChekinanaIdolAvatarRestart.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let idol = Idol(name: "Before")
+        let oldRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idol.id)
+        let oldURL = directory.appendingPathComponent(oldRef)
+        try Data("old-avatar".utf8).write(to: oldURL)
+        idol.avatarImageRef = oldRef
+        fixture.context.insert(idol)
+        try fixture.context.save()
+        let transaction = try ChekinanaIdolAvatarStagingTransaction(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults
+        )
+        let staged = try await transaction.stage(
+            scannerPNGData(color: .systemGreen),
+            idolID: idol.id
+        )
+
+        XCTAssertThrowsError(try ChekinanaIdolPersistence.save(
+            idol,
+            inserting: false,
+            previousAvatarRef: oldRef,
+            stagedAvatar: staged,
+            in: fixture.context,
+            avatarDirectory: directory,
+            libraryGeneration: transaction.libraryGeneration,
+            cleanupDefaults: defaults,
+            saveContext: { _ in throw ScannerMockError.failed },
+            removeStagedAvatar: { _ in throw ScannerMockError.failed }
+        ) { target in
+            target.name = "After"
+            target.avatarImageRef = staged.ref
+        })
+        let pending = transaction.rollback(removeItem: { _ in
+            throw ScannerMockError.failed
+        })
+        XCTAssertEqual(pending?.imageRef, staged.ref)
+        XCTAssertNotNil(pending?.operationID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.url.path))
+        XCTAssertEqual(idol.name, "Before")
+        XCTAssertEqual(idol.avatarImageRef, oldRef)
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            1
+        )
+
+        let reopenedContext = ModelContext(fixture.context.container)
+        XCTAssertEqual(ChekinanaIdolAvatarCleanupQueue.cleanupNow(
+            in: reopenedContext,
+            directory: directory,
+            defaults: defaults
+        ), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.url.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            0
+        )
+    }
+
+    func testIdolAvatarPostcommitCleanupQueuesOnlyActuallyReplacedOldFile() throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suiteName = "ChekinanaIdolAvatarPostcommit.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let idol = Idol(name: "Avatar owner")
+        let oldRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idol.id)
+        let newRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idol.id)
+        let oldURL = directory.appendingPathComponent(oldRef)
+        let newURL = directory.appendingPathComponent(newRef)
+        try Data("old".utf8).write(to: oldURL)
+        try Data("new".utf8).write(to: newURL)
+        idol.avatarImageRef = oldRef
+        fixture.context.insert(idol)
+        try fixture.context.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(
+            in: fixture.context
+        )
+
+        var unchangedRemovalCount = 0
+        let unchanged = try ChekinanaIdolPersistence.save(
+            idol,
+            inserting: false,
+            previousAvatarRef: oldRef,
+            stagedAvatar: nil,
+            in: fixture.context,
+            avatarDirectory: directory,
+            libraryGeneration: generation,
+            cleanupDefaults: defaults,
+            removeReplacedAvatar: { _, _, _ in
+                unchangedRemovalCount += 1
+                return true
+            }
+        ) { target in
+            target.note = "Reference-only edit"
+            target.avatarImageRef = oldRef
+        }
+        XCTAssertNil(unchanged.pendingAvatarCleanup)
+        XCTAssertEqual(unchangedRemovalCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+
+        let replacement = try ChekinanaIdolPersistence.save(
+            idol,
+            inserting: false,
+            previousAvatarRef: oldRef,
+            stagedAvatar: .init(ref: newRef, url: newURL),
+            in: fixture.context,
+            avatarDirectory: directory,
+            libraryGeneration: generation,
+            cleanupDefaults: defaults,
+            removeReplacedAvatar: { _, _, _ in
+                throw ScannerMockError.failed
+            }
+        ) { target in
+            target.avatarImageRef = newRef
+        }
+        let pending = try XCTUnwrap(replacement.pendingAvatarCleanup)
+        XCTAssertEqual(pending.imageRef, oldRef)
+        XCTAssertNotNil(pending.operationID)
+        XCTAssertEqual(idol.avatarImageRef, newRef)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newURL.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            1
+        )
+
+        XCTAssertEqual(ChekinanaIdolAvatarCleanupQueue.cleanupNow(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults,
+            removeItem: { _ in throw ScannerMockError.failed }
+        ), 1)
+        let reopenedContext = ModelContext(fixture.context.container)
+        XCTAssertEqual(ChekinanaIdolAvatarCleanupQueue.cleanupNow(
+            in: reopenedContext,
+            directory: directory,
+            defaults: defaults
+        ), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newURL.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            0
+        )
+    }
+
+    func testIdolAvatarRestartProtectsLaterReferenceAcrossGenerationChange() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suiteName = "ChekinanaIdolAvatarReuse.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let idolID = UUID()
+        let transaction = try ChekinanaIdolAvatarStagingTransaction(
+            in: fixture.context,
+            directory: directory,
+            defaults: defaults
+        )
+        let staged = try await transaction.stage(
+            scannerPNGData(color: .systemOrange),
+            idolID: idolID
+        )
+        XCTAssertNotNil(transaction.rollback(removeItem: { _ in
+            throw ScannerMockError.failed
+        }))
+
+        let laterOwner = Idol(
+            id: idolID,
+            name: "Later owner",
+            avatarImageRef: staged.ref
+        )
+        fixture.context.insert(laterOwner)
+        let nextGeneration = UUID()
+        try ChekinanaLibraryGenerationStore.publish(
+            nextGeneration,
+            in: fixture.context
+        )
+        try fixture.context.save()
+
+        let reopenedContext = ModelContext(fixture.context.container)
+        XCTAssertEqual(ChekinanaIdolAvatarCleanupQueue.cleanupNow(
+            in: reopenedContext,
+            directory: directory,
+            defaults: defaults
+        ), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.url.path))
+        XCTAssertEqual(
+            ChekinanaIdolAvatarCleanupQueue.pendingCount(defaults: defaults),
+            0
+        )
+        XCTAssertEqual(
+            try ChekinanaLibraryGenerationStore.current(in: reopenedContext),
+            nextGeneration
+        )
+    }
+
+    func testLocalAvatarSlowCloudPlaceholderDisablesSaveUntilPrepared() {
+        var state = ChekinanaLocalAvatarPreparationState()
+        let slowCloudSelection = UUID()
+        let owner = state.begin(selectionID: slowCloudSelection)
+
+        XCTAssertTrue(state.isPreparing)
+        XCTAssertFalse(state.allowsSave(preparedOwner: nil))
+        XCTAssertFalse(state.allowsSave(preparedOwner: owner))
+
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: owner))
+        XCTAssertFalse(state.isPreparing)
+        XCTAssertFalse(state.allowsSave(preparedOwner: nil))
+        XCTAssertTrue(state.allowsSave(preparedOwner: owner))
+    }
+
+    func testLocalAvatarLateACompletionCannotReplaceOrUnlockB() {
+        var state = ChekinanaLocalAvatarPreparationState()
+        let ownerA = state.begin(selectionID: UUID())
+        let ownerB = state.begin(selectionID: UUID())
+
+        XCTAssertFalse(state.completeSuccess(ifOwnedBy: ownerA))
+        XCTAssertFalse(state.invalidate(ifOwnedBy: ownerA, reason: .selectionReplaced))
+        XCTAssertTrue(state.isPreparing)
+        XCTAssertTrue(state.owns(ownerB))
+        XCTAssertFalse(state.allowsSave(preparedOwner: ownerA))
+
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: ownerB))
+        XCTAssertTrue(state.allowsSave(preparedOwner: ownerB))
+        XCTAssertFalse(state.allowsSave(preparedOwner: ownerA))
+    }
+
+    func testLocalAvatarLoadFailureCannotAuthorizePreviousPreparedAvatar() {
+        var state = ChekinanaLocalAvatarPreparationState()
+        let previousOwner = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: previousOwner))
+        XCTAssertTrue(state.allowsSave(preparedOwner: previousOwner))
+
+        let failedOwner = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeFailure(
+            ifOwnedBy: failedOwner,
+            message: "Fake iCloud load failed"
+        ))
+
+        XCTAssertEqual(state.failureMessage, "Fake iCloud load failed")
+        XCTAssertFalse(state.allowsSave(preparedOwner: previousOwner))
+        XCTAssertFalse(state.allowsSave(preparedOwner: failedOwner))
+        XCTAssertFalse(state.allowsSave(preparedOwner: nil))
+    }
+
+    func testLocalAvatarClearCancelReselectAndExitInvalidatePriorOwner() {
+        for reason in [
+            ChekinanaLocalAvatarInvalidationReason.pickerBecameNil,
+            .avatarRemoved,
+            .userCancelledSelection,
+            .editorExited,
+        ] {
+            var state = ChekinanaLocalAvatarPreparationState()
+            let owner = state.begin(selectionID: UUID())
+            let revision = state.selectionRevision
+
+            XCTAssertTrue(state.invalidate(ifOwnedBy: owner, reason: reason))
+            XCTAssertEqual(state.selectionRevision, revision + 1)
+            XCTAssertEqual(state.lastInvalidationReason, reason)
+            XCTAssertNil(state.owner)
+            XCTAssertFalse(state.isPreparing)
+            XCTAssertFalse(state.completeSuccess(ifOwnedBy: owner))
+            XCTAssertTrue(state.allowsSave(preparedOwner: nil))
+        }
+
+        var reselected = ChekinanaLocalAvatarPreparationState()
+        let sameFakePhoto = UUID()
+        let firstOwner = reselected.begin(selectionID: sameFakePhoto)
+        let secondOwner = reselected.begin(selectionID: sameFakePhoto)
+        XCTAssertNotEqual(firstOwner.selectionRevision, secondOwner.selectionRevision)
+        XCTAssertFalse(reselected.completeSuccess(ifOwnedBy: firstOwner))
+        XCTAssertTrue(reselected.isPreparing)
+        XCTAssertTrue(reselected.owns(secondOwner))
+    }
+
+    func testLocalAvatarNormalSaveUsesLastPreparedSelection() {
+        struct FakePreparedAvatar {
+            let owner: ChekinanaLocalAvatarPreparationOwner
+            let data: Data
+        }
+
+        var state = ChekinanaLocalAvatarPreparationState()
+        let ownerA = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: ownerA))
+        let preparedA = FakePreparedAvatar(owner: ownerA, data: Data("A".utf8))
+
+        let ownerB = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: ownerB))
+        let preparedB = FakePreparedAvatar(owner: ownerB, data: Data("B".utf8))
+        let candidates = [preparedA, preparedB]
+        let saved = candidates.last {
+            state.allowsSave(preparedOwner: $0.owner)
+        }
+
+        XCTAssertEqual(saved?.data, Data("B".utf8))
+        XCTAssertFalse(state.allowsSave(preparedOwner: preparedA.owner))
+        XCTAssertTrue(state.allowsSave(preparedOwner: preparedB.owner))
     }
 
     func testCatalogueAvatarInvalidationRejectsStaleCompletionForEveryUserPath() {
@@ -9917,6 +18346,22 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             removesAvatar: false,
             hasLocalItem: false
         ))
+
+        let owner = ChekinanaCataloguePreparationOwner(
+            generation: 8,
+            candidateIdentity: "candidate"
+        )
+        for path in ["local-selection", "manual-switch", "explicit-removal"] {
+            var state = ChekinanaCataloguePreparationState()
+            state.begin(owner)
+            XCTAssertTrue(state.release(
+                ifOwnedBy: owner,
+                currentGeneration: owner.generation,
+                currentCandidateIdentity: owner.candidateIdentity
+            ), path)
+            XCTAssertFalse(state.isPreparing, path)
+            XCTAssertFalse(state.hasTask, path)
+        }
     }
 
     func testCatalogueAvatarPreviewRejectsFailedReplacementAndOutOfOrderCandidate() {
@@ -9928,11 +18373,122 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(ChekinanaIdolAvatarSelectionPolicy.acceptsCataloguePreview(generation: 2, currentGeneration: 2, candidateMatches: true, removesAvatar: false, hasLocalItem: true))
     }
 
+    func testCataloguePreparationRejectedPreviewKeepsPatternsAndAvatarIntentThenFinishes() {
+        for scenario in ["local-avatar", "explicitly-removed"] {
+            let owner = ChekinanaCataloguePreparationOwner(
+                generation: 4,
+                candidateIdentity: "catalogue-id|avatar-url"
+            )
+            var state = ChekinanaCataloguePreparationState()
+            state.begin(owner)
+            let patterns = [[Float](repeating: 0.25, count: 4)]
+            let localAvatar: String? = scenario == "local-avatar" ? "local-avatar" : nil
+            let removesAvatar = scenario == "explicitly-removed"
+
+            XCTAssertFalse(ChekinanaIdolAvatarSelectionPolicy.acceptsCataloguePreview(
+                generation: owner.generation,
+                currentGeneration: owner.generation,
+                candidateMatches: true,
+                removesAvatar: removesAvatar,
+                hasLocalItem: localAvatar != nil
+            ))
+            XCTAssertTrue(state.release(
+                ifOwnedBy: owner,
+                currentGeneration: owner.generation,
+                currentCandidateIdentity: owner.candidateIdentity
+            ))
+            XCTAssertEqual(patterns, [[Float](repeating: 0.25, count: 4)])
+            XCTAssertEqual(localAvatar, scenario == "local-avatar" ? "local-avatar" : nil)
+            XCTAssertEqual(removesAvatar, scenario == "explicitly-removed")
+            XCTAssertFalse(state.isPreparing)
+            XCTAssertFalse(state.hasTask)
+            XCTAssertNil(state.owner)
+        }
+    }
+
+    func testCataloguePreparationFailuresAndCancellationReleaseCurrentOwner() {
+        for outcome in ["avatar-decode-failure", "pattern-failure", "cancelled"] {
+            let owner = ChekinanaCataloguePreparationOwner(
+                generation: 7,
+                candidateIdentity: "candidate-\(outcome)"
+            )
+            var state = ChekinanaCataloguePreparationState()
+            state.begin(owner)
+
+            XCTAssertTrue(state.release(
+                ifOwnedBy: owner,
+                currentGeneration: owner.generation,
+                currentCandidateIdentity: owner.candidateIdentity
+            ), outcome)
+            XCTAssertFalse(state.isPreparing, outcome)
+            XCTAssertFalse(state.hasTask, outcome)
+            XCTAssertNil(state.owner, outcome)
+        }
+    }
+
+    func testCataloguePreparationLateARejectedWithoutUnlockingOrOverwritingB() {
+        let ownerA = ChekinanaCataloguePreparationOwner(
+            generation: 10,
+            candidateIdentity: "candidate-a"
+        )
+        let ownerB = ChekinanaCataloguePreparationOwner(
+            generation: 11,
+            candidateIdentity: "candidate-b"
+        )
+        var state = ChekinanaCataloguePreparationState()
+        state.begin(ownerA)
+        state.begin(ownerB)
+        var publishedMetadata = "B"
+        var publishedError = "B error"
+
+        XCTAssertFalse(state.owns(
+            ownerA,
+            currentGeneration: ownerB.generation,
+            currentCandidateIdentity: ownerB.candidateIdentity
+        ))
+        XCTAssertFalse(state.release(
+            ifOwnedBy: ownerA,
+            currentGeneration: ownerB.generation,
+            currentCandidateIdentity: ownerB.candidateIdentity
+        ))
+        if state.owns(
+            ownerA,
+            currentGeneration: ownerB.generation,
+            currentCandidateIdentity: ownerB.candidateIdentity
+        ) {
+            publishedMetadata = "A late"
+            publishedError = "A late error"
+        }
+        XCTAssertEqual(publishedMetadata, "B")
+        XCTAssertEqual(publishedError, "B error")
+        XCTAssertTrue(state.isPreparing)
+        XCTAssertTrue(state.hasTask)
+        XCTAssertEqual(state.owner, ownerB)
+
+        if state.owns(
+            ownerB,
+            currentGeneration: ownerB.generation,
+            currentCandidateIdentity: ownerB.candidateIdentity
+        ) {
+            publishedMetadata = "B complete"
+            publishedError = ""
+        }
+        XCTAssertTrue(state.release(
+            ifOwnedBy: ownerB,
+            currentGeneration: ownerB.generation,
+            currentCandidateIdentity: ownerB.candidateIdentity
+        ))
+        XCTAssertEqual(publishedMetadata, "B complete")
+        XCTAssertEqual(publishedError, "")
+        XCTAssertFalse(state.isPreparing)
+        XCTAssertFalse(state.hasTask)
+    }
+
     func testPatternMigrationClearsLegacyVectorsOnlyOnceAndMarksCataloguePending() throws {
         let suiteName = "ChekinanaPatternMigrationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let schema = Schema(versionedSchema: ChekinanaSchemaV5.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -9988,7 +18544,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testPatternStateDistinguishesDeletedCataloguePrototypeFromCustomVector() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV5.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -10016,6 +18572,277 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(split.cataloguePatternIDs, ["Mina_XII_P2"])
         XCTAssertEqual(split.cataloguePatterns, [second])
         XCTAssertEqual(split.customPatterns, [custom])
+    }
+
+    func testPendingPatternRefreshPreservesCustomVectorsAndPriorCloudSelection() async throws {
+        let cloudOne = ChekinanaPatternDebugFixture.unitVector(41)
+        let cloudTwo = ChekinanaPatternDebugFixture.unitVector(42)
+        let custom = ChekinanaPatternDebugFixture.unitVector(43)
+        let snapshot = ChekinanaPatternResourceSnapshot(
+            prototypesByID: ["cloud-1": cloudOne, "cloud-2": cloudTwo],
+            idolPatternIDs: ["idol_mina": ["cloud-1", "cloud-2"]]
+        )
+
+        let normal = try makePendingPatternRefreshFixture(patterns: [custom])
+        try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+            in: ModelContext(normal.container),
+            loadSnapshot: { snapshot }
+        )
+        var persisted = try patternRefreshValues(
+            idolID: normal.idolID,
+            container: normal.container
+        )
+        XCTAssertEqual(persisted.state.encoderVersion, ChekinanaPatternContract.encoderVersion)
+        XCTAssertEqual(persisted.state.cataloguePatternIDs, ["cloud-1", "cloud-2"])
+        XCTAssertEqual(persisted.idol.patterns, [cloudOne, cloudTwo, custom])
+
+        let previousCloudTwo = ChekinanaPatternDebugFixture.unitVector(44)
+        let selected = try makePendingPatternRefreshFixture(
+            cataloguePatternIDs: ["cloud-2"],
+            patterns: [previousCloudTwo, custom]
+        )
+        try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+            in: ModelContext(selected.container),
+            loadSnapshot: { snapshot }
+        )
+        persisted = try patternRefreshValues(
+            idolID: selected.idolID,
+            container: selected.container
+        )
+        XCTAssertEqual(persisted.state.cataloguePatternIDs, ["cloud-2"])
+        XCTAssertEqual(persisted.idol.patterns, [cloudTwo, custom])
+    }
+
+    func testDelayedPatternRefreshRejectsConcurrentCustomSaveAndExplicitRemoveAll() async throws {
+        let cloud = ChekinanaPatternDebugFixture.unitVector(51)
+        let snapshot = ChekinanaPatternResourceSnapshot(
+            prototypesByID: ["cloud": cloud],
+            idolPatternIDs: ["idol_mina": ["cloud"]]
+        )
+
+        let customFixture = try makePendingPatternRefreshFixture()
+        let customGate = ChekinanaPatternSnapshotGate(snapshot: snapshot)
+        let customTask = Task { @MainActor in
+            try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+                in: ModelContext(customFixture.container),
+                loadSnapshot: { await customGate.load() }
+            )
+        }
+        await customGate.waitUntilStarted()
+        let userCustom = ChekinanaPatternDebugFixture.unitVector(52)
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let context = ModelContext(customFixture.container)
+            let values = try patternRefreshValues(
+                idolID: customFixture.idolID,
+                context: context
+            )
+            _ = try ChekinanaIdolPatternPersistence.replaceCataloguePatterns(
+                for: values.idol,
+                patternIDs: [],
+                prototypes: [],
+                customPatterns: [userCustom],
+                in: context
+            )
+            values.idol.updatedAt = values.idol.updatedAt.addingTimeInterval(1)
+            try context.save()
+        }
+        await customGate.release()
+        try await customTask.value
+        var persisted = try patternRefreshValues(
+            idolID: customFixture.idolID,
+            container: customFixture.container
+        )
+        XCTAssertEqual(persisted.idol.patterns, [userCustom])
+        XCTAssertTrue(persisted.state.cataloguePatternIDs.isEmpty)
+        XCTAssertEqual(persisted.state.encoderVersion, ChekinanaPatternContract.encoderVersion)
+
+        let removalFixture = try makePendingPatternRefreshFixture(patterns: [userCustom])
+        let removalGate = ChekinanaPatternSnapshotGate(snapshot: snapshot)
+        let removalTask = Task { @MainActor in
+            try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+                in: ModelContext(removalFixture.container),
+                loadSnapshot: { await removalGate.load() }
+            )
+        }
+        await removalGate.waitUntilStarted()
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let context = ModelContext(removalFixture.container)
+            let values = try patternRefreshValues(
+                idolID: removalFixture.idolID,
+                context: context
+            )
+            _ = try ChekinanaIdolPatternPersistence.replaceCataloguePatterns(
+                for: values.idol,
+                patternIDs: [],
+                prototypes: [],
+                customPatterns: [],
+                in: context
+            )
+            values.idol.updatedAt = values.idol.updatedAt.addingTimeInterval(1)
+            try context.save()
+        }
+        await removalGate.release()
+        try await removalTask.value
+        persisted = try patternRefreshValues(
+            idolID: removalFixture.idolID,
+            container: removalFixture.container
+        )
+        XCTAssertTrue(persisted.idol.patterns.isEmpty)
+        XCTAssertTrue(persisted.state.cataloguePatternIDs.isEmpty)
+        XCTAssertEqual(persisted.state.encoderVersion, ChekinanaPatternContract.encoderVersion)
+    }
+
+    func testDelayedPatternRefreshRejectsSourceChangeDeleteRecreateAndLibraryReplace() async throws {
+        let cloud = ChekinanaPatternDebugFixture.unitVector(61)
+        let snapshot = ChekinanaPatternResourceSnapshot(
+            prototypesByID: ["cloud": cloud],
+            idolPatternIDs: [
+                "idol_mina": ["cloud"],
+                "idol_other": ["cloud"],
+            ]
+        )
+
+        let sourceFixture = try makePendingPatternRefreshFixture()
+        let sourceGate = ChekinanaPatternSnapshotGate(snapshot: snapshot)
+        let sourceTask = Task { @MainActor in
+            try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+                in: ModelContext(sourceFixture.container),
+                loadSnapshot: { await sourceGate.load() }
+            )
+        }
+        await sourceGate.waitUntilStarted()
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let context = ModelContext(sourceFixture.container)
+            let values = try patternRefreshValues(
+                idolID: sourceFixture.idolID,
+                context: context
+            )
+            values.idol.sourceId = "idol_other"
+            values.idol.updatedAt = values.idol.updatedAt.addingTimeInterval(1)
+            try context.save()
+        }
+        await sourceGate.release()
+        try await sourceTask.value
+        var persisted = try patternRefreshValues(
+            idolID: sourceFixture.idolID,
+            container: sourceFixture.container
+        )
+        XCTAssertEqual(persisted.idol.sourceId, "idol_other")
+        XCTAssertEqual(
+            persisted.state.encoderVersion,
+            ChekinanaIdolPatternPersistence.pendingVersion
+        )
+        XCTAssertTrue(persisted.idol.patterns.isEmpty)
+
+        let recreateFixture = try makePendingPatternRefreshFixture()
+        let recreateGate = ChekinanaPatternSnapshotGate(snapshot: snapshot)
+        let recreateTask = Task { @MainActor in
+            try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+                in: ModelContext(recreateFixture.container),
+                loadSnapshot: { await recreateGate.load() }
+            )
+        }
+        await recreateGate.waitUntilStarted()
+        let recreatedCustom = ChekinanaPatternDebugFixture.unitVector(62)
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let context = ModelContext(recreateFixture.container)
+            let values = try patternRefreshValues(
+                idolID: recreateFixture.idolID,
+                context: context
+            )
+            context.delete(values.state)
+            context.delete(values.idol)
+            try context.save()
+            context.insert(Idol(
+                id: recreateFixture.idolID,
+                sourceId: "idol_mina",
+                name: "Recreated",
+                patterns: [recreatedCustom]
+            ))
+            context.insert(IdolPatternState(
+                idolID: recreateFixture.idolID,
+                encoderVersion: ChekinanaIdolPatternPersistence.pendingVersion
+            ))
+            try context.save()
+        }
+        await recreateGate.release()
+        try await recreateTask.value
+        persisted = try patternRefreshValues(
+            idolID: recreateFixture.idolID,
+            container: recreateFixture.container
+        )
+        XCTAssertEqual(persisted.idol.name, "Recreated")
+        XCTAssertEqual(persisted.idol.patterns, [recreatedCustom])
+        XCTAssertEqual(
+            persisted.state.encoderVersion,
+            ChekinanaIdolPatternPersistence.pendingVersion
+        )
+
+        let libraryFixture = try makePendingPatternRefreshFixture()
+        let libraryGate = ChekinanaPatternSnapshotGate(snapshot: snapshot)
+        let libraryTask = Task { @MainActor in
+            try await ChekinanaIdolPatternPersistence.refreshPendingCataloguePatterns(
+                in: ModelContext(libraryFixture.container),
+                loadSnapshot: { await libraryGate.load() }
+            )
+        }
+        await libraryGate.waitUntilStarted()
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            let context = ModelContext(libraryFixture.container)
+            try ChekinanaLibraryGenerationStore.publish(UUID(), in: context)
+            try context.save()
+        }
+        await libraryGate.release()
+        try await libraryTask.value
+        persisted = try patternRefreshValues(
+            idolID: libraryFixture.idolID,
+            container: libraryFixture.container
+        )
+        XCTAssertEqual(
+            persisted.state.encoderVersion,
+            ChekinanaIdolPatternPersistence.pendingVersion
+        )
+        XCTAssertTrue(persisted.idol.patterns.isEmpty)
+    }
+
+    private func makePendingPatternRefreshFixture(
+        cataloguePatternIDs: [String] = [],
+        patterns: [[Float]] = []
+    ) throws -> (container: ModelContainer, idolID: UUID) {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let context = ModelContext(container)
+        let idol = Idol(sourceId: "idol_mina", name: "Mina", patterns: patterns)
+        context.insert(idol)
+        context.insert(IdolPatternState(
+            idolID: idol.id,
+            encoderVersion: ChekinanaIdolPatternPersistence.pendingVersion,
+            cataloguePatternIDs: cataloguePatternIDs,
+            cataloguePatternCount: cataloguePatternIDs.count
+        ))
+        try context.save()
+        return (container, idol.id)
+    }
+
+    private func patternRefreshValues(
+        idolID: UUID,
+        container: ModelContainer
+    ) throws -> (idol: Idol, state: IdolPatternState) {
+        try patternRefreshValues(idolID: idolID, context: ModelContext(container))
+    }
+
+    private func patternRefreshValues(
+        idolID: UUID,
+        context: ModelContext
+    ) throws -> (idol: Idol, state: IdolPatternState) {
+        let idols = try context.fetch(FetchDescriptor<Idol>())
+            .filter { $0.id == idolID }
+        let states = try context.fetch(FetchDescriptor<IdolPatternState>())
+            .filter { $0.idolID == idolID }
+        return (try XCTUnwrap(idols.first), try XCTUnwrap(states.first))
     }
 
     func testCataloguePatternSelectionTracksResolvedPatternIDsAndVectors() {
@@ -10093,6 +18920,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "encoderCheckpointSHA256": ChekinanaPatternContract.encoderCheckpointSHA256,
             "prototypesUrl": endpoints.prototypesURL.absoluteString,
             "idolPatternMapUrl": "https://idol.chekinana.top/assets/pattern-recognition/v1/idol-pattern-map.json",
+            "prototypeBank": ["sha256": String(repeating: "0", count: 64)],
+            "idolPatternMap": ["sha256": String(repeating: "0", count: 64)],
         ])
         ChekinanaPatternResourceMockURLProtocol.handler = { _ in manifest }
         defer { ChekinanaPatternResourceMockURLProtocol.handler = nil }
@@ -10137,14 +18966,6 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let prototypes = (0..<ChekinanaPatternContract.patternCount).map {
             ChekinanaPatternDebugFixture.unitVector($0)
         }
-        let manifest = try JSONSerialization.data(withJSONObject: [
-            "version": ChekinanaPatternContract.encoderVersion,
-            "embeddingDimension": ChekinanaPatternContract.embeddingDimension,
-            "patternCount": ChekinanaPatternContract.patternCount,
-            "encoderCheckpointSHA256": ChekinanaPatternContract.encoderCheckpointSHA256,
-            "prototypesUrl": endpoints.prototypesURL.absoluteString,
-            "idolPatternMapUrl": endpoints.idolPatternMapURL.absoluteString,
-        ])
         let bank = try JSONSerialization.data(withJSONObject: [
             "format": ChekinanaPatternContract.prototypeFormat,
             "encoder_checkpoint_sha256": ChekinanaPatternContract.encoderCheckpointSHA256,
@@ -10157,6 +18978,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "version": ChekinanaPatternContract.encoderVersion,
             "idolPatternIDs": ["idol_mina": [patternIDs[0], patternIDs[1]]],
         ])
+        let manifest = try patternResourceManifest(
+            endpoints: endpoints,
+            prototypesSHA256: ChekinanaPatternResourceIntegrity.sha256Hex(bank).uppercased(),
+            mappingSHA256: ChekinanaPatternResourceIntegrity.sha256Hex(mapping).uppercased()
+        )
         let responses = [
             endpoints.manifestURL: manifest,
             endpoints.prototypesURL: bank,
@@ -10195,8 +19021,313 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(cached.idolPatternIDs["idol_mina"], [patternIDs[0], patternIDs[1]])
     }
 
+    func testRemotePatternResourcesRejectMissingAndBadHashesOnNetworkAndOffline() async throws {
+        let root = try XCTUnwrap(URL(string: "https://pattern-hash.test/v1/"))
+        let endpoints = ChekinanaPatternResourceEndpoints(
+            manifestURL: root.appendingPathComponent("manifest.json"),
+            prototypesURL: root.appendingPathComponent("prototypes.json"),
+            idolPatternMapURL: root.appendingPathComponent("idol-pattern-map.json")
+        )
+        let payload = try patternResourcePayloads(endpoints: endpoints)
+        let bankHash = ChekinanaPatternResourceIntegrity.sha256Hex(payload.bank)
+        let mapHash = ChekinanaPatternResourceIntegrity.sha256Hex(payload.mapping)
+        let cases: [(name: String, manifest: Data, error: ChekinanaPatternResourceError)] = [
+            (
+                "missing-bank",
+                try patternResourceManifest(
+                    endpoints: endpoints,
+                    prototypesSHA256: bankHash,
+                    mappingSHA256: mapHash,
+                    includesPrototypeDigest: false
+                ),
+                .invalidManifest
+            ),
+            (
+                "bad-bank",
+                try patternResourceManifest(
+                    endpoints: endpoints,
+                    prototypesSHA256: String(repeating: "0", count: 64),
+                    mappingSHA256: mapHash
+                ),
+                .invalidPrototypeBank
+            ),
+            (
+                "malformed-bank",
+                try patternResourceManifest(
+                    endpoints: endpoints,
+                    prototypesSHA256: "not-a-sha256",
+                    mappingSHA256: mapHash
+                ),
+                .invalidManifest
+            ),
+            (
+                "missing-map",
+                try patternResourceManifest(
+                    endpoints: endpoints,
+                    prototypesSHA256: bankHash,
+                    mappingSHA256: mapHash,
+                    includesMappingDigest: false
+                ),
+                .invalidManifest
+            ),
+            (
+                "bad-map",
+                try patternResourceManifest(
+                    endpoints: endpoints,
+                    prototypesSHA256: bankHash,
+                    mappingSHA256: String(repeating: "f", count: 64)
+                ),
+                .invalidIdolPatternMap
+            ),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaPatternResourceMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { ChekinanaPatternResourceMockURLProtocol.handler = nil }
+
+        for testCase in cases {
+            for offline in [false, true] {
+                let cache = FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "chekinana-pattern-hash-\(testCase.name)-\(offline)-\(UUID().uuidString)",
+                    isDirectory: true
+                )
+                defer { try? FileManager.default.removeItem(at: cache) }
+                if offline {
+                    try writePatternResourceCache(
+                        manifest: testCase.manifest,
+                        bank: payload.bank,
+                        mapping: payload.mapping,
+                        directory: cache
+                    )
+                    ChekinanaPatternResourceMockURLProtocol.handler = { _ in
+                        throw URLError(.notConnectedToInternet)
+                    }
+                } else {
+                    let responses = [
+                        endpoints.manifestURL: testCase.manifest,
+                        endpoints.prototypesURL: payload.bank,
+                        endpoints.idolPatternMapURL: payload.mapping,
+                    ]
+                    ChekinanaPatternResourceMockURLProtocol.handler = { request in
+                        guard let url = request.url, let data = responses[url] else {
+                            throw URLError(.badURL)
+                        }
+                        return data
+                    }
+                }
+                let resources = ChekinanaRemotePatternResources(
+                    endpoints: endpoints,
+                    session: session,
+                    cacheDirectory: cache
+                )
+                do {
+                    _ = try await resources.snapshot()
+                    XCTFail("\(testCase.name) must fail (offline=\(offline)).")
+                } catch {
+                    XCTAssertEqual(
+                        error as? ChekinanaPatternResourceError,
+                        testCase.error,
+                        "\(testCase.name), offline=\(offline)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testRemotePatternResourcesKeepLastGoodForFailedDownloadAndPublicationAndRejectCorruptCache() async throws {
+        let root = try XCTUnwrap(URL(string: "https://pattern-publication.test/v1/"))
+        let endpoints = ChekinanaPatternResourceEndpoints(
+            manifestURL: root.appendingPathComponent("manifest.json"),
+            prototypesURL: root.appendingPathComponent("prototypes.json"),
+            idolPatternMapURL: root.appendingPathComponent("idol-pattern-map.json")
+        )
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-pattern-publication-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer {
+            ChekinanaPatternResourceMockURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: cache)
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaPatternResourceMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let original = try patternResourcePayloads(endpoints: endpoints)
+        var responses = [
+            endpoints.manifestURL: original.manifest,
+            endpoints.prototypesURL: original.bank,
+            endpoints.idolPatternMapURL: original.mapping,
+        ]
+        ChekinanaPatternResourceMockURLProtocol.handler = { request in
+            guard let url = request.url, let data = responses[url] else {
+                throw URLError(.badURL)
+            }
+            return data
+        }
+        let seeded = ChekinanaRemotePatternResources(
+            endpoints: endpoints,
+            session: session,
+            cacheDirectory: cache
+        )
+        _ = try await seeded.snapshot()
+        let cacheURL = cache.appendingPathComponent("validated-resources.json")
+        let originalCacheBytes = try Data(contentsOf: cacheURL)
+
+        let replacement = try patternResourcePayloads(
+            endpoints: endpoints,
+            prototypeOffset: 37
+        )
+        responses = [
+            endpoints.manifestURL: replacement.manifest,
+            endpoints.prototypesURL: replacement.bank,
+        ]
+        let downloadFailure = ChekinanaRemotePatternResources(
+            endpoints: endpoints,
+            session: session,
+            cacheDirectory: cache
+        )
+        let afterDownloadFailure = try await downloadFailure.snapshot()
+        XCTAssertEqual(
+            try afterDownloadFailure.patterns(for: [original.patternIDs[0]]),
+            [original.prototypes[0]]
+        )
+        XCTAssertEqual(try Data(contentsOf: cacheURL), originalCacheBytes)
+
+        responses = [
+            endpoints.manifestURL: replacement.manifest,
+            endpoints.prototypesURL: replacement.bank,
+            endpoints.idolPatternMapURL: replacement.mapping,
+        ]
+        let publicationFailure = ChekinanaRemotePatternResources(
+            endpoints: endpoints,
+            session: session,
+            cacheDirectory: cache,
+            cacheWriter: { _, _ in throw URLError(.cannotWriteToFile) }
+        )
+        let afterPublicationFailure = try await publicationFailure.snapshot()
+        XCTAssertEqual(
+            try afterPublicationFailure.patterns(for: [original.patternIDs[0]]),
+            [original.prototypes[0]]
+        )
+        XCTAssertEqual(try Data(contentsOf: cacheURL), originalCacheBytes)
+
+        try writePatternResourceCache(
+            manifest: original.manifest,
+            bank: replacement.bank,
+            mapping: original.mapping,
+            directory: cache
+        )
+        let corruptCacheBytes = try Data(contentsOf: cacheURL)
+        ChekinanaPatternResourceMockURLProtocol.handler = { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        let corruptOffline = ChekinanaRemotePatternResources(
+            endpoints: endpoints,
+            session: session,
+            cacheDirectory: cache
+        )
+        do {
+            _ = try await corruptOffline.snapshot()
+            XCTFail("A structurally valid bank with the wrong raw-byte hash is not last-good.")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaPatternResourceError,
+                .invalidPrototypeBank
+            )
+        }
+        XCTAssertEqual(try Data(contentsOf: cacheURL), corruptCacheBytes)
+    }
+
+    private func patternResourcePayloads(
+        endpoints: ChekinanaPatternResourceEndpoints,
+        prototypeOffset: Int = 0
+    ) throws -> (
+        manifest: Data,
+        bank: Data,
+        mapping: Data,
+        patternIDs: [String],
+        prototypes: [[Float]]
+    ) {
+        let patternIDs = (0..<ChekinanaPatternContract.patternCount).map {
+            "pattern_\($0)"
+        }
+        let prototypes = (0..<ChekinanaPatternContract.patternCount).map {
+            ChekinanaPatternDebugFixture.unitVector(
+                ($0 + prototypeOffset) % ChekinanaPatternContract.embeddingDimension
+            )
+        }
+        let bank = try JSONSerialization.data(withJSONObject: [
+            "format": ChekinanaPatternContract.prototypeFormat,
+            "encoder_checkpoint_sha256": ChekinanaPatternContract.encoderCheckpointSHA256,
+            "embedding_dim": ChekinanaPatternContract.embeddingDimension,
+            "pattern_ids": patternIDs,
+            "prototypes": prototypes,
+        ])
+        let mapping = try JSONSerialization.data(withJSONObject: [
+            "format": ChekinanaPatternContract.mappingFormat,
+            "version": ChekinanaPatternContract.encoderVersion,
+            "idolPatternIDs": ["idol_mina": [patternIDs[0], patternIDs[1]]],
+        ])
+        return (
+            try patternResourceManifest(
+                endpoints: endpoints,
+                prototypesSHA256: ChekinanaPatternResourceIntegrity.sha256Hex(bank),
+                mappingSHA256: ChekinanaPatternResourceIntegrity.sha256Hex(mapping)
+            ),
+            bank,
+            mapping,
+            patternIDs,
+            prototypes
+        )
+    }
+
+    private func patternResourceManifest(
+        endpoints: ChekinanaPatternResourceEndpoints,
+        prototypesSHA256: String,
+        mappingSHA256: String,
+        includesPrototypeDigest: Bool = true,
+        includesMappingDigest: Bool = true
+    ) throws -> Data {
+        var object: [String: Any] = [
+            "version": ChekinanaPatternContract.encoderVersion,
+            "embeddingDimension": ChekinanaPatternContract.embeddingDimension,
+            "patternCount": ChekinanaPatternContract.patternCount,
+            "encoderCheckpointSHA256": ChekinanaPatternContract.encoderCheckpointSHA256,
+            "prototypesUrl": endpoints.prototypesURL.absoluteString,
+            "idolPatternMapUrl": endpoints.idolPatternMapURL.absoluteString,
+        ]
+        if includesPrototypeDigest {
+            object["prototypeBank"] = ["sha256": prototypesSHA256]
+        }
+        if includesMappingDigest {
+            object["idolPatternMap"] = ["sha256": mappingSHA256]
+        }
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+
+    private func writePatternResourceCache(
+        manifest: Data,
+        bank: Data,
+        mapping: Data,
+        directory: URL
+    ) throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let envelope = try JSONSerialization.data(withJSONObject: [
+            "manifest": manifest.base64EncodedString(),
+            "prototypes": bank.base64EncodedString(),
+            "idolPatternMap": mapping.base64EncodedString(),
+        ])
+        try envelope.write(
+            to: directory.appendingPathComponent("validated-resources.json"),
+            options: .atomic
+        )
+    }
+
     func testCatalogueSameSourceUpsertPreservesFavoriteChekiAndCustomPattern() throws {
-        let schema = Schema([Idol.self, Event.self, Cheki.self])
+        let schema = Schema([Idol.self, Event.self, MediaItem.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -10211,7 +19342,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             note: "Keep note",
             patterns: [custom]
         )
-        let cheki = Cheki(idols: [existing])
+        let cheki = MediaItem(idols: [existing], imageRef: "catalogue-existing.jpg")
         context.insert(existing)
         context.insert(cheki)
         try context.save()
@@ -10246,7 +19377,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(existing.group, "Catalogue group")
         XCTAssertTrue(existing.isFavorite)
         XCTAssertEqual(existing.note, "Keep note")
-        XCTAssertEqual(existing.chekis.map(\.id), [cheki.id])
+        XCTAssertEqual(cheki.idolIDs, [existing.id])
         XCTAssertTrue(existing.patterns.contains(custom))
         XCTAssertEqual(existing.patterns.filter {
             $0 == catalogue
@@ -10254,7 +19385,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testManualIdolNameOnlyPersistsTrimmedNameAndNilOptionalFields() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV4.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -10318,7 +19449,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testManualIdolBlankOrWhitespaceNameIsRejectedBeforeInsert() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV4.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -10440,6 +19571,778 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
+    func testChekiAndChekiRecordEditPrimaryEventCandidatesContainExactDateOnly() throws {
+        let recordDay = utcDate(2026, 8, 24)
+        let sameLate = Event(name: "Same late", date: recordDay)
+        let sameEarly = Event(name: "Same early", date: recordDay)
+        let previous = Event(name: "Previous", date: utcDate(2026, 8, 23))
+        let next = Event(name: "Next", date: utcDate(2026, 8, 25))
+        let schedules = [
+            EventSchedule(eventID: sameLate.id, startTime: "19:00"),
+            EventSchedule(eventID: sameEarly.id, startTime: "10:00"),
+        ]
+
+        XCTAssertEqual(
+            ChekinanaChekiEventSelectionPolicy.eventsOnExactDate(
+                [next, sameLate, previous, sameEarly],
+                schedules: schedules,
+                for: recordDay
+            ).map(\.id),
+            [sameEarly.id, sameLate.id]
+        )
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let chekiStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaChekiEditorFields")?.lowerBound
+        )
+        let recordStart = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaChekiRecordEditorFields",
+                range: chekiStart..<source.endIndex
+            )?.lowerBound
+        )
+        let recordEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaMediaMetadataEditorFields",
+                range: recordStart..<source.endIndex
+            )?.lowerBound
+        )
+        XCTAssertTrue(source[chekiStart..<recordStart].contains(
+            "primaryScope: .exactDate"
+        ))
+        let recordFields = source[recordStart..<recordEnd]
+        XCTAssertTrue(recordFields.contains(
+            "primaryScope: .exactDate"
+        ))
+        XCTAssertTrue(recordFields.contains("ChekinanaSizeSelectionField("))
+        XCTAssertTrue(recordFields.contains("size: $size"))
+        let rowStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaMetadataSelectionRow")?.lowerBound
+        )
+        let selectorRevisionStart = try XCTUnwrap(
+            source.range(
+                of: "struct ChekinanaChekiEventSelectionRevision",
+                range: rowStart..<source.endIndex
+            )?.lowerBound
+        )
+        let sharedRows = source[rowStart..<selectorRevisionStart]
+        XCTAssertTrue(sharedRows.contains("HStack(alignment: .center, spacing: 12)"))
+        XCTAssertTrue(sharedRows.contains("minHeight: 44"))
+        XCTAssertTrue(sharedRows.contains("alignment: .trailing"))
+        XCTAssertTrue(sharedRows.contains("private struct ChekinanaSizeSelectionField"))
+        XCTAssertTrue(sharedRows.contains("ChekinanaMetadataSelectionRow("))
+        let mediaEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaUserAppearsPicker",
+                range: recordEnd..<source.endIndex
+            )?.lowerBound
+        )
+        XCTAssertTrue(source[recordEnd..<mediaEnd].contains(
+            "primaryScope: .exactDate"
+        ))
+        let selectorStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaChekiEventSelectionField")?.lowerBound
+        )
+        let selectorEnd = try XCTUnwrap(
+            source.range(
+                of: "private struct ChekinanaAllEventSelectionView",
+                range: selectorStart..<source.endIndex
+            )?.lowerBound
+        )
+        let selector = source[selectorStart..<selectorEnd]
+        XCTAssertTrue(selector.contains("@State private var cachedPrimaryEvents"))
+        XCTAssertTrue(selector.contains(".onChange(of: recordDate)"))
+        XCTAssertTrue(selector.contains(".onChange(of: cacheRevision)"))
+        XCTAssertFalse(selector.contains(".onChange(of: events.count)"))
+        XCTAssertFalse(selector.contains(".onChange(of: schedules.count)"))
+        XCTAssertTrue(selector.contains("eventsOnExactDate("))
+    }
+
+    func testEventAssociationPropagationCrossesEveryRecordKindWithoutOverwriting() throws {
+        let fixture = try makeFixture()
+        let firstIdol = Idol(name: "First")
+        let otherIdol = Idol(name: "Other")
+        let event = Event(name: "Source Event", date: utcDate(2026, 8, 24))
+        let existingEvent = Event(name: "Existing Event", date: utcDate(2026, 8, 24))
+        [firstIdol, otherIdol].forEach(fixture.context.insert)
+        fixture.context.insert(event)
+        fixture.context.insert(existingEvent)
+        try fixture.context.save()
+
+        let day = utcDate(2026, 8, 24)
+        let mediaCheki = MediaItem(
+            idols: [firstIdol],
+            date: day,
+            imageRef: "target-cheki.jpg"
+        )
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [firstIdol],
+            date: day,
+            mediaRef: "target-photo.jpg"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [firstIdol],
+            date: day,
+            mediaRef: "target-video.mp4"
+        )
+        let simpleRecord = ChekiRecord(idols: [firstIdol], date: day)
+        let alreadyLinked = ChekiRecord(
+            idols: [firstIdol],
+            event: existingEvent,
+            date: day
+        )
+        let differentIdol = MediaItem(
+            idols: [otherIdol],
+            date: day,
+            imageRef: "other-idol.jpg"
+        )
+        let differentDay = ChekiRecord(
+            idols: [firstIdol],
+            date: utcDate(2026, 8, 25)
+        )
+        let multiIdolTarget = MediaItem(
+            kind: .shame,
+            idols: [firstIdol, otherIdol],
+            date: day,
+            mediaRef: "multi-target.jpg"
+        )
+        let undated = ChekiRecord(idols: [firstIdol])
+        [mediaCheki, shame, douga, differentIdol, multiIdolTarget]
+            .forEach(fixture.context.insert)
+        [simpleRecord, alreadyLinked, differentDay, undated]
+            .forEach(fixture.context.insert)
+        try fixture.context.save()
+
+        let mediaSource = MediaItem(
+            idols: [firstIdol],
+            event: event,
+            date: day,
+            imageRef: "source.jpg"
+        )
+        fixture.context.insert(mediaSource)
+        XCTAssertEqual(
+            try ChekinanaEventAssociationPropagation.propagate(
+                from: mediaSource,
+                in: fixture.context
+            ),
+            4
+        )
+        XCTAssertEqual(mediaCheki.eventID, event.id)
+        XCTAssertEqual(shame.eventID, event.id)
+        XCTAssertEqual(douga.eventID, event.id)
+        XCTAssertEqual(simpleRecord.eventID, event.id)
+        XCTAssertEqual(alreadyLinked.eventID, existingEvent.id)
+        XCTAssertNil(differentIdol.eventID)
+        XCTAssertNil(differentDay.eventID)
+        XCTAssertNil(multiIdolTarget.eventID)
+        XCTAssertNil(undated.eventID)
+
+        let reverseDay = utcDate(2026, 8, 26)
+        let reverseTarget = MediaItem(
+            kind: .douga,
+            idols: [firstIdol],
+            date: reverseDay,
+            mediaRef: "reverse.mp4"
+        )
+        let recordSource = ChekiRecord(
+            idols: [firstIdol],
+            event: event,
+            date: reverseDay
+        )
+        fixture.context.insert(reverseTarget)
+        fixture.context.insert(recordSource)
+        XCTAssertEqual(
+            try ChekinanaEventAssociationPropagation.propagate(
+                from: recordSource,
+                in: fixture.context
+            ),
+            1
+        )
+        XCTAssertEqual(reverseTarget.eventID, event.id)
+
+        let ignoredTarget = MediaItem(
+            idols: [firstIdol],
+            date: utcDate(2026, 8, 27),
+            imageRef: "ignored.jpg"
+        )
+        let multiIdolSource = ChekiRecord(
+            idols: [firstIdol, otherIdol],
+            event: event,
+            date: utcDate(2026, 8, 27)
+        )
+        fixture.context.insert(ignoredTarget)
+        fixture.context.insert(multiIdolSource)
+        XCTAssertEqual(
+            try ChekinanaEventAssociationPropagation.propagate(
+                from: multiIdolSource,
+                in: fixture.context
+            ),
+            0
+        )
+        XCTAssertNil(ignoredTarget.eventID)
+
+        let nilDateSource = MediaItem(
+            idols: [firstIdol],
+            event: event,
+            imageRef: "nil-date-source.jpg"
+        )
+        fixture.context.insert(nilDateSource)
+        XCTAssertEqual(
+            try ChekinanaEventAssociationPropagation.propagate(
+                from: nilDateSource,
+                in: fixture.context
+            ),
+            0
+        )
+    }
+
+    func testEventAssociationPropagationRollsBackWithSourceSaveFailure() throws {
+        enum InjectedFailure: Error { case save }
+
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Rollback")
+        let day = utcDate(2026, 8, 24)
+        let event = Event(name: "Rollback Event", date: day)
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        try fixture.context.save()
+        let target = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            date: day,
+            mediaRef: "rollback-target.jpg"
+        )
+        fixture.context.insert(target)
+        try fixture.context.save()
+
+        XCTAssertThrowsError(try ChekinanaChekiRecordStore.upsert(
+            idols: [idol],
+            event: event,
+            date: day,
+            size: .mini,
+            note: "source",
+            adding: 1,
+            in: fixture.context,
+            saveContext: { _ in throw InjectedFailure.save }
+        ))
+
+        let verification = ModelContext(fixture.context.container)
+        XCTAssertNil(
+            try verification.fetch(FetchDescriptor<MediaItem>())
+                .first { $0.id == target.id }?.eventID
+        )
+        XCTAssertTrue(try verification.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
+    }
+
+    func testCalendarGroupRecordWriterPropagatesIndependentOfEditedRowOrder() throws {
+        func savedEventIDs(sourceFirst: Bool) throws -> [UUID] {
+            let fixture = try makeFixture()
+            let idol = Idol(name: "Order Independent")
+            let day = utcDate(2026, 8, 28)
+            let event = Event(name: "Selected", date: day)
+            let source = ChekiRecord(
+                idols: [idol],
+                date: day,
+                note: "source"
+            )
+            let target = ChekiRecord(
+                idols: [idol],
+                date: day,
+                note: "target"
+            )
+            fixture.context.insert(idol)
+            fixture.context.insert(event)
+            fixture.context.insert(source)
+            fixture.context.insert(target)
+            try fixture.context.save()
+
+            var sourceDraft = ChekinanaCalendarRecordDraft(source)
+            sourceDraft.set(
+                Optional(event.id),
+                for: .eventID,
+                at: \.eventID
+            )
+            let sourceEdit = ChekinanaCalendarRecordPendingEdit(
+                draft: sourceDraft,
+                resolvedIdolIDs: sourceDraft.idolIDs,
+                canonicalDate: day
+            )
+            let targetDraft = ChekinanaCalendarRecordDraft(target)
+            let targetEdit = ChekinanaCalendarRecordPendingEdit(
+                draft: targetDraft,
+                resolvedIdolIDs: targetDraft.idolIDs,
+                canonicalDate: day
+            )
+
+            try ChekinanaCalendarGroupRecordWriter.commit(
+                sourceFirst ? [sourceEdit, targetEdit] : [targetEdit, sourceEdit],
+                in: fixture.context
+            )
+
+            let verification = ModelContext(fixture.context.container)
+            return try verification.fetch(FetchDescriptor<ChekiRecord>())
+                .compactMap(\.eventID)
+                .sorted { $0.uuidString < $1.uuidString }
+        }
+
+        let sourceFirst = try savedEventIDs(sourceFirst: true)
+        let sourceLast = try savedEventIDs(sourceFirst: false)
+        XCTAssertEqual(sourceFirst.count, 2)
+        XCTAssertEqual(sourceLast.count, 2)
+        XCTAssertEqual(Set(sourceFirst).count, 1)
+        XCTAssertEqual(Set(sourceLast).count, 1)
+    }
+
+    func testCalendarGroupRecordWriterExplicitClearBeatsSiblingPropagation() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Explicit Clear")
+        let day = utcDate(2026, 8, 29)
+        let event = Event(name: "Propagated", date: day)
+        let source = ChekiRecord(idols: [idol], date: day, note: "source")
+        let cleared = ChekiRecord(idols: [idol], date: day, note: "cleared")
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(source)
+        fixture.context.insert(cleared)
+        try fixture.context.save()
+
+        var sourceDraft = ChekinanaCalendarRecordDraft(source)
+        sourceDraft.set(Optional(event.id), for: .eventID, at: \.eventID)
+        var clearedDraft = ChekinanaCalendarRecordDraft(cleared)
+        clearedDraft.set(Optional<UUID>.none, for: .eventID, at: \.eventID)
+
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            [sourceDraft, clearedDraft].map {
+                ChekinanaCalendarRecordPendingEdit(
+                    draft: $0,
+                    resolvedIdolIDs: $0.idolIDs,
+                    canonicalDate: day
+                )
+            },
+            in: fixture.context
+        )
+
+        let verification = ModelContext(fixture.context.container)
+        let saved = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(saved.first { $0.id == source.id }?.eventID, event.id)
+        XCTAssertNil(saved.first { $0.id == cleared.id }?.eventID)
+    }
+
+    func testCalendarGroupRecordWriterExplicitClearOverridesEventArrivingAfterNilBaseline() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Late Propagation Clear")
+        let day = utcDate(2026, 8, 29)
+        let event = Event(name: "Late Propagation", date: day)
+        let record = ChekiRecord(idols: [idol], date: day)
+        let mediaSource = MediaItem(
+            idols: [idol],
+            event: event,
+            date: day,
+            imageRef: "late-propagation.jpg"
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(record)
+        fixture.context.insert(mediaSource)
+        try fixture.context.save()
+
+        var draft = ChekinanaCalendarRecordDraft(record)
+        draft.set(Optional<UUID>.none, for: .eventID, at: \.eventID)
+        try ChekinanaEventAssociationPropagation.propagate(
+            from: mediaSource,
+            in: fixture.context
+        )
+        try fixture.context.save()
+        XCTAssertEqual(record.eventID, event.id)
+
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            [ChekinanaCalendarRecordPendingEdit(
+                draft: draft,
+                resolvedIdolIDs: draft.idolIDs,
+                canonicalDate: day
+            )],
+            in: fixture.context
+        )
+
+        let verification = ModelContext(fixture.context.container)
+        XCTAssertNil(
+            try verification.fetch(FetchDescriptor<ChekiRecord>())
+                .first { $0.id == record.id }?.eventID
+        )
+    }
+
+    func testCalendarGroupRecordWriterPreservesExistingDifferentEvent() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Existing Event")
+        let day = utcDate(2026, 8, 30)
+        let selectedEvent = Event(name: "Selected", date: day)
+        let existingEvent = Event(name: "Existing", date: day)
+        let source = ChekiRecord(idols: [idol], date: day, note: "source")
+        let existing = ChekiRecord(
+            idols: [idol],
+            event: existingEvent,
+            date: day,
+            note: "existing"
+        )
+        let emptyTarget = ChekiRecord(idols: [idol], date: day, note: "empty")
+        fixture.context.insert(idol)
+        fixture.context.insert(selectedEvent)
+        fixture.context.insert(existingEvent)
+        fixture.context.insert(source)
+        fixture.context.insert(existing)
+        fixture.context.insert(emptyTarget)
+        try fixture.context.save()
+
+        var sourceDraft = ChekinanaCalendarRecordDraft(source)
+        sourceDraft.set(Optional(selectedEvent.id), for: .eventID, at: \.eventID)
+        let drafts = [
+            sourceDraft,
+            ChekinanaCalendarRecordDraft(existing),
+            ChekinanaCalendarRecordDraft(emptyTarget),
+        ]
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            drafts.map {
+                ChekinanaCalendarRecordPendingEdit(
+                    draft: $0,
+                    resolvedIdolIDs: $0.idolIDs,
+                    canonicalDate: day
+                )
+            },
+            in: fixture.context
+        )
+
+        let verification = ModelContext(fixture.context.container)
+        let saved = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(saved.first { $0.id == source.id }?.eventID, selectedEvent.id)
+        XCTAssertEqual(saved.first { $0.id == existing.id }?.eventID, existingEvent.id)
+        XCTAssertEqual(saved.first { $0.id == emptyTarget.id }?.eventID, selectedEvent.id)
+    }
+
+    func testCalendarGroupRecordWriterRejectsAndRecoversConflictingExplicitEvents() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Conflict")
+        let day = utcDate(2026, 8, 31)
+        let firstEvent = Event(name: "First", date: day)
+        let secondEvent = Event(name: "Second", date: day)
+        let first = ChekiRecord(idols: [idol], date: day, note: "first")
+        let second = ChekiRecord(idols: [idol], date: day, note: "second")
+        fixture.context.insert(idol)
+        fixture.context.insert(firstEvent)
+        fixture.context.insert(secondEvent)
+        fixture.context.insert(first)
+        fixture.context.insert(second)
+        try fixture.context.save()
+
+        var firstDraft = ChekinanaCalendarRecordDraft(first)
+        firstDraft.set(Optional(firstEvent.id), for: .eventID, at: \.eventID)
+        firstDraft.set("first changed", for: .note, at: \.note)
+        var secondDraft = ChekinanaCalendarRecordDraft(second)
+        secondDraft.set(Optional(secondEvent.id), for: .eventID, at: \.eventID)
+        func edit(_ draft: ChekinanaCalendarRecordDraft) -> ChekinanaCalendarRecordPendingEdit {
+            ChekinanaCalendarRecordPendingEdit(
+                draft: draft,
+                resolvedIdolIDs: draft.idolIDs,
+                canonicalDate: day
+            )
+        }
+
+        XCTAssertThrowsError(try ChekinanaCalendarGroupRecordWriter.commit(
+            [edit(firstDraft), edit(secondDraft)],
+            in: fixture.context
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaCalendarGroupEditorError,
+                .conflictingEventSelection
+            )
+        }
+        var verification = ModelContext(fixture.context.container)
+        XCTAssertTrue(
+            try verification.fetch(FetchDescriptor<ChekiRecord>())
+                .allSatisfy { $0.eventID == nil }
+        )
+        XCTAssertEqual(
+            try verification.fetch(FetchDescriptor<ChekiRecord>())
+                .first { $0.id == first.id }?.note,
+            "first"
+        )
+
+        secondDraft.set(Optional(firstEvent.id), for: .eventID, at: \.eventID)
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            [edit(firstDraft), edit(secondDraft)],
+            in: fixture.context
+        )
+        verification = ModelContext(fixture.context.container)
+        let recovered = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(recovered.count, 2)
+        XCTAssertTrue(recovered.allSatisfy { $0.eventID == firstEvent.id })
+        XCTAssertEqual(recovered.first { $0.id == first.id }?.note, "first changed")
+    }
+
+    func testCalendarGroupRecordWriterCountZeroDeletesWithoutBreakingPropagationTotals() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Delete and Propagate")
+        let day = utcDate(2026, 9, 1)
+        let event = Event(name: "Kept Event", date: day)
+        let deleted = ChekiRecord(idols: [idol], date: day, note: "delete", count: 5)
+        let source = ChekiRecord(idols: [idol], date: day, note: "source", count: 2)
+        let target = ChekiRecord(idols: [idol], date: day, note: "target", count: 3)
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(deleted)
+        fixture.context.insert(source)
+        fixture.context.insert(target)
+        try fixture.context.save()
+
+        var deletedDraft = ChekinanaCalendarRecordDraft(deleted)
+        deletedDraft.set(0, for: .count, at: \.count)
+        var sourceDraft = ChekinanaCalendarRecordDraft(source)
+        sourceDraft.set(Optional(event.id), for: .eventID, at: \.eventID)
+        let drafts = [deletedDraft, sourceDraft, ChekinanaCalendarRecordDraft(target)]
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            drafts.map {
+                ChekinanaCalendarRecordPendingEdit(
+                    draft: $0,
+                    resolvedIdolIDs: $0.idolIDs,
+                    canonicalDate: day
+                )
+            },
+            in: fixture.context
+        )
+
+        let verification = ModelContext(fixture.context.container)
+        let saved = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(saved.count, 2)
+        XCTAssertFalse(saved.contains { $0.id == deleted.id })
+        XCTAssertEqual(saved.reduce(0) { $0 + $1.count }, 5)
+        XCTAssertTrue(saved.allSatisfy { $0.eventID == event.id })
+    }
+
+    func testCalendarDraftThreeWayMergeKeepsOuterNoteAndCountAfterNestedPropagation() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Nested Merge")
+        let day = utcDate(2026, 9, 2)
+        let event = Event(name: "Nested Event", date: day)
+        let record = ChekiRecord(
+            idols: [idol],
+            date: day,
+            note: "before",
+            count: 1
+        )
+        let nestedMedia = MediaItem(
+            idols: [idol],
+            date: day,
+            imageRef: "nested-merge.jpg"
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(record)
+        fixture.context.insert(nestedMedia)
+        try fixture.context.save()
+
+        var outerDraft = ChekinanaCalendarRecordDraft(record)
+        outerDraft.set("outer note", for: .note, at: \.note)
+        outerDraft.set(7, for: .count, at: \.count)
+
+        nestedMedia.eventID = event.id
+        try ChekinanaEventAssociationPropagation.propagate(
+            from: nestedMedia,
+            in: fixture.context
+        )
+        try fixture.context.save()
+
+        let nestedResultContext = ModelContext(fixture.context.container)
+        let nestedResult = try XCTUnwrap(
+            try nestedResultContext.fetch(FetchDescriptor<ChekiRecord>())
+                .first { $0.id == record.id }
+        )
+        outerDraft.mergeUnmodifiedFields(
+            from: ChekinanaCalendarRecordFingerprint(nestedResult)
+        )
+        XCTAssertEqual(outerDraft.note, "outer note")
+        XCTAssertEqual(outerDraft.count, 7)
+        XCTAssertEqual(outerDraft.eventID, event.id)
+        XCTAssertTrue(outerDraft.dirtyFields.contains(.note))
+        XCTAssertTrue(outerDraft.dirtyFields.contains(.count))
+        XCTAssertFalse(outerDraft.dirtyFields.contains(.eventID))
+
+        try ChekinanaCalendarGroupRecordWriter.commit(
+            [ChekinanaCalendarRecordPendingEdit(
+                draft: outerDraft,
+                resolvedIdolIDs: outerDraft.idolIDs,
+                canonicalDate: day
+            )],
+            in: fixture.context
+        )
+        let verification = ModelContext(fixture.context.container)
+        let saved = try XCTUnwrap(
+            try verification.fetch(FetchDescriptor<ChekiRecord>())
+                .first { $0.id == record.id }
+        )
+        XCTAssertEqual(saved.note, "outer note")
+        XCTAssertEqual(saved.count, 7)
+        XCTAssertEqual(saved.eventID, event.id)
+    }
+
+    func testCalendarGroupRecordWriterSaveFailureRollsBackFieldsPropagationAndCounts() throws {
+        enum InjectedFailure: Error { case save }
+
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Batch Rollback")
+        let day = utcDate(2026, 9, 3)
+        let event = Event(name: "Rollback Event", date: day)
+        let source = ChekiRecord(
+            idols: [idol],
+            date: day,
+            note: "source before",
+            count: 2
+        )
+        let target = ChekiRecord(
+            idols: [idol],
+            date: day,
+            note: "target before",
+            count: 3
+        )
+        let mediaTarget = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            date: day,
+            mediaRef: "rollback-media.jpg"
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(source)
+        fixture.context.insert(target)
+        fixture.context.insert(mediaTarget)
+        try fixture.context.save()
+
+        var sourceDraft = ChekinanaCalendarRecordDraft(source)
+        sourceDraft.set(Optional(event.id), for: .eventID, at: \.eventID)
+        sourceDraft.set("source after", for: .note, at: \.note)
+        sourceDraft.set(8, for: .count, at: \.count)
+        let targetDraft = ChekinanaCalendarRecordDraft(target)
+        let drafts = [sourceDraft, targetDraft]
+
+        XCTAssertThrowsError(try ChekinanaCalendarGroupRecordWriter.commit(
+            drafts.map {
+                ChekinanaCalendarRecordPendingEdit(
+                    draft: $0,
+                    resolvedIdolIDs: $0.idolIDs,
+                    canonicalDate: day
+                )
+            },
+            in: fixture.context,
+            saveContext: { _ in throw InjectedFailure.save }
+        ))
+
+        let verification = ModelContext(fixture.context.container)
+        let savedRecords = try verification.fetch(FetchDescriptor<ChekiRecord>())
+        XCTAssertEqual(savedRecords.reduce(0) { $0 + $1.count }, 5)
+        XCTAssertEqual(savedRecords.first { $0.id == source.id }?.note, "source before")
+        XCTAssertTrue(savedRecords.allSatisfy { $0.eventID == nil })
+        XCTAssertNil(
+            try verification.fetch(FetchDescriptor<MediaItem>())
+                .first { $0.id == mediaTarget.id }?.eventID
+        )
+    }
+
+    func testCalendarRecordFingerprintTracksEveryBatchWrittenField() throws {
+        let fixture = try makeFixture()
+        let firstIdol = Idol(name: "Fingerprint One")
+        let secondIdol = Idol(name: "Fingerprint Two")
+        let firstEvent = Event(name: "Fingerprint Event One")
+        let secondEvent = Event(name: "Fingerprint Event Two")
+        let record = ChekiRecord(
+            idols: [firstIdol],
+            event: firstEvent,
+            date: utcDate(2026, 9, 4),
+            size: .mini,
+            note: "before",
+            count: 1
+        )
+        fixture.context.insert(firstIdol)
+        fixture.context.insert(secondIdol)
+        fixture.context.insert(firstEvent)
+        fixture.context.insert(secondEvent)
+        fixture.context.insert(record)
+        try fixture.context.save()
+        let baseline = ChekinanaCalendarRecordFingerprint(record)
+
+        record.idolIDs = [secondIdol.id]
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+        record.idolIDs = [firstIdol.id]
+        record.count = 2
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+        record.count = 1
+        record.date = utcDate(2026, 9, 5)
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+        record.date = utcDate(2026, 9, 4)
+        record.eventID = secondEvent.id
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+        record.eventID = firstEvent.id
+        record.size = .wide
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+        record.size = .mini
+        record.note = "after"
+        XCTAssertNotEqual(ChekinanaCalendarRecordFingerprint(record), baseline)
+    }
+
+    @MainActor
+    func testChekiEventSelectionRevisionTracksMembershipNamesAndScheduleOrdering() {
+        let event = Event(name: "Original", date: utcDate(2026, 8, 24))
+        let schedule = EventSchedule(
+            eventID: event.id,
+            openTime: "09:30",
+            startTime: "10:00"
+        )
+        let original = ChekinanaChekiEventSelectionRevision(
+            events: [event],
+            schedules: [schedule]
+        )
+
+        event.name = "Renamed"
+        XCTAssertNotEqual(
+            original,
+            ChekinanaChekiEventSelectionRevision(
+                events: [event],
+                schedules: [schedule]
+            )
+        )
+        event.name = "Original"
+        event.date = utcDate(2026, 8, 25)
+        XCTAssertNotEqual(
+            original,
+            ChekinanaChekiEventSelectionRevision(
+                events: [event],
+                schedules: [schedule]
+            )
+        )
+        event.date = utcDate(2026, 8, 24)
+        schedule.startTime = "11:00"
+        XCTAssertNotEqual(
+            original,
+            ChekinanaChekiEventSelectionRevision(
+                events: [event],
+                schedules: [schedule]
+            )
+        )
+        schedule.startTime = "10:00"
+        schedule.openTime = "09:45"
+        XCTAssertNotEqual(
+            original,
+            ChekinanaChekiEventSelectionRevision(
+                events: [event],
+                schedules: [schedule]
+            )
+        )
+    }
+
     func testChekiEventValidationKeepsExistingExplicitSelectionOutsideNearbyWindow() {
         let selected = Event(name: "Explicit", date: utcDate(2026, 9, 10))
         XCTAssertEqual(
@@ -10458,7 +20361,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testChekiRecordStoreAcceptsAnyExistingExplicitEventAndRejectsMissingEvent() throws {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
@@ -10620,25 +20523,29 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testChekiFavoriteAndSNSFlagsDefaultFalseAndRoundTripTrue() throws {
-        let defaultCheki = Cheki()
+        let defaultCheki = MediaItem(imageRef: "default.jpg")
         XCTAssertFalse(defaultCheki.isFavorite)
         XCTAssertFalse(defaultCheki.hasPostedToSNS)
         XCTAssertEqual(defaultCheki.userAppears, false)
-        XCTAssertEqual(Cheki(userAppears: nil).userAppears, false)
+        XCTAssertEqual(MediaItem(userAppears: nil, imageRef: "nil-user.jpg").userAppears, false)
 
-        let schema = Schema([Idol.self, Event.self, Cheki.self])
+        let schema = Schema([Idol.self, Event.self, MediaItem.self])
         let container = try ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
         )
         let writeContext = ModelContext(container)
-        let flaggedCheki = Cheki(isFavorite: true, hasPostedToSNS: true)
+        let flaggedCheki = MediaItem(
+            imageRef: "flagged.jpg",
+            isFavorite: true,
+            hasPostedToSNS: true
+        )
         writeContext.insert(flaggedCheki)
         try writeContext.save()
 
         let readContext = ModelContext(container)
         let flaggedID = flaggedCheki.id
-        var descriptor = FetchDescriptor<Cheki>(
+        var descriptor = FetchDescriptor<MediaItem>(
             predicate: #Predicate { $0.id == flaggedID }
         )
         descriptor.fetchLimit = 1
@@ -10772,7 +20679,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         idol.avatarImageRef = storedAvatar.ref
         fixture.context.insert(idol)
-        let cheki = Cheki(userAppears: true)
+        let cheki = MediaItem(userAppears: true, imageRef: "clear-fields.jpg")
         fixture.context.insert(cheki)
         cheki.idols = [idol]
         try fixture.context.save()
@@ -10851,6 +20758,133 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: imageURL.path))
     }
 
+    func testEventDeleteUnbindsMediaAndRecordsWithoutDeletingThem() throws {
+        let fixture = try makeFixture()
+        let idol = Idol(name: "Still here")
+        let event = Event(name: "Only event is deleted")
+        let cheki = MediaItem(
+            idols: [idol],
+            event: event,
+            imageRef: "cheki-remains.jpg"
+        )
+        let shame = MediaItem(
+            kind: .shame,
+            idols: [idol],
+            event: event,
+            mediaRef: "photo-remains.jpg"
+        )
+        let douga = MediaItem(
+            kind: .douga,
+            idols: [idol],
+            event: event,
+            mediaRef: "video-remains.mov"
+        )
+        let record = ChekiRecord(
+            idols: [idol],
+            event: event,
+            count: 4
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(cheki)
+        fixture.context.insert(shame)
+        fixture.context.insert(douga)
+        fixture.context.insert(record)
+        try fixture.context.save()
+
+        try ChekinanaEventPersistence.delete(
+            eventID: event.id,
+            from: fixture.context
+        )
+
+        let verification = ModelContext(fixture.context.container)
+        XCTAssertEqual(try verification.fetchCount(FetchDescriptor<Event>()), 0)
+        let media = try verification.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(Set(media.map(\.id)), Set([cheki.id, shame.id, douga.id]))
+        XCTAssertTrue(media.allSatisfy { $0.eventID == nil })
+        XCTAssertEqual(Set(media.map(\.mediaRef)), Set([
+            "cheki-remains.jpg",
+            "photo-remains.jpg",
+            "video-remains.mov",
+        ]))
+        let survivingRecord = try XCTUnwrap(
+            verification.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(survivingRecord.id, record.id)
+        XCTAssertEqual(survivingRecord.count, 4)
+        XCTAssertNil(survivingRecord.eventID)
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let deleteStart = try XCTUnwrap(
+            source.range(of: "static func delete(\n        eventID: UUID")?.lowerBound
+        )
+        let deleteEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventAvatar",
+            range: deleteStart..<source.endIndex
+        )?.lowerBound)
+        XCTAssertFalse(
+            source[deleteStart..<deleteEnd].contains("MediaEventLink")
+        )
+    }
+
+    func testEventDetailDismissesBeforeDeletingByStableID() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let eventsStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaEventsView")?.lowerBound
+        )
+        let detailStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaEventDetailView",
+            range: eventsStart..<source.endIndex
+        )?.lowerBound)
+        let eventsView = source[eventsStart..<detailStart]
+        let detailEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaUnifiedChekiGroupPage",
+            range: detailStart..<source.endIndex
+        )?.lowerBound)
+        let detail = source[detailStart..<detailEnd]
+
+        XCTAssertTrue(eventsView.contains("ChekinanaEventDetailView(event: event)"))
+        XCTAssertTrue(eventsView.contains(".sheet(item: $selectedEvent, onDismiss: deletePendingEvent)"))
+        XCTAssertTrue(eventsView.contains("pendingEventDeletionID = eventID"))
+        XCTAssertTrue(eventsView.contains("selectedEvent = nil"))
+        XCTAssertTrue(eventsView.contains("ChekinanaEventPersistence.delete("))
+        XCTAssertTrue(eventsView.contains("await Task.yield()"))
+        XCTAssertTrue(eventsView.contains("eventDeletionError = error.localizedDescription"))
+        let queueDeletion = try XCTUnwrap(
+            eventsView.range(of: "pendingEventDeletionID = eventID")
+        )
+        let clearSelection = try XCTUnwrap(
+            eventsView.range(
+                of: "selectedEvent = nil",
+                range: queueDeletion.upperBound..<eventsView.endIndex
+            )
+        )
+        let deferredDelete = try XCTUnwrap(
+            eventsView.range(
+                of: "private func deletePendingEvent()",
+                range: clearSelection.upperBound..<eventsView.endIndex
+            )
+        )
+        XCTAssertLessThan(queueDeletion.lowerBound, clearSelection.lowerBound)
+        XCTAssertLessThan(clearSelection.lowerBound, deferredDelete.lowerBound)
+        XCTAssertTrue(detail.contains("let requestDeletion: (UUID) -> Void"))
+        XCTAssertTrue(detail.contains("@State private var isDeleting = false"))
+        XCTAssertTrue(detail.contains("guard !isDeleting else { return }"))
+        XCTAssertTrue(detail.contains("isDeleting = true"))
+        XCTAssertTrue(detail.contains(".disabled(isDeleting)"))
+        XCTAssertTrue(detail.contains("requestDeletion(event.id)"))
+        XCTAssertFalse(detail.contains("ChekinanaEventPersistence.delete(event"))
+    }
+
     func testEventDeleteSaveFailureDoesNotRemoveAvatar() throws {
         let fixture = try makeFixture()
         let event = Event(name: "Keep Avatar")
@@ -10918,10 +20952,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let storeURL = directory.appendingPathComponent("LegacyEvent.store")
         let legacySchema = Schema([
-            Idol.self, Event.self, Cheki.self, Shame.self, Douga.self,
+            Idol.self, Event.self, MediaItem.self,
         ])
         let currentSchema = Schema([
-            Idol.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self,
+            Idol.self, Event.self, EventImage.self, MediaItem.self,
         ])
         let eventID = UUID()
         let eventDate = try XCTUnwrap(ChekinanaDateOnly.parse("2026-08-08"))
@@ -10996,6 +21030,62 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
 
         XCTAssertEqual(delegate.trustedRedirectRequest(allowed)?.url, allowed.url)
+        let xMedia = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://pbs.twimg.com/media/example.jpg")
+        ))
+        let untrustedXHost = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://x.com/media/example.jpg")
+        ))
+        let fakeTwitterMediaHost = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://evil.pbs.twimg.com/media/example.jpg")
+        ))
+        let xProxy = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2Fexample.jpg%3Fformat%3Djpg%26name%3Dlarge")
+        ))
+        let xProxyWrongPath = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/other?url=fixture")
+        ))
+        let xProxyWithoutQuery = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media")
+        ))
+        let xProxyEmptyURL = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=")
+        ))
+        let xProxyNonCanonicalNestedURL = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=fixture")
+        ))
+        let xProxyEvilNestedHost = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fevil.example%2Fimage.jpg")
+        ))
+        let xProxyExtraParameter = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2Fexample.jpg&extra=1")
+        ))
+        let xProxyDuplicateParameter = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2Fone.jpg&url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2Ftwo.jpg")
+        ))
+        let xProxyNestedFragment = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%2Fmedia%2Fexample.jpg%23fragment")
+        ))
+        let xProxyNestedExplicitDefaultPort = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%3A443%2Fmedia%2Fexample.jpg")
+        ))
+        let xProxyNestedRootPath = URLRequest(url: try XCTUnwrap(
+            URL(string: "https://api.chekinana.top/api/event/x-media?url=https%3A%2F%2Fpbs.twimg.com%2F")
+        ))
+        XCTAssertEqual(delegate.trustedRedirectRequest(xMedia)?.url, xMedia.url)
+        XCTAssertEqual(delegate.trustedRedirectRequest(xProxy)?.url, xProxy.url)
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyWrongPath))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyWithoutQuery))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyEmptyURL))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyNonCanonicalNestedURL))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyEvilNestedHost))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyExtraParameter))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyDuplicateParameter))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyNestedFragment))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyNestedExplicitDefaultPort))
+        XCTAssertNil(delegate.trustedRedirectRequest(xProxyNestedRootPath))
+        XCTAssertNil(delegate.trustedRedirectRequest(untrustedXHost))
+        XCTAssertNil(delegate.trustedRedirectRequest(fakeTwitterMediaHost))
         XCTAssertNil(delegate.trustedRedirectRequest(evil))
         XCTAssertNil(delegate.trustedRedirectRequest(privateTarget))
     }
@@ -11207,6 +21297,397 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(ChekinanaEventMediaJournal.deletionRefs(defaults: defaults).contains(ref))
     }
 
+    func testEventTravelMediaOwnershipTransfersWithoutClockExpiry() throws {
+        let suite = "event-travel-ownership-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let generation = UUID()
+        let draftOwner = UUID()
+        let saveOwner = UUID()
+        let ref = "event-image-\(UUID().uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+
+        ChekinanaEventTravelMediaOwnership.beginDraftSession(
+            ownerID: draftOwner,
+            generation: generation,
+            defaults: defaults
+        )
+        ChekinanaEventTravelMediaOwnership.retain(
+            [ref],
+            ownerID: draftOwner,
+            generation: generation,
+            defaults: defaults
+        )
+        XCTAssertTrue(
+            ChekinanaEventTravelMediaOwnership
+                .protectedReferences(defaults: defaults)
+                .contains(ref)
+        )
+        ChekinanaEventTravelMediaOwnership.reconcileAfterProcessRestart(
+            defaults: defaults
+        )
+        XCTAssertTrue(
+            ChekinanaEventTravelMediaOwnership
+                .protectedReferences(defaults: defaults)
+                .contains(ref)
+        )
+
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: saveOwner,
+            generation: generation,
+            references: [ref],
+            defaults: defaults
+        )
+        ChekinanaEventTravelMediaOwnership.transfer(
+            [ref],
+            from: draftOwner,
+            to: saveOwner,
+            generation: generation,
+            defaults: defaults
+        )
+        ChekinanaEventTravelMediaOwnership.release(
+            ownerID: saveOwner,
+            defaults: defaults
+        )
+        XCTAssertFalse(
+            ChekinanaEventTravelMediaOwnership
+                .protectedReferences(defaults: defaults)
+                .contains(ref)
+        )
+        ChekinanaEventTravelMediaOwnership.release(
+            ownerID: draftOwner,
+            defaults: defaults
+        )
+    }
+
+    @MainActor
+    func testRuntimeQueueCleanupLeavesPendingEventMediaForStartupRecovery() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("event-travel-runtime-pending-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "event-travel-runtime-pending-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        _ = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let ref = "event-image-\(UUID().uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        let file = directory.appendingPathComponent(ref)
+        try Data("active-draft".utf8).write(to: file)
+        ChekinanaEventMediaJournal.recordPending(ref, defaults: defaults)
+
+        let runtime = ChekinanaLibraryQueueReconciler.cleanupOrdinaryQueuesExclusively(
+            in: context,
+            directory: directory,
+            defaults: defaults,
+            recoverEventPending: false
+        )
+        XCTAssertFalse(runtime.needsRetry)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertTrue(ChekinanaEventMediaJournal.pendingRefs(defaults: defaults).contains(ref))
+
+        let startup = ChekinanaLibraryQueueReconciler.cleanupOrdinaryQueuesExclusively(
+            in: context,
+            directory: directory,
+            defaults: defaults,
+            recoverEventPending: true
+        )
+        XCTAssertFalse(startup.needsRetry)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(ChekinanaEventMediaJournal.pendingRefs(defaults: defaults).contains(ref))
+    }
+
+    @MainActor
+    func testEventAndTravelSaveRejectStaleGenerationAndReleasedOwner() throws {
+        let directory = try ChekiImageRefResolver.chekiImagesDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let schema = Schema(ChekinanaSchemaV16.models)
+
+        let eventContainer = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let eventContext = ModelContext(eventContainer)
+        let eventGeneration = try ChekinanaLibraryGenerationStore.ensureCurrent(
+            in: eventContext
+        )
+        let event = Event(name: "stale editor")
+        let eventRef = "event-image-\(event.id.uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        let eventURL = directory.appendingPathComponent(eventRef)
+        try Data("event-staged".utf8).write(to: eventURL)
+        defer { try? FileManager.default.removeItem(at: eventURL) }
+        let eventOwner = UUID()
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: eventOwner,
+            generation: eventGeneration,
+            references: [eventRef]
+        )
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: eventContext)
+        try eventContext.save()
+        XCTAssertThrowsError(
+            try ChekinanaEventPersistence.save(
+                event,
+                inserting: true,
+                images: [.init(id: nil, imageRef: eventRef)],
+                previousAvatarRef: nil,
+                in: eventContext,
+                validateManagedFiles: true,
+                expectedGeneration: eventGeneration,
+                mediaOwnerID: eventOwner,
+                mediaOwnerReferences: [eventRef]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaEventTravelMediaOwnership.SaveAuthorizationError,
+                .generationChanged
+            )
+        }
+        XCTAssertEqual(try eventContext.fetchCount(FetchDescriptor<Event>()), 0)
+        ChekinanaEventTravelMediaOwnership.release(ownerID: eventOwner)
+
+        let travelContainer = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let travelContext = ModelContext(travelContainer)
+        let travelGeneration = try ChekinanaLibraryGenerationStore.ensureCurrent(
+            in: travelContext
+        )
+        let travel = TravelSegment(
+            mode: .flight,
+            serviceNumber: "MU1",
+            departureCity: "",
+            departureLocation: "A",
+            arrivalCity: "",
+            arrivalLocation: "B",
+            departureTime: Date(timeIntervalSince1970: 1_800_000_000),
+            arrivalTime: Date(timeIntervalSince1970: 1_800_003_600)
+        )
+        let travelRef = "event-avatar-\(travel.id.uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        let travelURL = directory.appendingPathComponent(travelRef)
+        try Data("travel-staged".utf8).write(to: travelURL)
+        defer { try? FileManager.default.removeItem(at: travelURL) }
+        let travelOwner = UUID()
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: travelOwner,
+            generation: travelGeneration,
+            references: [travelRef]
+        )
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: travelContext)
+        try travelContext.save()
+        let fields = ChekinanaTravelSegmentFields(
+            mode: .flight,
+            operatorName: "",
+            serviceNumber: "MU1",
+            departureCity: "",
+            departureLocation: "A",
+            arrivalCity: "",
+            arrivalLocation: "B",
+            departureTime: travel.departureTime,
+            arrivalTime: travel.arrivalTime,
+            seatNumber: "",
+            carriageNumber: "",
+            note: ""
+        )
+        XCTAssertThrowsError(
+            try ChekinanaTravelSegmentPersistence.save(
+                travel,
+                inserting: true,
+                fields: fields,
+                operatorIconRef: travelRef,
+                previousIconRef: nil,
+                in: travelContext,
+                validateManagedFiles: true,
+                expectedGeneration: travelGeneration,
+                mediaOwnerID: travelOwner,
+                mediaOwnerReferences: [travelRef]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaEventTravelMediaOwnership.SaveAuthorizationError,
+                .generationChanged
+            )
+        }
+        XCTAssertEqual(
+            try travelContext.fetchCount(FetchDescriptor<TravelSegment>()),
+            0
+        )
+        ChekinanaEventTravelMediaOwnership.release(ownerID: travelOwner)
+
+        let releasedOwner = UUID()
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: releasedOwner,
+            generation: try ChekinanaLibraryGenerationStore.current(in: eventContext)
+                ?? UUID(),
+            references: [eventRef]
+        )
+        ChekinanaEventTravelMediaOwnership.release(ownerID: releasedOwner)
+        XCTAssertThrowsError(
+            try ChekinanaEventTravelMediaOwnership.validateSaveAuthorization(
+                ownerID: releasedOwner,
+                expectedGeneration: try XCTUnwrap(
+                    try ChekinanaLibraryGenerationStore.current(in: eventContext)
+                ),
+                ownedReferences: [eventRef],
+                in: eventContext
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaEventTravelMediaOwnership.SaveAuthorizationError,
+                .ownerUnavailable
+            )
+        }
+    }
+
+    func testAddEventCommandBindsAvatarDownloadToExpectedGenerationAndOwner() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaCommandExecutor.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let addEventStart = try XCTUnwrap(source.range(of: "case .addEvent(let payload):")?.lowerBound)
+        let addEventEnd = try XCTUnwrap(source.range(
+            of: "case .editEvent(let payload):",
+            range: addEventStart..<source.endIndex
+        )?.lowerBound)
+        let addEvent = String(source[addEventStart..<addEventEnd])
+
+        XCTAssertTrue(addEvent.contains("currentGeneration(in: modelContext)"))
+        XCTAssertTrue(addEvent.contains("beginSaveTask("))
+        XCTAssertTrue(addEvent.contains("ownerID: mediaOwnerID"))
+        XCTAssertTrue(addEvent.contains("generation: expectedGeneration"))
+        XCTAssertTrue(addEvent.contains("try Task.checkCancellation()"))
+        XCTAssertTrue(addEvent.contains("validateSaveAuthorization("))
+        XCTAssertTrue(addEvent.contains("validateManagedFiles: true"))
+        XCTAssertTrue(addEvent.contains("mediaOwnerReferences: mediaOwnerReferences"))
+        XCTAssertTrue(addEvent.contains("release(ownerID: mediaOwnerID)"))
+
+        let offset: (String) -> Int = { marker in
+            guard let range = addEvent.range(of: marker) else { return Int.max }
+            return addEvent.distance(from: addEvent.startIndex, to: range.lowerBound)
+        }
+        XCTAssertLessThan(offset("beginSaveTask("), offset("downloadAndSave("))
+        XCTAssertLessThan(offset("validateSaveAuthorization("), offset("ChekinanaEventPersistence.save("))
+        XCTAssertLessThan(offset("ChekinanaEventPersistence.save("), offset("release(ownerID: mediaOwnerID)"))
+    }
+
+    @MainActor
+    func testAddEventOwnerRejectsImportClearGenerationChangeAndInvalidationDuringDownload() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let expectedGeneration = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let ownerID = UUID()
+        let ref = "event-avatar-\(UUID().uuidString.lowercased())-\(UUID().uuidString.lowercased()).jpg"
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: ownerID,
+            generation: expectedGeneration,
+            references: [ref]
+        )
+        defer { ChekinanaEventTravelMediaOwnership.release(ownerID: ownerID) }
+        XCTAssertTrue(
+            ChekinanaEventTravelMediaOwnership
+                .protectedReferences()
+                .contains(ref)
+        )
+
+        // Import/clear can publish a new library generation while the avatar
+        // download is suspended. The old command must lose commit authority.
+        let generationGate = ScannerReleaseGate()
+        let generationValidation = Task { @MainActor in
+            await generationGate.wait()
+            try ChekinanaEventTravelMediaOwnership.validateSaveAuthorization(
+                ownerID: ownerID,
+                expectedGeneration: expectedGeneration,
+                ownedReferences: [ref],
+                in: context
+            )
+        }
+        await Task.yield()
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: context)
+        try context.save()
+        await generationGate.release()
+        do {
+            try await generationValidation.value
+            XCTFail("A generation changed during avatar download must reject the old owner")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaEventTravelMediaOwnership.SaveAuthorizationError,
+                .generationChanged
+            )
+        }
+
+        let currentGeneration = try XCTUnwrap(
+            try ChekinanaLibraryGenerationStore.current(in: context)
+        )
+        let invalidatedOwner = UUID()
+        ChekinanaEventTravelMediaOwnership.beginSaveTask(
+            ownerID: invalidatedOwner,
+            generation: currentGeneration,
+            references: [ref]
+        )
+        let invalidationGate = ScannerReleaseGate()
+        let invalidationValidation = Task { @MainActor in
+            await invalidationGate.wait()
+            try ChekinanaEventTravelMediaOwnership.validateSaveAuthorization(
+                ownerID: invalidatedOwner,
+                expectedGeneration: currentGeneration,
+                ownedReferences: [ref],
+                in: context
+            )
+        }
+        await Task.yield()
+        ChekinanaEventTravelMediaOwnership.release(ownerID: invalidatedOwner)
+        await invalidationGate.release()
+        do {
+            try await invalidationValidation.value
+            XCTFail("An invalidated owner must reject after avatar download")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaEventTravelMediaOwnership.SaveAuthorizationError,
+                .ownerUnavailable
+            )
+        }
+    }
+
+    func testLibraryMutationGateExcludesSyncSaveWhileAsyncOperationAwaits() async throws {
+        let entered = ScannerReleaseGate()
+        let release = ScannerReleaseGate()
+        let asyncOperation = Task { @MainActor in
+            try await ChekinanaLibraryMutationProtocol.withExclusiveOperation {
+                await entered.release()
+                await release.wait()
+            }
+        }
+
+        await entered.wait()
+        XCTAssertThrowsError(
+            try ChekinanaLibraryMutationProtocol.withExclusiveOperationSync {
+                "must not run concurrently"
+            }
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaLibraryMutationProtocol.SynchronousOperationError,
+                .busy
+            )
+        }
+
+        await release.release()
+        try await asyncOperation.value
+        let value = try ChekinanaLibraryMutationProtocol.withExclusiveOperationSync {
+            "available after async release"
+        }
+        XCTAssertEqual(value, "available after async release")
+    }
+
     func testEventImageRemoteStagingIsBoundedOrderedAndKeepsPartialSuccess() async throws {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2))
         let jpeg = renderer.jpegData(withCompressionQuality: 0.9) { context in
@@ -11402,33 +21883,63 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "private struct ChekinanaEventEditorView",
             "enum ChekinanaGalleryMediaKind"
         )
-        XCTAssertTrue(editor.contains("Paste Weibo URL"))
+        XCTAssertTrue(editor.contains("Paste Weibo / X URL"))
         XCTAssertTrue(editor.contains("ChekinanaSystemStringPasteControl("))
+        XCTAssertTrue(editor.contains("TextField("))
+        XCTAssertTrue(editor.contains("events.weibo_url"))
         XCTAssertTrue(editor.contains("sourceURL = pasted"))
         XCTAssertTrue(editor.contains("chekinana.events.editor.weibo-paste"))
         XCTAssertTrue(editor.contains("if sourceURL.isEmpty"))
-        XCTAssertEqual(
-            editor.components(
-                separatedBy: "ChekinanaEventEditorLayout.singleLineInputHeight"
-            ).count - 1,
-            4,
-            "Paste, URL TextField and parse row must share the same system-derived height."
+        let extractButtonIndex = try XCTUnwrap(
+            editor.range(of: "chekinana.events.editor.extract\"")?.lowerBound
         )
+        let extractionErrorIndex = try XCTUnwrap(
+            editor.range(of: "chekinana.events.editor.extract-error")?.lowerBound
+        )
+        let eventFormIndex = try XCTUnwrap(
+            editor.range(
+                of: "Section(ChekinanaProductCopy.text(\"events.event\", \"Event\"))"
+            )?.lowerBound
+        )
+        XCTAssertLessThan(extractButtonIndex, extractionErrorIndex)
+        XCTAssertLessThan(extractionErrorIndex, eventFormIndex)
+        XCTAssertEqual(
+            editor.components(separatedBy: "if let errorMessage {").count - 1,
+            1
+        )
+        let sourceFieldIndex = try XCTUnwrap(
+            editor.range(of: "TextField(")?.lowerBound
+        )
+        let pasteConditionIndex = try XCTUnwrap(
+            editor.range(of: "if sourceURL.isEmpty")?.lowerBound
+        )
+        XCTAssertLessThan(sourceFieldIndex, pasteConditionIndex)
+        XCTAssertFalse(editor.contains("ChekinanaDirectStringPasteControl("))
+        XCTAssertTrue(editor.contains("minWidth: 132"))
+        XCTAssertTrue(editor.contains("idealWidth: 150"))
+        XCTAssertTrue(editor.contains("maxWidth: 180"))
+        XCTAssertTrue(editor.contains(".fixedSize(horizontal: true, vertical: false)"))
         XCTAssertFalse(editor.contains("directWeiboPasteControl"))
         XCTAssertFalse(editor.contains("prompt: Text(weiboPasteTitle)"))
         XCTAssertFalse(editor.contains(".accessibilityHidden(sourceURL.isEmpty)"))
         XCTAssertTrue(editor.contains("parsedAddress = candidate.address"))
         XCTAssertTrue(editor.contains("address: parsedAddress"))
+        XCTAssertTrue(editor.contains("normalizedCity.isEmpty"))
+        XCTAssertTrue(editor.contains("cityRequiredMessage"))
+        XCTAssertTrue(editor.contains("chekinana.events.editor.city.required"))
+        XCTAssertTrue(editor.contains("liveEvent.city = normalizedCity"))
         XCTAssertFalse(editor.contains("UIPasteboard.general.string"))
         XCTAssertFalse(editor.contains("pasteWeiboURL"))
-        XCTAssertTrue(editor.contains("Parse Weibo URL"))
+        XCTAssertTrue(editor.contains("Parse Weibo / X URL"))
         XCTAssertTrue(editor.contains(
             "_sourceURL = State(initialValue: event?.weiboURL?.absoluteString ?? \"\")"
         ))
         XCTAssertTrue(editor.contains("chekinana.events.editor.images.add"))
         XCTAssertTrue(editor.contains("label: \"OPEN\""))
         XCTAssertTrue(editor.contains("label: \"START\""))
-        XCTAssertTrue(editor.contains("isOn: $hasDate"))
+        XCTAssertTrue(editor.contains(
+            "isOn: userEditableBinding($hasDate, field: .date)"
+        ))
         XCTAssertTrue(editor.contains("if hasDate"))
         XCTAssertTrue(editor.contains("hasDate = true"))
         XCTAssertTrue(editor.contains("liveEvent.date = selectedDate"))
@@ -11439,7 +21950,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(editor.contains("sourceText"))
         XCTAssertFalse(editor.contains("parse-text"))
         XCTAssertFalse(editor.contains("regularExpression"))
-        let applyIndex = try XCTUnwrap(editor.range(of: "apply(candidate)")?.lowerBound)
+        let applyIndex = try XCTUnwrap(
+            editor.range(of: "apply(candidate, from: request)")?.lowerBound
+        )
         let stageIndex = try XCTUnwrap(editor.range(of: "stageParsedImages(candidate.imageUrls")?.lowerBound)
         XCTAssertLessThan(applyIndex, stageIndex)
         XCTAssertTrue(editor.contains("ChekinanaEventPersistence.save("))
@@ -11517,6 +22030,28 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(afterContainerCreation.contains("control.configuration"))
         XCTAssertFalse(afterContainerCreation.contains("configuration."))
 
+        let directPasteControl = try slice(
+            "struct ChekinanaDirectStringPasteControl",
+            "final class ChekinanaInvisiblePasteContainer"
+        )
+        XCTAssertTrue(directPasteControl.contains("Text(title)"))
+        XCTAssertTrue(directPasteControl.contains(".foregroundStyle"))
+        XCTAssertFalse(directPasteControl.contains(".hidden()"))
+        XCTAssertTrue(directPasteControl.contains(
+            "ChekinanaTransparentStringPasteControl("
+        ))
+
+        let transparentPasteControl = try slice(
+            "final class ChekinanaInvisiblePasteContainer",
+            "struct ChekinanaCandidateSelectionState"
+        )
+        XCTAssertTrue(transparentPasteControl.contains("backgroundColor = .clear"))
+        XCTAssertTrue(transparentPasteControl.contains("pasteControl.alpha = 0.011"))
+        XCTAssertTrue(transparentPasteControl.contains(
+            "configuration.baseBackgroundColor = .clear"
+        ))
+        XCTAssertFalse(transparentPasteControl.contains("control.configuration"))
+
         let contentViewSourceURL = productSourceURL
             .deletingLastPathComponent()
             .appendingPathComponent("ContentView.swift")
@@ -11572,7 +22107,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "@State private var gridColumnCount = ChekinanaGalleryGridSizePolicy"
         ))
         XCTAssertTrue(gallery.contains(
-            "repeating: GridItem(.flexible(), spacing: 4)"
+            "repeating: GridItem(.flexible(), spacing: 0)"
+        ))
+        XCTAssertTrue(gallery.contains("LazyVGrid(columns: columns, spacing: 0)"))
+        XCTAssertFalse(gallery.contains(
+            ".frame(\n                                            minHeight: ChekinanaAccessibilityMetrics"
         ))
         XCTAssertTrue(gallery.contains("count: gridColumnCount"))
         XCTAssertFalse(gallery.contains("ToolbarItem(placement: .principal)"))
@@ -11613,17 +22152,17 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "private struct ChekinanaGalleryGridSizeControl",
             "private struct ChekinanaGalleryView"
         )
-        let largeImageIcon = try XCTUnwrap(
-            gridSizeControl.range(of: "photo.fill")?.lowerBound
+        let denseGridIcon = try XCTUnwrap(
+            gridSizeControl.range(of: "square.grid.3x3.fill")?.lowerBound
         )
         let slider = try XCTUnwrap(
             gridSizeControl.range(of: "Slider(")?.lowerBound
         )
-        let denseGridIcon = try XCTUnwrap(
-            gridSizeControl.range(of: "square.grid.3x3.fill")?.lowerBound
+        let largeImageIcon = try XCTUnwrap(
+            gridSizeControl.range(of: "photo.fill")?.lowerBound
         )
-        XCTAssertLessThan(largeImageIcon, slider)
-        XCTAssertLessThan(slider, denseGridIcon)
+        XCTAssertLessThan(denseGridIcon, slider)
+        XCTAssertLessThan(slider, largeImageIcon)
         XCTAssertTrue(gridSizeControl.contains("step: 1"))
         XCTAssertTrue(gridSizeControl.contains(
             "ChekinanaGalleryGridSizePolicy.minimumColumnCount"
@@ -11634,6 +22173,50 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(gridSizeControl.contains("gallery.grid_size.label"))
         XCTAssertTrue(gridSizeControl.contains("gallery.grid_size.columns"))
         XCTAssertTrue(gridSizeControl.contains("gallery.grid_size.hint"))
+        XCTAssertTrue(gridSizeControl.contains("ChekinanaGalleryGridThumbSlider("))
+        XCTAssertTrue(source.contains("let diameter: CGFloat = 15"))
+        let firstOverlay = try XCTUnwrap(
+            gridSizeControl.range(of: ".overlay(alignment: .leading)")?.lowerBound
+        )
+        let visibleLayout = gridSizeControl[..<firstOverlay]
+        XCTAssertFalse(visibleLayout.contains("Button {"))
+        XCTAssertEqual(
+            visibleLayout.components(
+                separatedBy: "ChekinanaGalleryGridControlLayout.iconWidth"
+            ).count - 1,
+            2
+        )
+        XCTAssertEqual(
+            visibleLayout.components(
+                separatedBy: "ChekinanaGalleryGridControlLayout.iconHeight"
+            ).count - 1,
+            2
+        )
+        XCTAssertEqual(
+            visibleLayout.components(
+                separatedBy: "ChekinanaGalleryGridControlLayout.iconVisualSize"
+            ).count - 1,
+            2
+        )
+        XCTAssertTrue(gridSizeControl.contains("Color.clear"))
+        XCTAssertTrue(gridSizeControl.contains(
+            "ChekinanaGalleryGridControlLayout.hitTargetSide"
+        ))
+        XCTAssertTrue(gridSizeControl.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(gridSizeControl.contains(".overlay(alignment: .leading)"))
+        XCTAssertTrue(gridSizeControl.contains(".overlay(alignment: .trailing)"))
+        XCTAssertTrue(gridSizeControl.contains(
+            ".offset(x: -ChekinanaGalleryGridControlLayout.hitTargetOutset)"
+        ))
+        XCTAssertTrue(gridSizeControl.contains(
+            ".offset(x: ChekinanaGalleryGridControlLayout.hitTargetOutset)"
+        ))
+        XCTAssertTrue(gridSizeControl.contains(
+            "width: ChekinanaGalleryGridControlLayout.controlWidth"
+        ))
+        XCTAssertTrue(gridSizeControl.contains(
+            "height: ChekinanaGalleryGridControlLayout.controlHeight"
+        ))
         XCTAssertTrue(gallery.contains("chekinana.gallery.grid-controls"))
         XCTAssertFalse(gallery.contains("ScrollView(.horizontal"))
 
@@ -11641,21 +22224,32 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "private struct ChekinanaCalendarRecordEditor",
             "struct ChekinanaCalendarIdolGroup"
         )
-        XCTAssertTrue(recordEditor.contains("ChekinanaQuantityControl("))
-        XCTAssertTrue(recordEditor.contains("allowedRange: 1...ChekinanaQuantityInputPolicy.maximum"))
-        XCTAssertTrue(recordEditor.contains("selection: $size"))
-        XCTAssertTrue(recordEditor.contains("ForEach(ChekiSize.allCases)"))
-        XCTAssertTrue(recordEditor.contains("chekinana.calendar.add_record.size"))
+        XCTAssertTrue(recordEditor.contains("ChekinanaChekiRecordEditorFields("))
+        XCTAssertTrue(recordEditor.contains("identifierPrefix: \"chekinana.calendar.add_record\""))
+        XCTAssertTrue(recordEditor.contains("count: $quantity"))
+        XCTAssertTrue(recordEditor.contains("hasDate: $hasDate"))
+        XCTAssertTrue(recordEditor.contains("date: $date"))
+        XCTAssertTrue(recordEditor.contains("size: $size"))
         XCTAssertTrue(recordEditor.contains("@State private var idolIDs = Set<UUID>()"))
-        XCTAssertTrue(recordEditor.contains("ChekinanaIdolSelectionSummaryButton("))
         XCTAssertTrue(recordEditor.contains("ChekinanaIdolAvatarCheckSelectionView("))
         XCTAssertTrue(recordEditor.contains("idolIDs: selectedIDs"))
         XCTAssertFalse(recordEditor.contains("selection: $idolID"))
-        XCTAssertTrue(recordEditor.contains("eventID: nil"))
+        XCTAssertTrue(recordEditor.contains("@State private var eventID: UUID?"))
+        XCTAssertTrue(recordEditor.contains("eventID: $eventID"))
+        XCTAssertTrue(recordEditor.contains("eventID: validEventID"))
+        XCTAssertFalse(recordEditor.contains("eventID: nil"))
         XCTAssertTrue(recordEditor.contains("size: size"))
+        let batchWriter = try slice(
+            "enum ChekinanaCalendarRecordBatchWriter",
+            "private enum ChekinanaCalendarRecordSaveProgress"
+        )
+        XCTAssertTrue(batchWriter.contains("let event = plan.eventID.flatMap"))
+        XCTAssertFalse(batchWriter.contains(
+            "ChekinanaChekiEventAutoAssociation.uniqueEventID("
+        ))
         XCTAssertEqual(
             source.components(separatedBy: "ChekinanaQuantityControl(").count - 1,
-            3
+            2
         )
         XCTAssertEqual(
             source.components(
@@ -11688,7 +22282,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         let groupRows = try slice(
             "ForEach(displayedGroups) { group in",
-            "private func openCalendarMedia"
+            "private func openCalendarGroupEditor"
         )
         let eventRowsEnd = try XCTUnwrap(
             selectedDay.range(of: "ForEach(displayedGroups) { group in")?.lowerBound
@@ -11697,6 +22291,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         XCTAssertTrue(groupRows.contains(".contentShape(Rectangle())"))
         XCTAssertTrue(groupRows.contains("ChekinanaCalendarGroupGestureSurface("))
+        XCTAssertTrue(source.contains(
+            "private struct ChekinanaSnapshotReorderGestureSurface: UIViewRepresentable"
+        ))
+        XCTAssertTrue(source.contains(
+            "ChekinanaSnapshotReorderGestureSurface(\n            scopeKey: \"calendar-group|"
+        ))
+        XCTAssertTrue(source.contains("requiresAllItemsVisible: true"))
         XCTAssertTrue(groupRows.contains(".frame(maxWidth: .infinity, maxHeight: .infinity)"))
         XCTAssertTrue(source.contains("UITapGestureRecognizer("))
         XCTAssertTrue(source.contains("UILongPressGestureRecognizer("))
@@ -11777,7 +22378,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(groupRows.contains("openCalendarGroupEditor(group)"))
         XCTAssertTrue(selectedDay.contains("selectedGroupEditor = .init("))
         XCTAssertTrue(groupRows.contains("ChekinanaCalendarThumbnailStrip("))
-        XCTAssertTrue(groupRows.contains("openCalendarMedia(group, initialID:"))
+        XCTAssertFalse(groupRows.contains("openCalendarMedia("))
+        XCTAssertTrue(groupRows.contains("onSelect: { _ in"))
         XCTAssertFalse(eventRows.contains("ChekinanaCalendarGroupGestureSurface"))
         XCTAssertFalse(selectedDay.contains("calendarGroupDragHandle"))
         XCTAssertFalse(selectedDay.contains("calendar.group.drag-handle"))
@@ -11834,7 +22436,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "private struct ChekinanaCalendarRecordEditor",
             "struct ChekinanaCalendarIdolGroup"
         )
-        XCTAssertTrue(calendarEditor.contains("ChekinanaIdolSelectionSummaryButton("))
+        XCTAssertTrue(calendarEditor.contains("ChekinanaChekiRecordEditorFields("))
         XCTAssertFalse(calendarEditor.contains("common.change_idols"))
         XCTAssertTrue(calendarEditor.contains("ChekinanaIdolAvatarCheckSelectionView("))
         XCTAssertTrue(calendarEditor.contains("guard !selectedIDs.isEmpty"))
@@ -11852,7 +22454,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "ChekinanaRequiredIdolSelectionPolicy.resolvedIDs("
         ))
         XCTAssertTrue(recordEditor.contains("guard !selectedIDs.isEmpty"))
-        XCTAssertTrue(recordEditor.contains("idolIDs: Set(selectedIDs)"))
+        XCTAssertTrue(recordEditor.contains("idolIDs: selectedIDs"))
         let requiredIdolGuard = try XCTUnwrap(
             recordEditor.range(of: "guard !selectedIDs.isEmpty")?.lowerBound
         )
@@ -11860,12 +22462,20 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             recordEditor.range(of: "ChekinanaChekiRecordStore.update(")?.lowerBound
         )
         XCTAssertLessThan(requiredIdolGuard, recordMutation)
+        XCTAssertFalse(
+            recordEditor[recordMutation...].contains("try modelContext.save()"),
+            "The record store owns the single atomic save; the editor must not save twice."
+        )
+        XCTAssertFalse(
+            recordEditor[recordMutation...].contains("modelContext.rollback()"),
+            "The record store owns rollback only after crossing its mutation boundary."
+        )
 
         let detail = try slice(
             "private struct ChekinanaIdolDetailView",
             "private struct ChekinanaIdolLinkedEventsView"
         )
-        XCTAssertTrue(detail.contains("Button(\"Edit\")"))
+        XCTAssertTrue(detail.contains("Button(ChekinanaL10n.message(\"Edit\"))"))
         XCTAssertTrue(detail.contains("chekinana.idols.detail.edit"))
         XCTAssertTrue(detail.contains("onDeleted:"))
         XCTAssertFalse(detail.contains("Menu {"))
@@ -11936,44 +22546,37 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertLessThan(previewGuard, acceptedItem)
         XCTAssertLessThan(acceptedItem, clearsRemoval)
         let localInvalidation = try XCTUnwrap(
-            avatarChangeSource.range(of: "invalidatingCataloguePreparation")?.lowerBound
+            avatarChangeSource.range(of: "invalidateCataloguePreparation()")?.lowerBound
         )
         let localLoad = try XCTUnwrap(
             avatarChangeSource.range(of: "ChekinanaProductMediaLoader.load(item)")?.lowerBound
         )
         XCTAssertLessThan(localInvalidation, localLoad)
-        XCTAssertTrue(avatarChangeSource.contains(
-            "isPreparingCatalogueAvatar = invalidation.isPreparingCatalogueAvatar"
-        ))
+        XCTAssertTrue(avatarChangeSource.contains("cataloguePreparationTask"))
 
         let modeChange = try slice(
             ".onChange(of: mode)",
             ".onChange(of: avatarPickerItem)"
         )
-        XCTAssertTrue(modeChange.contains("invalidatingCataloguePreparation"))
-        XCTAssertTrue(modeChange.contains(
-            "isPreparingCatalogueAvatar = invalidation.isPreparingCatalogueAvatar"
-        ))
+        XCTAssertTrue(modeChange.contains("invalidateCataloguePreparation()"))
         XCTAssertTrue(modeChange.contains("isPreparingAvatarPreview = false"))
         XCTAssertTrue(modeChange.contains("if avatarItem == nil"))
         XCTAssertTrue(modeChange.contains("avatarPickerItem = nil"))
         XCTAssertTrue(modeChange.contains("avatarPreview = nil"))
         XCTAssertTrue(modeChange.contains("selectedCatalogueCandidate = nil"))
 
-        let avatarRemove = try XCTUnwrap(
-            idolEditor.range(of: "ChekinanaIdolAvatarSelectionPolicy.afterDelete(")
-        )
+        let avatarRemove = try XCTUnwrap(idolEditor.range(of: "Button(role: .destructive)"))
         let avatarRemoveSource = idolEditor[avatarRemove.lowerBound...]
-        XCTAssertTrue(avatarRemoveSource.contains(
-            "isPreparingCatalogueAvatar = next.isPreparingCatalogueAvatar"
-        ))
+        XCTAssertTrue(avatarRemoveSource.contains("invalidateCataloguePreparation()"))
+        XCTAssertTrue(avatarRemoveSource.contains("removesAvatar = true"))
 
         let catalogueSelection = try slice(
             "private func select(_ rawCandidate: ChekinanaEnrichedIdol)",
             "private func save(generation: Int)"
         )
+        XCTAssertTrue(catalogueSelection.contains("cataloguePreparationTask = Task"))
         XCTAssertTrue(catalogueSelection.contains(
-            "ChekinanaIdolAvatarSelectionPolicy.acceptsCatalogueCompletion("
+            "defer { releaseCataloguePreparation(ifOwnedBy: owner) }"
         ))
 
         let localizationURL = productSourceURL
@@ -11996,6 +22599,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(idolEditor.contains("birthday.day-wheel"))
         XCTAssertTrue(idolEditor.contains("ChekinanaExpandableMonthDayWheels("))
         XCTAssertTrue(idolEditor.contains("ChekinanaExpandableDateWheel("))
+        XCTAssertTrue(idolEditor.contains("private let birthdayCalendar: Calendar"))
+        XCTAssertTrue(idolEditor.contains("calendar: birthdayCalendar"))
+        XCTAssertTrue(idolEditor.contains("timeZone: birthdayCalendar.timeZone"))
+        XCTAssertTrue(idolEditor.contains(".unknownYearMonthDay("))
+        XCTAssertTrue(idolEditor.contains(".fullDateDraft("))
+        XCTAssertTrue(idolEditor.contains("if birthdayWasEdited {"))
+        XCTAssertTrue(idolEditor.contains("storedBirthday = birthdaySourceValue"))
         XCTAssertFalse(idolEditor.contains("birthday.month-day-calendar"))
         XCTAssertTrue(idolEditor.contains("pendingPatternRemovalIndex = index"))
         XCTAssertTrue(idolEditor.contains("idols.pattern.remove.confirm.title"))
@@ -12019,7 +22629,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "@ViewBuilder private func mediaSummaryRow(",
             "private func mediaItems("
         )
-        XCTAssertTrue(mediaSummary.contains("value: total.formatted()"))
+        XCTAssertTrue(mediaSummary.contains("value: total.formatted(.number.locale(ChekinanaLanguagePreference.displayLocale()))"))
         XCTAssertTrue(mediaSummary.contains("kind.countLabel(total)"))
         XCTAssertFalse(mediaSummary.contains(
             "value: kind.countLabel(count ?? items.count)"
@@ -12043,7 +22653,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(linkedEventPage.contains("hiddenIDs: hiddenIdols.hiddenIDs"))
         XCTAssertTrue(linkedEventPage.contains("@Query private var chekiRecords"))
         XCTAssertTrue(linkedEventPage.contains(
-            "group.chekis.isEmpty && group.records.isEmpty"
+            "ChekinanaCalendarIdolGroup.groups("
+        ))
+        XCTAssertTrue(linkedEventPage.contains(
+            "groupsByExactIdolCombination: true"
+        ))
+        XCTAssertTrue(linkedEventPage.contains(
+            "ChekinanaUnifiedChekiGroupPage("
         ))
         XCTAssertTrue(linkedEventPage.contains("calendar.no_records"))
         XCTAssertTrue(linkedEventPage.contains(
@@ -12061,13 +22677,26 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         XCTAssertTrue(expandableDate.contains("@State private var isExpanded = false"))
         XCTAssertTrue(expandableDate.contains("isExpanded.toggle()"))
-        XCTAssertTrue(expandableDate.contains("ChekinanaProductDate.displayString(selection)"))
+        XCTAssertTrue(expandableDate.contains("ChekinanaProductDate.wheelDisplayString("))
+        XCTAssertTrue(expandableDate.contains("ChekinanaProductDate.wheelAccessibilityDate("))
+        XCTAssertTrue(expandableDate.contains("timeZone: calendar.timeZone"))
+        XCTAssertEqual(
+            expandableDate.components(separatedBy: ".environment(\\.calendar, calendar)").count - 1,
+            2
+        )
+        XCTAssertEqual(
+            expandableDate.components(separatedBy: ".environment(\\.timeZone, calendar.timeZone)").count - 1,
+            2
+        )
         XCTAssertTrue(expandableDate.contains("displayedComponents: .date"))
         XCTAssertTrue(expandableDate.contains(".datePickerStyle(.wheel)"))
-        XCTAssertEqual(
-            source.components(separatedBy: "ChekinanaExpandableDateWheel(").count - 1,
-            16
-        )
+        XCTAssertTrue(expandableDate.contains(
+            "ChekinanaPersistedContentDatePolicy.displayedRange("
+        ))
+        XCTAssertTrue(expandableDate.contains("calendar: calendar"))
+        XCTAssertTrue(expandableDate.contains(
+            "constrainsToPersistedContentRange: Bool = true"
+        ))
         XCTAssertEqual(
             source.components(separatedBy: "displayedComponents: .date").count - 1,
             2
@@ -12082,6 +22711,15 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(monthDayWheels.contains("ChekinanaBirthdayEditorPolicy.dayRange(month: month)"))
         XCTAssertTrue(monthDayWheels.contains("accessibilityIdentifier(monthIdentifier)"))
         XCTAssertTrue(monthDayWheels.contains("accessibilityIdentifier(dayIdentifier)"))
+        XCTAssertEqual(
+            monthDayWheels.components(
+                separatedBy: ".frame(maxWidth: .infinity)"
+            ).count - 1,
+            3
+        )
+        XCTAssertTrue(source.contains(
+            "calendar: birthdayCalendar,\n                                constrainsToPersistedContentRange: false,\n                                accessibilityIdentifier: \"chekinana.idols.editor.birthday.date\""
+        ))
 
         let detachedIdolSelection = try slice(
             "private struct ChekinanaIdolSelectionView",
@@ -12148,6 +22786,34 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(timePicker.contains(".datePickerStyle(.wheel)"))
     }
 
+    func testLocalizedRootAppliesTabularDigitsAcrossEveryAppEntryPoint() throws {
+        let appSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaApp.swift")
+        let source = try String(contentsOf: appSourceURL, encoding: .utf8)
+        let rootStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaLocalizedRootView")?.lowerBound
+        )
+        let rootEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaDataStoreRecoveryView",
+            range: rootStart..<source.endIndex
+        )?.lowerBound)
+        let root = String(source[rootStart..<rootEnd])
+
+        XCTAssertTrue(root.contains("content\n            .monospacedDigit()"))
+        XCTAssertFalse(root.contains(".monospaced()"))
+        XCTAssertTrue(source.contains(
+            "rootView: ChekinanaLocalizedRootView(content: AnyView(recovery))"
+        ))
+        XCTAssertTrue(source.contains(
+            "rootView: ChekinanaLocalizedRootView(content: rootView)"
+        ))
+        XCTAssertTrue(source.contains("rootView = AnyView(ContentView())"))
+        XCTAssertTrue(source.contains("rootView = AnyView(ChekinanaProductShell())"))
+    }
+
     func testCalendarSelectedDayCompactsOnlyInterRowSpacing() throws {
         XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.sectionSpacing, 14)
         XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.recordSpacing, 8)
@@ -12158,6 +22824,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.thumbnailWidth, 38)
         XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.thumbnailHeight, 50)
         XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.thumbnailOverlap, -12)
+        XCTAssertEqual(ChekinanaCalendarSelectedDayLayout.idolAvatarSize, 46)
 
         let productSourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -12169,7 +22836,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             source.range(of: "private var selectedDayCard")?.lowerBound
         )
         let end = try XCTUnwrap(source.range(
-            of: "private func idolNames",
+            of: "private func openCalendarGroupEditor",
             range: start..<source.endIndex
         )?.lowerBound)
         let selectedDay = String(source[start..<end])
@@ -12182,10 +22849,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
         XCTAssertTrue(selectedDay.contains("HStack(spacing: 12)"))
         XCTAssertTrue(selectedDay.contains(".padding(12)"))
-        XCTAssertTrue(selectedDay.contains("size: 46"))
-        XCTAssertTrue(selectedDay.contains("width: 46,"))
-        XCTAssertTrue(selectedDay.contains("height: 46"))
-        XCTAssertTrue(selectedDay.contains(".frame(height: 62)"))
+        XCTAssertTrue(selectedDay.contains(
+            "size: ChekinanaCalendarSelectedDayLayout.idolAvatarSize"
+        ))
+        XCTAssertTrue(selectedDay.contains(
+            "width: ChekinanaCalendarSelectedDayLayout.idolAvatarSize"
+        ))
+        XCTAssertTrue(selectedDay.contains(
+            "height: ChekinanaCalendarSelectedDayLayout.idolAvatarSize"
+        ))
+        XCTAssertTrue(selectedDay.contains("minHeight: 62"))
         XCTAssertEqual(
             selectedDay.components(
                 separatedBy: ".font(.subheadline.weight(.semibold))"
@@ -12195,6 +22868,51 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(selectedDay.contains(".font(.caption)"))
         XCTAssertTrue(selectedDay.contains(".lineLimit(1)"))
         XCTAssertTrue(selectedDay.contains(".truncationMode(.tail)"))
+        let countStart = try XCTUnwrap(selectedDay.range(
+            of: "Text(group.countLabels.joined(separator: \" · \"))"
+        )?.lowerBound)
+        let countEnd = try XCTUnwrap(selectedDay.range(
+            of: "Spacer(minLength: 0)",
+            range: countStart..<selectedDay.endIndex
+        )?.lowerBound)
+        let countLabel = selectedDay[countStart..<countEnd]
+        XCTAssertTrue(countLabel.contains(".layoutPriority(1)"))
+        XCTAssertFalse(countLabel.contains(".lineLimit(1)"))
+        XCTAssertFalse(countLabel.contains(".fixedSize("))
+        XCTAssertFalse(countLabel.contains(".minimumScaleFactor("))
+        XCTAssertTrue(selectedDay.contains(
+            "}\n                                .layoutPriority(1)\n"
+                + "                                Spacer(minLength: 0)"
+        ))
+        let thumbnailStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaCalendarThumbnailStrip: View"
+        )?.lowerBound)
+        let thumbnailEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaCalendarThumbnail: View",
+            range: thumbnailStart..<source.endIndex
+        )?.lowerBound)
+        let thumbnailStrip = source[thumbnailStart..<thumbnailEnd]
+        XCTAssertTrue(thumbnailStrip.contains(
+            "HStack(spacing: ChekinanaCalendarSelectedDayLayout.thumbnailOverlap)"
+        ))
+        XCTAssertTrue(thumbnailStrip.contains(
+            "ForEach(Array(chekis.prefix(5)))"
+        ))
+        XCTAssertTrue(thumbnailStrip.contains(
+            "width: ChekinanaCalendarSelectedDayLayout.thumbnailWidth"
+        ))
+        XCTAssertTrue(thumbnailStrip.contains(
+            "height: ChekinanaCalendarSelectedDayLayout.thumbnailHeight"
+        ))
+        XCTAssertTrue(thumbnailStrip.contains(
+            "count: min(chekis.count, 5)"
+        ))
+        XCTAssertTrue(thumbnailStrip.contains("alignment: .trailing"))
+        XCTAssertTrue(thumbnailStrip.contains(".clipped()"))
+        XCTAssertFalse(thumbnailStrip.contains("GeometryReader"))
+        XCTAssertFalse(thumbnailStrip.contains("scaleEffect"))
+        XCTAssertFalse(thumbnailStrip.contains("layoutPriority"))
+        XCTAssertFalse(source.contains("thumbnailScale("))
         XCTAssertFalse(selectedDay.contains("eventVerticalPadding"))
         XCTAssertFalse(selectedDay.contains("eventHorizontalPadding"))
         XCTAssertFalse(selectedDay.contains("minimumHitHeight"))
@@ -12210,9 +22928,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         XCTAssertTrue(source.contains("reorderEnabled: false"))
         XCTAssertTrue(source.contains("private func beginDrag(_ idolID: UUID)"))
+        XCTAssertTrue(source.contains("private struct ChekinanaLongPressReorderHandle"))
         XCTAssertTrue(source.contains("private var dragGesture: some Gesture"))
-        XCTAssertTrue(source.contains("if reorderEnabled {"))
-        XCTAssertTrue(source.contains("else {\n            EmptyView()"))
+        XCTAssertTrue(source.contains("isEnabled: reorderEnabled"))
+        XCTAssertTrue(source.contains("@State private var reorderState = ChekinanaLongPressReorderState()"))
     }
 
     func testEditChekiExplicitlyClearsAssociationsWithoutClearingOmittedFields() async throws {
@@ -12224,7 +22943,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             name: "Outside Window",
             date: utcDate(2026, 8, 10)
         )
-        let cheki = Cheki(idols: [idol], event: event, date: date, idx: 1, note: "before")
+        let cheki = MediaItem(idols: [idol], event: event, date: date, idx: 1, imageRef: "association.jpg", note: "before")
         fixture.context.insert(idol)
         fixture.context.insert(event)
         fixture.context.insert(outsideWindow)
@@ -12277,8 +22996,49 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(cheki.idols.isEmpty)
         XCTAssertNil(cheki.event)
         XCTAssertNil(cheki.date)
-        XCTAssertNil(cheki.idx)
+        XCTAssertEqual(cheki.idx, 1)
         XCTAssertEqual(cheki.note, "after")
+    }
+
+    func testConfirmedChekiSizeEditReplacesManagedPixelsAndMetadataTogether() async throws {
+        let fixture = try makeFixture()
+        let chekiID = UUID()
+        let original = try await ChekinanaLocalImportChekiProcessor.standardizedForSave(
+            scannerJPEGData(
+                color: .orange,
+                size: CGSize(width: 200, height: 159)
+            ),
+            size: .mini
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original.data,
+            id: chekiID,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(
+            id: chekiID,
+            size: .mini,
+            imageRef: saved.ref
+        )
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+
+        guard case .pendingChekiCards(_, let cards, _) = await fixture.executor.execute(
+            "editcheki \(shortID(cheki.id)) size=wide"
+        ), let code = cards.first?.confirmationCode else {
+            return XCTFail("expected size edit confirmation")
+        }
+        try requireSuccess(await fixture.executor.execute("confirm \(code)"))
+
+        XCTAssertEqual(cheki.size, .wide)
+        let dimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(
+                in: Data(contentsOf: saved.url)
+            )
+        )
+        XCTAssertEqual(dimensions.width, 2_400)
+        XCTAssertEqual(dimensions.height, 1_908)
     }
 
 #if DEBUG
@@ -13015,14 +23775,158 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testCoreMLPatternEncoderLoadsAndReturnsNormalized256Vector() async throws {
-        let embedding = try await ChekinanaPatternEncoder.shared.encode(
-            scannerPNGData(color: .orange)
+    func testScanIdolRecognitionDoesNotReuseFirstResultEmbedding() async throws {
+        let firstImage = scannerPNGData(color: .red)
+        let secondImage = scannerPNGData(color: .blue)
+        var firstEmbedding = Array(repeating: Float.zero, count: 256)
+        firstEmbedding[0] = 1
+        var secondEmbedding = Array(repeating: Float.zero, count: 256)
+        secondEmbedding[1] = 1
+        let fixture = try makeFixture(
+            scannerProcess: { _, _ in
+                ChekinanaScannerProcessResult(
+                    images: [firstImage, secondImage],
+                    warningCount: 0
+                )
+            },
+            patternEncode: { data in
+                if data == firstImage { return firstEmbedding }
+                if data == secondImage { return secondEmbedding }
+                throw ScannerMockError.failed
+            }
         )
+        let first = Idol(name: "First")
+        first.patterns = [firstEmbedding]
+        let second = Idol(name: "Second")
+        second.patterns = [secondEmbedding]
+        fixture.context.insert(first)
+        fixture.context.insert(second)
+        try fixture.context.save()
+
+        let response = await fixture.executor.execute(
+            "scancheki idol_recognition=true candidates="
+                + "\(first.id.uuidString.lowercased()),"
+                + "\(second.id.uuidString.lowercased()),unassigned",
+            pendingChekiImages: [testImage(1)]
+        )
+
+        guard case .chekiScannedCards(2, 0, let cards) = response else {
+            return XCTFail("expected two independently recognized cards")
+        }
+        let resolved = try cards.map {
+            try fixture.ledger.resolveTemporaryCheki(shortID($0.id)).idolIDs
+        }
+        XCTAssertEqual(resolved, [[first.id], [second.id]])
+    }
+
+    func testCoreMLPatternEncoderLoadsAndReturnsNormalized256Vector() async throws {
+        let imageData = scannerPNGData(color: .orange)
+        let result = try await ChekinanaPatternEncoder.shared.comparisonEncoding(
+            imageData
+        )
+        let embedding = try await ChekinanaPatternEncoder.shared.encode(imageData)
+        XCTAssertEqual(result.raw.count, 256)
+        XCTAssertTrue(result.raw.allSatisfy(\.isFinite))
         XCTAssertEqual(embedding.count, 256)
         XCTAssertTrue(embedding.allSatisfy(\.isFinite))
+        XCTAssertEqual(embedding, result.normalized)
         let norm = sqrt(embedding.reduce(Float.zero) { $0 + $1 * $1 })
         XCTAssertEqual(norm, 1, accuracy: 0.0001)
+    }
+
+    func testDINOComparisonCaptureIsDedicatedBuildOnlyAndKeepsExactInput() throws {
+        func excerpt(_ source: String, from start: String, to end: String) throws
+            -> String
+        {
+            let lower = try XCTUnwrap(source.range(of: start)?.lowerBound)
+            let upper = try XCTUnwrap(source.range(
+                of: end,
+                range: lower..<source.endIndex
+            )?.lowerBound)
+            return String(source[lower..<upper])
+        }
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaPatternEncoder.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let capture = try excerpt(
+            source,
+            from: "#if DEBUG && CHEKINANA_DINO_DEBUG_CAPTURE",
+            to: "#if DEBUG\nenum ChekinanaPatternDebugFixture"
+        )
+        XCTAssertTrue(capture.contains("try imageData.write("))
+        XCTAssertTrue(capture.contains("rawVectorFile"))
+        XCTAssertTrue(capture.contains("normalizedVectorFile"))
+        XCTAssertTrue(capture.contains("manifest.json"))
+        XCTAssertTrue(capture.contains("computeUnits: \"all\""))
+        XCTAssertTrue(capture.contains(
+            "vectorDType: ChekinanaDINOFloat32Encoding.dtype"
+        ))
+        XCTAssertTrue(capture.contains(
+            "vectorByteOrder: ChekinanaDINOFloat32Encoding.byteOrder"
+        ))
+        XCTAssertTrue(capture.contains("rawIsFinite"))
+        XCTAssertTrue(capture.contains("normalizedIsFinite"))
+
+        let encoder = try excerpt(
+            source,
+            from: "actor ChekinanaPatternEncoder",
+            to: "enum ChekinanaPatternImagePreprocessor"
+        )
+        XCTAssertTrue(encoder.contains(
+            "#if DEBUG && CHEKINANA_DINO_DEBUG_CAPTURE"
+        ))
+        XCTAssertTrue(encoder.contains("raw: result.raw"))
+        XCTAssertTrue(encoder.contains("normalized: result.normalized"))
+        XCTAssertTrue(encoder.contains("return result.normalized"))
+
+        XCTAssertEqual(ChekinanaDINOFloat32Encoding.dtype, "float32")
+        XCTAssertEqual(
+            ChekinanaDINOFloat32Encoding.byteOrder,
+            "little-endian"
+        )
+        let encoded = ChekinanaDINOFloat32Encoding.data([1, -2.5])
+        XCTAssertEqual(
+            Array(encoded),
+            [0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x20, 0xc0]
+        )
+    }
+
+    func testDINOComparisonRunnerFromEnvironment() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let inputPath = environment["CHEKINANA_DINO_COMPARISON_INPUT"],
+              let outputPath = environment["CHEKINANA_DINO_COMPARISON_OUTPUT"] else {
+            throw XCTSkip(
+                "Set CHEKINANA_DINO_COMPARISON_INPUT and "
+                    + "CHEKINANA_DINO_COMPARISON_OUTPUT to run the local comparator."
+            )
+        }
+        let inputURL = URL(fileURLWithPath: inputPath)
+        let outputURL = URL(fileURLWithPath: outputPath, isDirectory: true)
+        let inputData = try Data(contentsOf: inputURL)
+        let result = try await ChekinanaPatternEncoder.shared.comparisonEncoding(
+            inputData
+        )
+        try FileManager.default.createDirectory(
+            at: outputURL,
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted]
+        let rawData = try encoder.encode(result.raw)
+        let normalizedData = try encoder.encode(result.normalized)
+        try rawData.write(
+            to: outputURL.appendingPathComponent("mac-raw.json"),
+            options: .atomic
+        )
+        try normalizedData.write(
+            to: outputURL.appendingPathComponent("mac-normalized.json"),
+            options: .atomic
+        )
+        XCTAssertEqual(result.raw.count, 256)
+        XCTAssertEqual(result.normalized.count, 256)
     }
 
     func testProgrammaticRGBFixtureMatchesPythonPreprocessAndPyTorchGolden() async throws {
@@ -13292,6 +24196,274 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
     }
 
+    func testDateOnlyEditorSessionRoundTripsPositiveNegativeDSTAndNonGregorianSystems() throws {
+        let cases: [(Calendar.Identifier, String, Date)] = [
+            (.gregorian, "America/Los_Angeles", utcDate(2026, 3, 8)),
+            (.gregorian, "America/Los_Angeles", utcDate(2026, 11, 1)),
+            (.gregorian, "Pacific/Kiritimati", utcDate(2026, 1, 1)),
+            (.buddhist, "America/Los_Angeles", utcDate(2026, 8, 4)),
+            (.japanese, "Asia/Shanghai", utcDate(2026, 12, 31)),
+        ]
+
+        for (identifier, timeZoneIdentifier, canonical) in cases {
+            var systemCalendar = Calendar(identifier: identifier)
+            systemCalendar.timeZone = try XCTUnwrap(
+                TimeZone(identifier: timeZoneIdentifier)
+            )
+            let session = ChekinanaDateOnlyEditorSession(
+                systemCalendar: systemCalendar
+            )
+            let displayed = try XCTUnwrap(session.displayDate(from: canonical))
+            let expected = ChekinanaDateOnly.components(canonical)
+            let actual = session.calendar.dateComponents(
+                [.year, .month, .day, .hour],
+                from: displayed
+            )
+
+            XCTAssertEqual(session.calendar.identifier, .gregorian)
+            XCTAssertEqual(session.calendar.timeZone, systemCalendar.timeZone)
+            XCTAssertEqual(actual.year, expected.year, timeZoneIdentifier)
+            XCTAssertEqual(actual.month, expected.month, timeZoneIdentifier)
+            XCTAssertEqual(actual.day, expected.day, timeZoneIdentifier)
+            XCTAssertEqual(actual.hour, 12, timeZoneIdentifier)
+            XCTAssertEqual(
+                session.canonicalDate(from: displayed),
+                canonical,
+                timeZoneIdentifier
+            )
+        }
+    }
+
+    func testDateOnlyEditorSessionPreservesCollapsedAndNoteCountOnlyDraftsAndRealDateChanges() throws {
+        var openingCalendar = Calendar(identifier: .buddhist)
+        openingCalendar.timeZone = try XCTUnwrap(
+            TimeZone(identifier: "America/Los_Angeles")
+        )
+        let session = ChekinanaDateOnlyEditorSession(
+            systemCalendar: openingCalendar
+        )
+        let originalCanonical = utcDate(2026, 11, 1)
+        let untouchedDraft = try XCTUnwrap(
+            session.displayDate(from: originalCanonical)
+        )
+
+        var note = "before"
+        var count = 1
+        note = "after"
+        count = 3
+        XCTAssertEqual(note, "after")
+        XCTAssertEqual(count, 3)
+        XCTAssertEqual(
+            session.canonicalDate(from: untouchedDraft),
+            originalCanonical
+        )
+
+        let changedDraft = try XCTUnwrap(session.calendar.date(
+            byAdding: .day,
+            value: 1,
+            to: untouchedDraft
+        ))
+        XCTAssertEqual(
+            session.canonicalDate(from: changedDraft),
+            utcDate(2026, 11, 2)
+        )
+    }
+
+    func testDateOnlyEditorSessionKeepsOpeningTimeZoneAfterSystemCalendarChanges() throws {
+        var openingCalendar = Calendar(identifier: .gregorian)
+        openingCalendar.timeZone = try XCTUnwrap(
+            TimeZone(identifier: "America/Los_Angeles")
+        )
+        let session = ChekinanaDateOnlyEditorSession(
+            systemCalendar: openingCalendar
+        )
+        let canonical = utcDate(2026, 8, 4)
+        let displayed = try XCTUnwrap(session.displayDate(from: canonical))
+
+        openingCalendar.timeZone = try XCTUnwrap(
+            TimeZone(identifier: "Pacific/Kiritimati")
+        )
+
+        XCTAssertEqual(
+            session.calendar.timeZone.identifier,
+            "America/Los_Angeles"
+        )
+        XCTAssertEqual(session.canonicalDate(from: displayed), canonical)
+    }
+
+    func testDateOnlyEditorSavedDaySurvivesNewContextAndBackupPayloadRoundTrip() throws {
+        var systemCalendar = Calendar(identifier: .gregorian)
+        systemCalendar.timeZone = try XCTUnwrap(
+            TimeZone(identifier: "America/Los_Angeles")
+        )
+        let session = ChekinanaDateOnlyEditorSession(
+            systemCalendar: systemCalendar
+        )
+        let canonical = utcDate(2026, 3, 8)
+        let displayed = try XCTUnwrap(session.displayDate(from: canonical))
+        let saved = try XCTUnwrap(session.canonicalDate(from: displayed))
+        let schema = Schema(versionedSchema: ChekinanaSchemaV16.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: true
+            )
+        )
+        let writeContext = ModelContext(container)
+        let idol = Idol(name: "Date boundary Idol")
+        writeContext.insert(idol)
+        writeContext.insert(ChekiRecord(
+            idols: [idol],
+            date: saved,
+            size: .mini,
+            note: "date-only",
+            count: 2
+        ))
+        try writeContext.save()
+
+        let readContext = ModelContext(container)
+        let reread = try XCTUnwrap(
+            readContext.fetch(FetchDescriptor<ChekiRecord>()).first
+        )
+        XCTAssertEqual(reread.date.map(ChekinanaDateOnly.string), "2026-03-08")
+
+        let snapshot = try ChekinanaDataExportSnapshot.capture(in: readContext)
+        let backupJSON = try JSONSerialization.data(
+            withJSONObject: snapshot.data,
+            options: [.sortedKeys]
+        )
+        let payload = try JSONDecoder().decode(
+            ChekinanaDataImportPayload.self,
+            from: backupJSON
+        )
+        let backupDate = try XCTUnwrap(payload.entities.chekiRecords.first?.date)
+        let restoredCarrier = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: backupDate)
+        )
+
+        XCTAssertEqual(backupDate, ISO8601DateFormatter().string(from: canonical))
+        XCTAssertEqual(ChekinanaDateOnly.string(restoredCarrier), "2026-03-08")
+    }
+
+    func testExpandableDateWheelUsesShanghaiCalendarDayBeforeEightAM() throws {
+        let shanghai = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let localSixFortyFour = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2026-08-28T22:44:00Z")
+        )
+
+        let summary = ChekinanaProductDate.wheelDisplayString(
+            localSixFortyFour,
+            timeZone: shanghai
+        )
+        let accessibility = ChekinanaProductDate.wheelAccessibilityDate(
+            localSixFortyFour,
+            timeZone: shanghai
+        )
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = shanghai
+        let wheelComponents = calendar.dateComponents(
+            [.year, .month, .day],
+            from: localSixFortyFour
+        )
+
+        XCTAssertEqual(wheelComponents.year, 2026)
+        XCTAssertEqual(wheelComponents.month, 8)
+        XCTAssertEqual(wheelComponents.day, 29)
+        XCTAssertTrue(summary.contains("29"), summary)
+        XCTAssertTrue(accessibility.contains("29"), accessibility)
+    }
+
+    func testGalleryImportEditorLocalizesAllVisibleFormCopy() throws {
+        let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testDirectory
+                .deletingLastPathComponent()
+                .appendingPathComponent("Chekinana/ChekinanaProductShell.swift"),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaGalleryImportEditor")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaGalleryMetadataEditor",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let editor = String(source[start..<end])
+
+        for key in [
+            "common.preview", "common.metadata", "common.include_date",
+            "common.date", "common.note", "common.cancel", "common.save",
+            "common.idols", "common.favorite", "common.posted_to_sns",
+        ] {
+            XCTAssertTrue(editor.contains("ChekinanaProductCopy.text(\"\(key)\""), key)
+        }
+        for literal in [
+            "Section(\"Preview\")", "Section(\"Metadata\")",
+            "Toggle(\"Include date\"", "TextField(\"Note\"",
+            "Button(\"Cancel\")", "Button(\"Save\")",
+        ] {
+            XCTAssertFalse(editor.contains(literal), literal)
+        }
+
+        let catalogueData = try Data(contentsOf: testDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana/Localizable.xcstrings"))
+        let catalogue = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: catalogueData) as? [String: Any]
+        )
+        let strings = try XCTUnwrap(catalogue["strings"] as? [String: Any])
+        let touchedKeys = [
+            "product.common.preview", "product.common.metadata",
+            "product.common.include_date", "product.common.date",
+            "product.common.note", "product.common.cancel", "product.common.save",
+            "product.common.idols", "product.common.favorite",
+            "product.common.posted_to_sns",
+        ]
+        for key in touchedKeys {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let localizations = try XCTUnwrap(
+                entry["localizations"] as? [String: Any],
+                key
+            )
+            for language in ["en", "ja", "zh-Hans", "zh-Hant"] {
+                let localization = try XCTUnwrap(
+                    localizations[language] as? [String: Any],
+                    "\(key).\(language)"
+                )
+                let unit = try XCTUnwrap(
+                    localization["stringUnit"] as? [String: Any],
+                    "\(key).\(language)"
+                )
+                let value = try XCTUnwrap(
+                    unit["value"] as? String,
+                    "\(key).\(language)"
+                )
+                XCTAssertFalse(
+                    value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    "\(key).\(language)"
+                )
+            }
+        }
+    }
+
+
+    func testScannerProductionNetworkPolicyUsesSystemProxyRoute() {
+        let configuration = ChekinanaScannerNetworkPolicy
+            .productionSessionConfiguration()
+
+        XCTAssertNil(configuration.connectionProxyDictionary)
+        XCTAssertEqual(
+            configuration.requestCachePolicy,
+            .reloadIgnoringLocalAndRemoteCacheData
+        )
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertFalse(configuration.httpShouldSetCookies)
+        XCTAssertTrue(configuration.waitsForConnectivity)
+        XCTAssertNotNil(configuration.urlCredentialStorage)
+        XCTAssertEqual(ChekinanaScannerRuntimeClient.statusRequestTimeout, 25)
+    }
 
     func testScannerRuntimeClientUsesOneWebSocketUntilReadyAndSendsNoSecret() async throws {
         let probe = ScannerRuntimeFailureProbe()
@@ -13585,71 +24757,231 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testScanGPUPreflightAllowsOfflineImportAndBlocksGPUOrMixedQueues() {
-        let closed = ChekinanaScannerRuntimeStatus(
-            state: .closed,
-            phase: "closed",
-            retryAllowed: true
+    func testScannerRouterUsesDirectOrLocalWithoutCallingRemote() async throws {
+        var directCalls = 0
+        var remoteCalls = 0
+        var localCalls = 0
+        let processes = scannerRouterProcesses(
+            direct: { _, _ in
+                directCalls += 1
+                return self.scannerRouterResult(0x11)
+            },
+            remote: { _, _, _, _, _ in
+                remoteCalls += 1
+                return self.scannerRouterResult(0x22)
+            },
+            local: { _, _, _, _ in
+                localCalls += 1
+                return self.scannerRouterResult(0x33)
+            }
         )
-        let ready = ChekinanaScannerRuntimeStatus(
-            state: .ready,
-            phase: "ready",
-            retryAllowed: false
-        )
-        XCTAssertEqual(
-            ChekinanaScanGPUPreflight.decision(
-                status: closed,
-                hasGPUInput: false,
-                hasDirectInput: true
+
+        let direct = try await ChekinanaScannerRouter.process(
+            testImage(0x01),
+            options: scannerOptions(
+                dateRecognitionEnabled: false,
+                directInputEnabled: true
             ),
-            .allowDirectOnly
+            usesLocalDirectProcessing: true,
+            usesRemoteScanner: true,
+            progressObserver: nil,
+            resultObserver: nil,
+            taskIDObserver: nil,
+            processes: processes
         )
-        XCTAssertEqual(
-            ChekinanaScanGPUPreflight.decision(
-                status: closed,
-                hasGPUInput: true,
-                hasDirectInput: false
-            ),
-            .blockGPUOnly
+        let local = try await ChekinanaScannerRouter.process(
+            testImage(0x02),
+            options: scannerOptions(dateRecognitionEnabled: false),
+            usesLocalDirectProcessing: true,
+            usesRemoteScanner: false,
+            progressObserver: nil,
+            resultObserver: nil,
+            taskIDObserver: nil,
+            processes: processes
         )
-        XCTAssertEqual(
-            ChekinanaScanGPUPreflight.decision(
-                status: nil,
-                hasGPUInput: true,
-                hasDirectInput: true
-            ),
-            .blockMixed
+
+        XCTAssertEqual(direct.images.first?.data, Data([0x11]))
+        XCTAssertEqual(local.images.first?.data, Data([0x33]))
+        XCTAssertEqual(directCalls, 1)
+        XCTAssertEqual(remoteCalls, 0)
+        XCTAssertEqual(localCalls, 1)
+    }
+
+    func testScannerRouterReturnsSuccessfulRemoteResultWithoutLocalFallback() async throws {
+        var remoteCalls = 0
+        var localCalls = 0
+        let result = try await ChekinanaScannerRouter.process(
+            testImage(0x01),
+            options: scannerOptions(dateRecognitionEnabled: false),
+            usesLocalDirectProcessing: true,
+            usesRemoteScanner: true,
+            progressObserver: nil,
+            resultObserver: nil,
+            taskIDObserver: nil,
+            processes: scannerRouterProcesses(
+                remote: { _, _, _, _, _ in
+                    remoteCalls += 1
+                    return self.scannerRouterResult(0x44)
+                },
+                local: { _, _, _, _ in
+                    localCalls += 1
+                    return self.scannerRouterResult(0x55)
+                }
+            )
         )
-        XCTAssertEqual(
-            ChekinanaScanGPUPreflight.decision(
-                status: ready,
-                hasGPUInput: true,
-                hasDirectInput: true
-            ),
-            .allowAll
+
+        XCTAssertEqual(result.images.first?.data, Data([0x44]))
+        XCTAssertEqual(remoteCalls, 1)
+        XCTAssertEqual(localCalls, 0)
+    }
+
+    func testScannerRouterFallsBackLocallyWhenRemoteFailsBeforePublishing() async throws {
+        var localCalls = 0
+        var publishedMarkers: [UInt8] = []
+        let result = try await ChekinanaScannerRouter.process(
+            testImage(0x01),
+            options: scannerOptions(dateRecognitionEnabled: false),
+            usesLocalDirectProcessing: true,
+            usesRemoteScanner: true,
+            progressObserver: nil,
+            resultObserver: { _, image in
+                if let marker = image.data.first { publishedMarkers.append(marker) }
+            },
+            taskIDObserver: nil,
+            processes: scannerRouterProcesses(
+                remote: { _, _, _, _, _ in
+                    throw ScannerRouterTestError.remoteFailed
+                },
+                local: { _, _, _, observer in
+                    localCalls += 1
+                    let image = self.scannerRouterImage(0x66)
+                    observer?(0, image)
+                    return ChekinanaScannerProcessResult(images: [image], warningCount: 0)
+                }
+            )
         )
-        XCTAssertTrue(ChekinanaTemporaryGPUManagementPolicy.runtimeRequestsEnabled)
-        XCTAssertEqual(
-            ChekinanaTemporaryGPUManagementPolicy.preflight(
-                hasGPUInput: false,
-                hasDirectInput: true
-            ),
-            .allowDirectOnly
+
+        XCTAssertEqual(result.images.first?.data, Data([0x66]))
+        XCTAssertEqual(localCalls, 1)
+        XCTAssertEqual(publishedMarkers, [0x66])
+    }
+
+    func testScannerRouterDoesNotFallbackAfterRemotePublishesFirstResult() async {
+        var localCalls = 0
+        var publishedMarkers: [UInt8] = []
+        do {
+            _ = try await ChekinanaScannerRouter.process(
+                testImage(0x01),
+                options: scannerOptions(dateRecognitionEnabled: false),
+                usesLocalDirectProcessing: true,
+                usesRemoteScanner: true,
+                progressObserver: nil,
+                resultObserver: { _, image in
+                    if let marker = image.data.first { publishedMarkers.append(marker) }
+                },
+                taskIDObserver: nil,
+                processes: scannerRouterProcesses(
+                    remote: { _, _, _, observer, _ in
+                        observer?(0, self.scannerRouterImage(0x77))
+                        throw ScannerRouterTestError.remoteFailed
+                    },
+                    local: { _, _, _, _ in
+                        localCalls += 1
+                        return self.scannerRouterResult(0x88)
+                    }
+                )
+            )
+            XCTFail("Expected the remote failure to be preserved")
+        } catch {
+            XCTAssertEqual(error as? ScannerRouterTestError, .remoteFailed)
+        }
+
+        XCTAssertEqual(localCalls, 0)
+        XCTAssertEqual(publishedMarkers, [0x77])
+    }
+
+    func testScannerRouterDoesNotFallbackAfterCancellation() async {
+        var localCalls = 0
+        do {
+            _ = try await ChekinanaScannerRouter.process(
+                testImage(0x01),
+                options: scannerOptions(dateRecognitionEnabled: false),
+                usesLocalDirectProcessing: true,
+                usesRemoteScanner: true,
+                progressObserver: nil,
+                resultObserver: nil,
+                taskIDObserver: nil,
+                processes: scannerRouterProcesses(
+                    remote: { _, _, _, _, _ in throw CancellationError() },
+                    local: { _, _, _, _ in
+                        localCalls += 1
+                        return self.scannerRouterResult(0x99)
+                    }
+                )
+            )
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(localCalls, 0)
+    }
+
+    func testScannerRouterNilObserverFallsBackAndPublicationBoundaryDoesNotDuplicate() async throws {
+        var nilObserverRemoteWasNil = false
+        var nilObserverLocalCalls = 0
+        let nilObserverResult = try await ChekinanaScannerRouter.process(
+            testImage(0x01),
+            options: scannerOptions(dateRecognitionEnabled: false),
+            usesLocalDirectProcessing: true,
+            usesRemoteScanner: true,
+            progressObserver: nil,
+            resultObserver: nil,
+            taskIDObserver: nil,
+            processes: scannerRouterProcesses(
+                remote: { _, _, _, observer, _ in
+                    nilObserverRemoteWasNil = observer == nil
+                    throw ScannerRouterTestError.remoteFailed
+                },
+                local: { _, _, _, _ in
+                    nilObserverLocalCalls += 1
+                    return self.scannerRouterResult(0xA1)
+                }
+            )
         )
-        XCTAssertEqual(
-            ChekinanaTemporaryGPUManagementPolicy.preflight(
-                hasGPUInput: true,
-                hasDirectInput: false
-            ),
-            .blockGPUOnly
-        )
-        XCTAssertEqual(
-            ChekinanaTemporaryGPUManagementPolicy.preflight(
-                hasGPUInput: true,
-                hasDirectInput: true
-            ),
-            .blockMixed
-        )
+        XCTAssertTrue(nilObserverRemoteWasNil)
+        XCTAssertEqual(nilObserverLocalCalls, 1)
+        XCTAssertEqual(nilObserverResult.images.first?.data, Data([0xA1]))
+
+        var localCallsAfterPublication = 0
+        var publishedMarkers: [UInt8] = []
+        do {
+            _ = try await ChekinanaScannerRouter.process(
+                testImage(0x02),
+                options: scannerOptions(dateRecognitionEnabled: false),
+                usesLocalDirectProcessing: true,
+                usesRemoteScanner: true,
+                progressObserver: nil,
+                resultObserver: { _, image in
+                    if let marker = image.data.first { publishedMarkers.append(marker) }
+                },
+                taskIDObserver: nil,
+                processes: scannerRouterProcesses(
+                    remote: { _, _, _, observer, _ in
+                        observer?(0, self.scannerRouterImage(0xA2))
+                        throw ScannerRouterTestError.remoteFailed
+                    },
+                    local: { _, _, _, _ in
+                        localCallsAfterPublication += 1
+                        return self.scannerRouterResult(0xA3)
+                    }
+                )
+            )
+            XCTFail("Expected the first publication to disable fallback")
+        } catch {
+            XCTAssertEqual(error as? ScannerRouterTestError, .remoteFailed)
+        }
+        XCTAssertEqual(localCallsAfterPublication, 0)
+        XCTAssertEqual(publishedMarkers, [0xA2])
     }
 
     func testRuntimeConfirmationSchedulerUsesOneExactDelayPerTrigger() async {
@@ -14245,6 +25577,62 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(annotation.text, "2026.08.05")
     }
 
+    func testLocalImportWhiteBalanceAcceptsBrightCyanBorderAndNeutralizesIt() async throws {
+        XCTAssertEqual(
+            ChekinanaLocalImportChekiProcessor.whiteBalanceMinimumChannelValue,
+            140
+        )
+        let cyanCast = UIColor(
+            red: 150.0 / 255.0,
+            green: 200.0 / 255.0,
+            blue: 220.0 / 255.0,
+            alpha: 1
+        )
+        let source = scannerJPEGData(
+            color: cyanCast,
+            size: CGSize(width: 300, height: 477)
+        )
+
+        let unbalanced = try await ChekinanaLocalImportChekiProcessor.normalize(
+            source,
+            appliesWhiteBalance: false
+        )
+        let balanced = try await ChekinanaLocalImportChekiProcessor.normalize(
+            source,
+            appliesWhiteBalance: true
+        )
+
+        XCTAssertFalse(unbalanced.whiteBalanceApplied)
+        XCTAssertTrue(balanced.whiteBalanceApplied)
+        let before = try rgbaPixel(unbalanced.data, x: 10, y: 10)
+        let after = try rgbaPixel(balanced.data, x: 10, y: 10)
+        func channelSpread(
+            _ pixel: (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)
+        ) -> Int {
+            let channels = [Int(pixel.red), Int(pixel.green), Int(pixel.blue)]
+            return channels.max()! - channels.min()!
+        }
+        XCTAssertGreaterThan(channelSpread(before), 25)
+        XCTAssertLessThan(channelSpread(after), channelSpread(before))
+
+        let landscape = try await ChekinanaLocalImportChekiProcessor.normalize(
+            scannerJPEGData(
+                color: cyanCast,
+                size: CGSize(width: 477, height: 300)
+            ),
+            appliesWhiteBalance: true
+        )
+        XCTAssertTrue(landscape.whiteBalanceApplied)
+        let landscapeAfter = try rgbaPixel(landscape.data, x: 10, y: 10)
+        XCTAssertLessThan(channelSpread(landscapeAfter), channelSpread(before))
+
+        let standardized = try await ChekinanaLocalImportChekiProcessor
+            .standardizedForSave(source, size: .mini)
+        XCTAssertFalse(standardized.whiteBalanceApplied)
+        let standardizedPixel = try rgbaPixel(standardized.data, x: 10, y: 10)
+        XCTAssertGreaterThan(channelSpread(standardizedPixel), 25)
+    }
+
     func testImportedChekiSizePolicyIsIndependentOfOrientation() {
         XCTAssertEqual(ChekinanaImportedChekiSizePolicy.maximumRelativeError, 0.05)
         XCTAssertEqual(ChekinanaImportedChekiSizePolicy.inferredSize(
@@ -14273,16 +25661,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ), .wide)
         XCTAssertEqual(ChekinanaImportedChekiSizePolicy.inferredSize(
             width: 1_200, height: 1_200
-        ), .other)
+        ), .mini)
         XCTAssertEqual(ChekinanaImportedChekiSizePolicy.inferredSize(
             width: 1_600, height: 1_200
-        ), .other)
+        ), .mini)
         XCTAssertNil(ChekinanaImportedChekiSizePolicy.inferredSize(
             width: 0, height: 1_200
         ))
     }
 
-    func testImportedOtherSizeFlowsThroughNormalizeScannerResultAndLedger() async throws {
+    func testImportedChekiIsAlwaysMiniThroughNormalizeScannerResultAndLedger() async throws {
         let fixture = try makeFixture()
         let source = ChekinanaPendingChekiImage(
             data: scannerJPEGData(
@@ -14295,7 +25683,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             source.data,
             appliesWhiteBalance: false
         )
-        XCTAssertEqual(normalized.inferredSize, .other)
+        XCTAssertEqual(normalized.inferredSize, .mini)
 
         let result = try await ChekinanaLocalImportChekiProcessor.process(
             source,
@@ -14305,7 +25693,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )
         )
         let resultImage = try XCTUnwrap(result.images.first)
-        XCTAssertEqual(resultImage.inferredChekiSize, .other)
+        XCTAssertEqual(resultImage.inferredChekiSize, .mini)
 
         let inserted = try fixture.ledger.insertTemporaryChekis(
             [ChekinanaPendingChekiImage(
@@ -14315,7 +25703,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             thumbnailImageData: [nil],
             sizes: [resultImage.inferredChekiSize]
         ).inserted
-        XCTAssertEqual(inserted.first?.size, .other)
+        XCTAssertEqual(inserted.first?.size, .mini)
     }
 
     func testLocalImportPreservesLandscapeAndPortraitWithoutStretching() async throws {
@@ -14350,9 +25738,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(fitted.width / fitted.height, 1_600.0 / 900.0, accuracy: 0.000_001)
         XCTAssertLessThanOrEqual(fitted.width, 1_908)
         XCTAssertLessThanOrEqual(fitted.height, 1_200)
+        let dimensions = try XCTUnwrap(
+            ChekinanaLocalImportRenderGeometry.fittedDimensions(
+                sourceWidth: 1_600,
+                sourceHeight: 900,
+                boundingWidth: 1_908,
+                boundingHeight: 1_200
+            )
+        )
+        XCTAssertEqual(dimensions.width, 1_908)
+        XCTAssertEqual(dimensions.height, 1_073)
     }
 
-    func testWideImportCanvasAndLedgerSizePreserveOrientation() async throws {
+    func testImportChekiUsesMiniBoundsWithoutPaddingAndPreservesOrientation() async throws {
         let fixture = try makeFixture()
         let portrait = try await ChekinanaLocalImportChekiProcessor.normalize(
             scannerJPEGData(
@@ -14361,9 +25759,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ),
             appliesWhiteBalance: false
         )
-        XCTAssertEqual(portrait.width, 1_908)
-        XCTAssertEqual(portrait.height, 2_400)
-        XCTAssertEqual(portrait.inferredSize, .wide)
+        XCTAssertEqual(portrait.width, 1_200)
+        XCTAssertEqual(portrait.height, 1_509)
+        XCTAssertEqual(portrait.inferredSize, .mini)
 
         let landscape = try await ChekinanaLocalImportChekiProcessor.normalize(
             scannerJPEGData(
@@ -14372,9 +25770,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ),
             appliesWhiteBalance: false
         )
-        XCTAssertEqual(landscape.width, 2_400)
-        XCTAssertEqual(landscape.height, 1_908)
-        XCTAssertEqual(landscape.inferredSize, .wide)
+        XCTAssertEqual(landscape.width, 1_509)
+        XCTAssertEqual(landscape.height, 1_200)
+        XCTAssertEqual(landscape.inferredSize, .mini)
 
         let inserted = try fixture.ledger.insertTemporaryChekis(
             [ChekinanaPendingChekiImage(
@@ -14384,7 +25782,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             thumbnailImageData: [nil],
             sizes: [landscape.inferredSize]
         ).inserted
-        XCTAssertEqual(inserted.first?.size, .wide)
+        XCTAssertEqual(inserted.first?.size, .mini)
 
         XCTAssertEqual(
             ChekinanaImportedChekiCanvasPolicy.dimensions(
@@ -14393,6 +25791,1710 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ).width,
             1_908
         )
+    }
+
+    func testFinalChekiSizeStandardizationUsesExactPixelsWithoutWhiteCanvas() async throws {
+        let landscapeSource = scannerEdgeMarkerJPEGData(
+            size: CGSize(width: 400, height: 300)
+        )
+        let landscapeEdges = try edgeColorLabels(landscapeSource)
+        XCTAssertEqual(Set(landscapeEdges).count, 4)
+        let landscape = try await ChekinanaLocalImportChekiProcessor.standardizedForSave(
+            landscapeSource,
+            size: .wide
+        )
+        XCTAssertEqual(landscape.width, 2_400)
+        XCTAssertEqual(landscape.height, 1_908)
+        XCTAssertEqual(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: landscape.data)?.width,
+            2_400
+        )
+        XCTAssertEqual(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: landscape.data)?.height,
+            1_908
+        )
+        XCTAssertEqual(try edgeColorLabels(landscape.data), landscapeEdges)
+
+        let portraitSource = scannerEdgeMarkerJPEGData(
+            size: CGSize(width: 300, height: 400)
+        )
+        let portraitEdges = try edgeColorLabels(portraitSource)
+        XCTAssertEqual(Set(portraitEdges).count, 4)
+        let portrait = try await ChekinanaLocalImportChekiProcessor.standardizedForSave(
+            portraitSource,
+            size: .wide
+        )
+        XCTAssertEqual(portrait.width, 1_908)
+        XCTAssertEqual(portrait.height, 2_400)
+        XCTAssertEqual(try edgeColorLabels(portrait.data), portraitEdges)
+
+        let mini = try await ChekinanaLocalImportChekiProcessor.standardizedForSave(
+            landscape.data,
+            size: .mini
+        )
+        XCTAssertEqual(mini.width, 1_908)
+        XCTAssertEqual(mini.height, 1_200)
+        XCTAssertEqual(try edgeColorLabels(mini.data), landscapeEdges)
+
+        let portraitMini = try await ChekinanaLocalImportChekiProcessor.standardizedForSave(
+            portraitSource,
+            size: .mini
+        )
+        XCTAssertEqual(portraitMini.width, 1_200)
+        XCTAssertEqual(portraitMini.height, 1_908)
+        XCTAssertEqual(try edgeColorLabels(portraitMini.data), portraitEdges)
+    }
+
+    func testTemporaryReviewNormalizesExplicitUnknownSizeToMini() throws {
+        let fixture = try makeFixture()
+        let temporary = try XCTUnwrap(fixture.ledger.insertTemporaryChekis(
+            [ChekinanaPendingChekiImage(
+                data: scannerJPEGData(
+                    color: .purple,
+                    size: CGSize(width: 200, height: 159)
+                ),
+                filenameExtension: "jpg"
+            )],
+            thumbnailImageData: [nil],
+            sizes: [nil]
+        ).inserted.first)
+
+        XCTAssertEqual(temporary.size, .mini)
+    }
+
+    func testReviewWideSelectionPersistsMatchingWidePixelsAndMetadata() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let sourceData = scannerEdgeMarkerJPEGData(
+            size: CGSize(width: 400, height: 300)
+        )
+        let expectedEdges = try edgeColorLabels(sourceData)
+        let reviewSource = ChekinanaReviewRectificationSource(
+            imageData: sourceData,
+            sourcePixelWidth: 400,
+            sourcePixelHeight: 300,
+            quadrilateral: [
+                ChekinanaScannerQuadrilateralPoint(x: 0, y: 0),
+                ChekinanaScannerQuadrilateralPoint(x: 400, y: 0),
+                ChekinanaScannerQuadrilateralPoint(x: 400, y: 300),
+                ChekinanaScannerQuadrilateralPoint(x: 0, y: 300),
+            ],
+            appliesWhiteBalance: false
+        )
+        let temporaryID = try XCTUnwrap(fixture.ledger.insertTemporaryChekis(
+            [ChekinanaPendingChekiImage(
+                // Deliberately unrelated provisional pixels: the final Wide
+                // image must be rebuilt from sourceData + quadrilateral.
+                data: scannerJPEGData(
+                    color: .purple,
+                    size: CGSize(width: 200, height: 159)
+                ),
+                filenameExtension: "jpg"
+            )],
+            thumbnailImageData: [nil],
+            reviewRectificationSources: [reviewSource]
+        ).inserted.first?.id)
+        XCTAssertEqual(fixture.ledger.temporaryCheki(temporaryID)?.size, .mini)
+        XCTAssertEqual(
+            fixture.ledger.temporaryCheki(temporaryID)?.reviewRectificationSource,
+            reviewSource
+        )
+        XCTAssertTrue(fixture.ledger.updateTemporaryChekiSize(
+            id: temporaryID,
+            size: .wide
+        ))
+        let prepared = await fixture.executor.execute(
+            "addscancheki \(temporaryID.uuidString.lowercased())"
+        )
+        guard case .pendingChekiCards(_, let cards, _) = prepared,
+              let code = cards.first?.confirmationCode,
+              case .chekiCards(let savedCards) = await fixture.executor
+                .confirmTemporaryChekiBatch(confirmationCodes: [code]),
+              let savedID = savedCards.first?.id else {
+            return XCTFail("Expected Review Cheki to save.")
+        }
+        let model = try XCTUnwrap(fixture.context.fetch(
+            FetchDescriptor<MediaItem>(predicate: #Predicate { $0.id == savedID })
+        ).first)
+        XCTAssertEqual(model.size, .wide)
+        let url = try XCTUnwrap(ChekiImageRefResolver.managedChekiFileURL(
+            for: model.imageRef,
+            chekiID: model.mediaOwnerID
+        ))
+        let dimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: Data(contentsOf: url))
+        )
+        XCTAssertEqual(dimensions.width, 2_400)
+        XCTAssertEqual(dimensions.height, 1_908)
+        XCTAssertEqual(
+            try edgeColorLabels(Data(contentsOf: url)),
+            expectedEdges
+        )
+        let thumbnailData = try XCTUnwrap(savedCards.first?.thumbnailImageData)
+        let thumbnailDimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: thumbnailData)
+        )
+        XCTAssertEqual(max(thumbnailDimensions.width, thumbnailDimensions.height), 512)
+        XCTAssertEqual(
+            Double(thumbnailDimensions.width) / Double(thumbnailDimensions.height),
+            2_400.0 / 1_908.0,
+            accuracy: 0.01
+        )
+    }
+
+    func testReviewCustomSizeRebuildsFromRetainedSourceAtCustomPixels() async throws {
+        let sourceData = scannerEdgeMarkerJPEGData(
+            size: CGSize(width: 300, height: 400)
+        )
+        let expectedEdges = try edgeColorLabels(sourceData)
+        let reviewSource = ChekinanaReviewRectificationSource(
+            imageData: sourceData,
+            sourcePixelWidth: 300,
+            sourcePixelHeight: 400,
+            quadrilateral: [
+                ChekinanaScannerQuadrilateralPoint(x: 0, y: 0),
+                ChekinanaScannerQuadrilateralPoint(x: 300, y: 0),
+                ChekinanaScannerQuadrilateralPoint(x: 300, y: 400),
+                ChekinanaScannerQuadrilateralPoint(x: 0, y: 400),
+            ],
+            appliesWhiteBalance: false
+        )
+        let custom = ChekiSize.custom(
+            id: UUID(),
+            pixelWidth: 1_200,
+            pixelHeight: 1_800
+        )
+        let output = try await ChekinanaReviewChekiImagePreparer.standardizedForSave(
+            fallbackImage: ChekinanaPendingChekiImage(
+                data: scannerJPEGData(
+                    color: .purple,
+                    size: CGSize(width: 200, height: 159)
+                ),
+                filenameExtension: "jpg"
+            ),
+            reviewSource: reviewSource,
+            rotationQuarterTurns: 0,
+            size: custom
+        )
+
+        XCTAssertEqual(output.width, 1_200)
+        XCTAssertEqual(output.height, 1_800)
+        XCTAssertEqual(try edgeColorLabels(output.data), expectedEdges)
+    }
+
+    func testReviewSizePreviewPublishesPixelsAndMetadataAtomically() throws {
+        let ledger = ChekinanaConfirmationLedger()
+        let original = ChekinanaPendingChekiImage(
+            data: scannerJPEGData(
+                color: .purple,
+                size: CGSize(width: 1_200, height: 1_908)
+            ),
+            filenameExtension: "jpg"
+        )
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [original],
+            thumbnailImageData: [nil],
+            sizes: [.mini]
+        ).inserted.first?.id)
+        let replacement = ChekinanaPendingChekiImage(
+            data: scannerJPEGData(
+                color: .orange,
+                size: CGSize(width: 1_908, height: 2_400)
+            ),
+            filenameExtension: "jpg"
+        )
+        let thumbnail = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 256, height: 322)
+        )
+
+        XCTAssertFalse(ledger.replaceTemporaryChekiSizePreview(
+            id: id,
+            size: .wide,
+            image: replacement,
+            thumbnailImageData: thumbnail,
+            expectedRotationQuarterTurns: 1
+        ))
+        XCTAssertEqual(ledger.temporaryCheki(id)?.size, .mini)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, original)
+        XCTAssertNil(ledger.temporaryCheki(id)?.thumbnailImageData)
+
+        XCTAssertTrue(ledger.replaceTemporaryChekiSizePreview(
+            id: id,
+            size: .wide,
+            image: replacement,
+            thumbnailImageData: thumbnail,
+            expectedRotationQuarterTurns: 0
+        ))
+        XCTAssertEqual(ledger.temporaryCheki(id)?.size, .wide)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, replacement)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.thumbnailImageData, thumbnail)
+        XCTAssertTrue(
+            ledger.temporaryCheki(id)?.explicitlyEditedFields.contains(.size)
+                == true
+        )
+    }
+
+    func testChekiImageReplacementRollbackRestoresOriginalAndCommitKeepsWidePixels() async throws {
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let directory = saved.url.deletingLastPathComponent()
+        let temporaryNamesBefore = Set(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .filter {
+                    $0.hasPrefix(
+                        ChekinanaChekiImageReplacementTransaction.stagingFilenamePrefix
+                    ) || $0.hasPrefix(
+                        ChekinanaChekiImageReplacementTransaction.backupFilenamePrefix
+                    ) || $0.hasPrefix(
+                        ChekinanaChekiEditPublicationHandle.journalFilenamePrefix
+                    )
+                }
+        )
+        let rollbackCheki = MediaItem(
+            id: id,
+            size: .mini,
+            imageRef: saved.ref
+        )
+        let rollbackBefore = ChekinanaChekiEditRecordSnapshot(rollbackCheki)
+        rollbackCheki.size = .wide
+        rollbackCheki.updatedAt = Date(timeIntervalSinceReferenceDate: 111)
+        let rollbackAfter = ChekinanaChekiEditRecordSnapshot(rollbackCheki)
+
+        let rollback = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: saved.url),
+            original,
+            "staging must not alter the formal UUID file"
+        )
+        try rollback.validateSource(
+            mediaOwnerID: id,
+            imageRef: saved.ref,
+            expectedSourceIdentity: ChekinanaImportFileIdentity(original)
+        )
+        let rollbackPublication = try rollback.beginDurablePublication(
+            libraryGeneration: UUID(),
+            databaseBefore: rollbackBefore,
+            databaseAfter: rollbackAfter
+        )
+        try rollbackPublication.publishPreparedFile()
+        try rollbackPublication.rollback()
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+
+        let commit = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+        try commit.validateSource(
+            mediaOwnerID: id,
+            imageRef: saved.ref,
+            expectedSourceIdentity: ChekinanaImportFileIdentity(original)
+        )
+        let commitCheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        let commitBefore = ChekinanaChekiEditRecordSnapshot(commitCheki)
+        commitCheki.size = .wide
+        commitCheki.updatedAt = Date(timeIntervalSinceReferenceDate: 222)
+        let committedPublication = try commit.beginDurablePublication(
+            libraryGeneration: UUID(),
+            databaseBefore: commitBefore,
+            databaseAfter: ChekinanaChekiEditRecordSnapshot(commitCheki)
+        )
+        try committedPublication.publishPreparedFile()
+        committedPublication.finishCommit()
+        let dimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: Data(contentsOf: saved.url))
+        )
+        XCTAssertEqual(dimensions.width, 1_908)
+        XCTAssertEqual(dimensions.height, 2_400)
+        let temporaryNamesAfter = Set(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .filter {
+                    $0.hasPrefix(
+                        ChekinanaChekiImageReplacementTransaction.stagingFilenamePrefix
+                    ) || $0.hasPrefix(
+                        ChekinanaChekiImageReplacementTransaction.backupFilenamePrefix
+                    ) || $0.hasPrefix(
+                        ChekinanaChekiEditPublicationHandle.journalFilenamePrefix
+                    )
+                }
+        )
+        XCTAssertEqual(temporaryNamesAfter, temporaryNamesBefore)
+    }
+
+    func testOlderChekiSizeCommitCannotOverwriteNewerEditOrFormalPixels() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(
+            id: id,
+            size: .mini,
+            imageRef: saved.ref,
+            note: "initial"
+        )
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let snapshot = ChekinanaChekiEditRecordSnapshot(cheki)
+        let olderAuthorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: snapshot,
+            in: fixture.context
+        )
+        let newerAuthorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: snapshot,
+            in: fixture.context
+        )
+        let older = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        let newerSize = ChekiSize.custom(
+            id: UUID(),
+            pixelWidth: 1_200,
+            pixelHeight: 1_800
+        )
+        let newer = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: newerSize
+        )
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: newerAuthorization,
+            imageReplacement: newer,
+            in: fixture.context
+        ) { target in
+            target.size = newerSize
+            target.note = "newer"
+            return false
+        }
+        let newerPixels = try Data(contentsOf: saved.url)
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: olderAuthorization,
+                imageReplacement: older,
+                in: fixture.context
+            ) { target in
+                target.size = .wide
+                target.note = "older"
+                return false
+            }
+            XCTFail("the older authorization must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ChekinanaChekiEditCommitError, .changedRecord)
+        }
+
+        let target = try ChekinanaModelContextResolver.cheki(
+            id: id,
+            in: fixture.context
+        )
+        XCTAssertEqual(target.note, "newer")
+        XCTAssertEqual(target.size, newerSize)
+        XCTAssertEqual(try Data(contentsOf: saved.url), newerPixels)
+        let dimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: newerPixels)
+        )
+        XCTAssertEqual(dimensions.width, 1_200)
+        XCTAssertEqual(dimensions.height, 1_800)
+    }
+
+    func testChekiSizeCommitRejectsSamePathWithDifferentContent() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        let newerContent = scannerJPEGData(
+            color: .purple,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        try newerContent.write(to: saved.url, options: .atomic)
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: replacement,
+                in: fixture.context
+            ) { target in
+                target.size = .wide
+                return false
+            }
+            XCTFail("a same-name source with different bytes must be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .changedMediaSource
+            )
+        }
+        XCTAssertEqual(cheki.size, .mini)
+        XCTAssertEqual(try Data(contentsOf: saved.url), newerContent)
+    }
+
+    func testChekiSizeCommitRejectsLibraryGenerationReplacement() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: fixture.context)
+        try fixture.context.save()
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: replacement,
+                in: fixture.context
+            ) { target in
+                target.size = .wide
+                return false
+            }
+            XCTFail("the previous library generation must not retain commit authority")
+        } catch {
+            XCTAssertEqual(error as? ChekinanaChekiEditCommitError, .changedLibrary)
+        }
+        XCTAssertEqual(cheki.size, .mini)
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+    }
+
+    func testChekiSizeCommitRejectsDeletedTargetWithoutRepublishingItsFile() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        fixture.context.delete(cheki)
+        try fixture.context.save()
+        try FileManager.default.removeItem(at: saved.url)
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: replacement,
+                in: fixture.context
+            ) { _ in false }
+            XCTFail("a deleted target must not be recreated by an old preparation")
+        } catch {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: saved.url.path))
+        }
+    }
+
+    func testChekiSizeCommitRejectsChangedOwnerAndSourceReference() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        let newOwnerID = UUID()
+        let newContent = scannerJPEGData(
+            color: .purple,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let newSaved = try await ChekinanaImageWorker.saveChekiImageData(
+            newContent,
+            id: newOwnerID,
+            filenameExtension: "jpg"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: saved.url)
+            try? FileManager.default.removeItem(at: newSaved.url)
+        }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.mediaOwnerID = newOwnerID
+        cheki.imageRef = newSaved.ref
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 123_456)
+        try fixture.context.save()
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: replacement,
+                in: fixture.context
+            ) { target in
+                target.size = .wide
+                return false
+            }
+            XCTFail("changed media ownership must revoke the old authorization")
+        } catch {
+            XCTAssertEqual(error as? ChekinanaChekiEditCommitError, .changedRecord)
+        }
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+        XCTAssertEqual(try Data(contentsOf: newSaved.url), newContent)
+    }
+
+    func testChekiSizeDatabaseFailureRestoresFormalFileAndMetadata() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: replacement,
+                in: fixture.context,
+                saveContext: { _ in
+                    throw ChekinanaChekiEditCommitError.changedRecord
+                }
+            ) { target in
+                target.size = .wide
+                return false
+            }
+            XCTFail("the injected database failure must be returned")
+        } catch {
+            XCTAssertEqual(error as? ChekinanaChekiEditCommitError, .changedRecord)
+        }
+
+        let target = try ChekinanaModelContextResolver.cheki(
+            id: id,
+            in: fixture.context
+        )
+        XCTAssertEqual(target.size, .mini)
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+    }
+
+    func testChekiEditStartupRecoveryDiscardsIntentBeforeFormalMutation() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 301)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        _ = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).count,
+            1
+        )
+        try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).isEmpty
+        )
+    }
+
+    func testChekiEditStartupRecoveryRestoresPublishBeforeDatabaseCommit() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 302)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        let publication = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+        try publication.publishPreparedFile()
+        XCTAssertNotEqual(try Data(contentsOf: saved.url), original)
+
+        try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+
+        let persisted = try ChekinanaModelContextResolver.cheki(
+            id: id,
+            in: ModelContext(fixture.context.container)
+        )
+        XCTAssertEqual(persisted.size, .mini)
+        XCTAssertEqual(try Data(contentsOf: saved.url), original)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).isEmpty
+        )
+    }
+
+    func testChekiEditStartupRecoveryCompletesDatabaseCommitBeforeCleanup() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 303)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        let publication = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+        try publication.publishPreparedFile()
+        let published = try Data(contentsOf: saved.url)
+        cheki.size = .wide
+        cheki.imageRef = replacement.imageRef
+        cheki.updatedAt = after.updatedAt
+        try fixture.context.save()
+
+        try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+
+        let persisted = try ChekinanaModelContextResolver.cheki(
+            id: id,
+            in: ModelContext(fixture.context.container)
+        )
+        XCTAssertEqual(persisted.size, .wide)
+        XCTAssertEqual(persisted.updatedAt, after.updatedAt)
+        XCTAssertEqual(try Data(contentsOf: saved.url), published)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).isEmpty
+        )
+    }
+
+    func testChekiEditStartupRecoveryFailsClosedOnLaterDatabaseEdit() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(
+            id: id,
+            size: .mini,
+            imageRef: saved.ref,
+            note: "before"
+        )
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 304)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        let publication = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+        try publication.publishPreparedFile()
+        defer { try? publication.rollback() }
+        let published = try Data(contentsOf: saved.url)
+        cheki.note = "later edit"
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 305)
+        try fixture.context.save()
+
+        XCTAssertThrowsError(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .fileRecoveryFailed
+            )
+        }
+        XCTAssertEqual(try Data(contentsOf: saved.url), published)
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).count,
+            1,
+            "a conflicting generation/record must preserve recovery evidence"
+        )
+    }
+
+    func testChekiEditRecoveryNeverOverwritesNewerFormalContent() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 306)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        let publication = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+        try publication.publishPreparedFile()
+        let oldTaskPublication = try Data(contentsOf: saved.url)
+        defer {
+            try? oldTaskPublication.write(to: saved.url, options: [.atomic])
+            try? publication.rollback()
+        }
+        let newerContent = scannerJPEGData(
+            color: .purple,
+            size: CGSize(width: 1_200, height: 1_800)
+        )
+        try newerContent.write(to: saved.url, options: [.atomic])
+
+        XCTAssertThrowsError(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .fileRecoveryFailed
+            )
+        }
+        XCTAssertEqual(try Data(contentsOf: saved.url), newerContent)
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).count,
+            1,
+            "a file-identity conflict must keep its durable evidence"
+        )
+    }
+
+    func testChekiEditStartupRecoveryFailsClosedAcrossLibraryGeneration() async throws {
+        let fixture = try makeFixture()
+        let id = UUID()
+        let original = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 1_200, height: 1_908)
+        )
+        let saved = try await ChekinanaImageWorker.saveChekiImageData(
+            original,
+            id: id,
+            filenameExtension: "jpg"
+        )
+        defer { try? FileManager.default.removeItem(at: saved.url) }
+        let cheki = MediaItem(id: id, size: .mini, imageRef: saved.ref)
+        fixture.context.insert(cheki)
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        let replacement = try await ChekinanaChekiImageReplacementTransaction.stage(
+            currentImageRef: saved.ref,
+            mediaOwnerID: id,
+            size: .wide
+        )
+        cheki.size = .wide
+        cheki.updatedAt = Date(timeIntervalSinceReferenceDate: 307)
+        let after = ChekinanaChekiEditRecordSnapshot(cheki)
+        fixture.context.rollback()
+        let publication = try replacement.beginDurablePublication(
+            libraryGeneration: authorization.libraryGeneration,
+            databaseBefore: authorization.record,
+            databaseAfter: after
+        )
+        try publication.publishPreparedFile()
+        defer { try? publication.rollback() }
+        let published = try Data(contentsOf: saved.url)
+        try ChekinanaLibraryGenerationStore.publish(UUID(), in: fixture.context)
+        try fixture.context.save()
+
+        XCTAssertThrowsError(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(in: fixture.context)
+        ) { error in
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .fileRecoveryFailed
+            )
+        }
+        XCTAssertEqual(try Data(contentsOf: saved.url), published)
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(
+                in: saved.url.deletingLastPathComponent()
+            ).count,
+            1,
+            "an old-generation intent must retain evidence without touching files"
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeImportAndRestart() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let directory = try ChekiImageRefResolver.chekiImagesDirectory()
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory
+        )
+        defer {
+            try? retained.handle.completeDatabaseAfter()
+            try? FileManager.default.removeItem(at: retained.targetURL)
+        }
+        let prepared = try await emptyPreparedImport()
+        defer { ChekinanaDataImportTemporaryFiles.cleanup(prepared) }
+
+        try await ChekinanaDataImporter.replaceLocalLibrary(
+            with: prepared,
+            in: context
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaDataImporter.recoverUnfinishedImport(in: restartContext)
+        )
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext
+            )
+        )
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+        XCTAssertNotEqual(
+            try ChekinanaLibraryGenerationStore.current(in: restartContext),
+            retained.generation
+        )
+        XCTAssertEqual(
+            try restartContext.fetchCount(FetchDescriptor<MediaItem>()),
+            0
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeClearAndRestart() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-clear-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory
+        )
+        let suiteName = "ChekinanaEditPreflightClear.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        _ = try await ChekinanaLocalDataClearer.clear(
+            modelContext: context,
+            managedImagesDirectory: directory,
+            defaults: defaults
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        let clearRecovery = await ChekinanaLocalDataClearer.recoverUnfinishedClear(
+            modelContext: restartContext,
+            managedImagesDirectory: directory,
+            defaults: defaults
+        )
+        XCTAssertFalse(clearRecovery.needsRetry)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+        XCTAssertNotEqual(
+            try ChekinanaLibraryGenerationStore.current(in: restartContext),
+            retained.generation
+        )
+        XCTAssertEqual(
+            try restartContext.fetchCount(FetchDescriptor<MediaItem>()),
+            0
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeGalleryDelete() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-gallery-delete-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory
+        )
+        let suiteName = "ChekinanaEditPreflightDelete.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        try await ChekinanaGalleryDeletionCoordinator.delete(
+            kind: .cheki,
+            mediaOwnerID: retained.item.mediaOwnerID,
+            reference: retained.item.imageRef,
+            in: context,
+            directory: directory,
+            defaults: defaults,
+            validateModel: {
+                _ = try ChekinanaModelContextResolver.cheki(
+                    id: retained.item.id,
+                    in: context
+                )
+            },
+            deleteModel: {
+                let live = try ChekinanaModelContextResolver.cheki(
+                    id: retained.item.id,
+                    in: context
+                )
+                context.delete(live)
+            }
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+        XCTAssertEqual(
+            try restartContext.fetchCount(FetchDescriptor<MediaItem>()),
+            0
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeConfirmedChekiDelete() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let fixture = try makeFixture(container: container)
+        let directory = try ChekiImageRefResolver.chekiImagesDirectory()
+        let retained = try retainedChekiEditIntent(
+            in: fixture.context,
+            directory: directory
+        )
+        defer {
+            try? retained.handle.completeDatabaseAfter()
+            try? FileManager.default.removeItem(at: retained.targetURL)
+        }
+
+        guard case .pendingChekiCards(_, let cards, _) = await fixture.executor.execute(
+            "deletecheki \(shortID(retained.item.id))"
+        ), let confirmationCode = cards.first?.confirmationCode else {
+            return XCTFail("expected Cheki deletion confirmation")
+        }
+        let response = await fixture.executor.execute("confirm \(confirmationCode)")
+        XCTAssertTrue(
+            ChekinanaConfirmationResponseValidator.isDeleteChekiSuccess(response)
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+        XCTAssertEqual(
+            try restartContext.fetchCount(FetchDescriptor<MediaItem>()),
+            0
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: retained.targetURL.path)
+        )
+    }
+
+    func testConflictingChekiEditIntentBlocksConfirmedDeleteBeforeMutation() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let fixture = try makeFixture(container: container)
+        let directory = try ChekiImageRefResolver.chekiImagesDirectory()
+        let retained = try retainedChekiEditIntent(
+            in: fixture.context,
+            directory: directory
+        )
+        let journal = try retained.handle.load()
+        defer {
+            retained.item.note = journal.databaseAfter.note
+            retained.item.updatedAt = journal.databaseAfter.updatedAt
+            try? fixture.context.save()
+            try? retained.handle.completeDatabaseAfter()
+            try? FileManager.default.removeItem(at: retained.targetURL)
+        }
+        retained.item.note = "later conflicting delete edit"
+        retained.item.updatedAt = Date(timeIntervalSinceReferenceDate: 451)
+        try fixture.context.save()
+
+        guard case .pendingChekiCards(_, let cards, _) = await fixture.executor.execute(
+            "deletecheki \(shortID(retained.item.id))"
+        ), let confirmationCode = cards.first?.confirmationCode else {
+            return XCTFail("expected Cheki deletion confirmation")
+        }
+        let response = await fixture.executor.execute("confirm \(confirmationCode)")
+
+        XCTAssertFalse(
+            ChekinanaConfirmationResponseValidator.isDeleteChekiSuccess(response)
+        )
+        XCTAssertEqual(
+            try fixture.context.fetchCount(FetchDescriptor<MediaItem>()),
+            1
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: retained.targetURL.path)
+        )
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).count,
+            1
+        )
+        XCTAssertNotNil(fixture.ledger.entry(for: confirmationCode))
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeUnifiedReorder() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-reorder-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let idolID = UUID()
+        let date = Date(timeIntervalSince1970: 1_800_086_400)
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory,
+            idolIDs: [idolID],
+            date: date
+        )
+        let sibling = MediaItem(
+            date: date,
+            idx: 2,
+            imageRef: "\(UUID().uuidString).jpg",
+            createdAt: retained.item.createdAt.addingTimeInterval(1)
+        )
+        sibling.idolIDs = [idolID]
+        context.insert(sibling)
+        try context.save()
+
+        try ChekinanaUnifiedChekiReorderPersistence.reorder(
+            moving: retained.item.id,
+            toPartitionIndex: 1,
+            values: [retained.item, sibling],
+            in: context,
+            editIntentDirectory: directory,
+            now: { Date(timeIntervalSinceReferenceDate: 450) }
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        let reordered = try ChekinanaModelContextResolver.cheki(
+            id: retained.item.id,
+            in: restartContext
+        )
+        XCTAssertEqual(reordered.idx, 2)
+        XCTAssertEqual(
+            reordered.updatedAt,
+            Date(timeIntervalSinceReferenceDate: 450)
+        )
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+    }
+
+    func testUnifiedChekiReorderPersistsAcrossFreshContextWithinFavoritePartition() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let idolID = UUID()
+        let date = utcDate(2026, 8, 30)
+        let base = Date(timeIntervalSince1970: 1_000)
+        let favoriteFirst = MediaItem(
+            date: date, idx: -2, imageRef: "favorite-first.jpg",
+            isFavorite: true, createdAt: base
+        )
+        let favoriteSecond = MediaItem(
+            date: date, idx: -1, imageRef: "favorite-second.jpg",
+            isFavorite: true, createdAt: base.addingTimeInterval(1)
+        )
+        let standardFirst = MediaItem(
+            date: date, idx: 3, imageRef: "standard-first.jpg",
+            createdAt: base.addingTimeInterval(2)
+        )
+        let standardSecond = MediaItem(
+            date: date, idx: 8, imageRef: "standard-second.jpg",
+            createdAt: base.addingTimeInterval(3)
+        )
+        let values = [favoriteFirst, favoriteSecond, standardFirst, standardSecond]
+        for value in values {
+            value.idolIDs = [idolID]
+            context.insert(value)
+        }
+        try context.save()
+
+        let committedIDs = try ChekinanaUnifiedChekiReorderPersistence.reorder(
+            moving: standardSecond.id,
+            toPartitionIndex: 0,
+            values: values,
+            in: context,
+            now: { Date(timeIntervalSinceReferenceDate: 450) }
+        )
+        XCTAssertEqual(
+            committedIDs,
+            [favoriteFirst.id, favoriteSecond.id, standardSecond.id, standardFirst.id]
+        )
+
+        let reopenedContext = ModelContext(container)
+        let reopened = try reopenedContext.fetch(FetchDescriptor<MediaItem>())
+            .filter {
+                $0.kind == .cheki
+                    && Set($0.idolIDs) == Set([idolID])
+                    && ChekinanaDateOnly.string($0.date ?? .distantPast)
+                        == ChekinanaDateOnly.string(date)
+            }
+        let snapshots = reopened.map {
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: $0.id,
+                isFavorite: $0.isFavorite,
+                idx: $0.idx,
+                createdAt: $0.createdAt
+            )
+        }
+        XCTAssertEqual(
+            ChekinanaUnifiedChekiOrderPolicy.orderedIDs(snapshots),
+            committedIDs
+        )
+    }
+
+    func testUnifiedChekiReorderPersistsUndatedExactIdolGroupAcrossFreshContext() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let idolIDs = [UUID(), UUID()]
+        let base = Date(timeIntervalSince1970: 1_000)
+        let first = MediaItem(
+            date: nil, idx: 1, imageRef: "undated-first.jpg",
+            createdAt: base
+        )
+        let second = MediaItem(
+            date: nil, idx: 2, imageRef: "undated-second.jpg",
+            createdAt: base.addingTimeInterval(1)
+        )
+        for value in [first, second] {
+            value.idolIDs = idolIDs
+            context.insert(value)
+        }
+        try context.save()
+
+        let committedIDs = try ChekinanaUnifiedChekiReorderPersistence.reorder(
+            moving: second.id,
+            toPartitionIndex: 0,
+            values: [first, second],
+            in: context
+        )
+        XCTAssertEqual(committedIDs, [second.id, first.id])
+
+        let reopenedContext = ModelContext(container)
+        let reopened = try reopenedContext.fetch(FetchDescriptor<MediaItem>())
+            .filter {
+                $0.kind == .cheki
+                    && $0.date == nil
+                    && Set($0.idolIDs) == Set(idolIDs)
+            }
+        let snapshots = reopened.map {
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: $0.id,
+                isFavorite: $0.isFavorite,
+                idx: $0.idx,
+                createdAt: $0.createdAt
+            )
+        }
+        XCTAssertEqual(
+            ChekinanaUnifiedChekiOrderPolicy.orderedIDs(snapshots),
+            committedIDs
+        )
+
+        let otherUndatedGroup = try XCTUnwrap(
+            ChekinanaIdolChekiReorderGroupIdentity(
+                idolIDs: [UUID()],
+                date: nil
+            )
+        )
+        let currentUndatedGroup = try XCTUnwrap(
+            ChekinanaIdolChekiReorderGroupIdentity(
+                idolIDs: idolIDs,
+                date: nil
+            )
+        )
+        XCTAssertThrowsError(try ChekinanaIdolChekiReorderPlan.assignments(
+            for: [[first.id], [second.id]],
+            liveSnapshots: [
+                .init(
+                    chekiID: first.id,
+                    groupIdentity: currentUndatedGroup,
+                    idx: first.idx
+                ),
+                .init(
+                    chekiID: second.id,
+                    groupIdentity: otherUndatedGroup,
+                    idx: second.idx
+                ),
+            ]
+        )) { error in
+            XCTAssertEqual(
+                error as? ChekinanaIdolChekiReorderError,
+                .mixedGroups
+            )
+        }
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeEventPropagation() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Propagation idol")
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        let event = Event(name: "Propagation event", date: date)
+        context.insert(idol)
+        context.insert(event)
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-propagation-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory,
+            idolIDs: [idol.id],
+            date: date
+        )
+
+        XCTAssertEqual(
+            try ChekinanaEventAssociationPropagation.propagate(
+                idolIDs: [idol.id],
+                eventID: event.id,
+                date: date,
+                protectingRecordIDs: [],
+                in: context,
+                editIntentDirectory: directory
+            ),
+            1
+        )
+        try context.save()
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        let persisted = try ChekinanaModelContextResolver.cheki(
+            id: retained.item.id,
+            in: restartContext
+        )
+        XCTAssertEqual(persisted.eventID, event.id)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeEventDelete() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let date = Date(timeIntervalSince1970: 1_800_172_800)
+        let event = Event(name: "Delete event", date: date)
+        context.insert(event)
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-event-delete-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory,
+            eventID: event.id,
+            date: date
+        )
+
+        try ChekinanaEventPersistence.delete(
+            event,
+            from: context,
+            editIntentDirectory: directory
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        let persisted = try ChekinanaModelContextResolver.cheki(
+            id: retained.item.id,
+            in: restartContext
+        )
+        XCTAssertNil(persisted.eventID)
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+    }
+
+    func testRetainedChekiEditIntentConvergesBeforeIdolMerge() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let source = Idol(name: "Merge source")
+        let target = Idol(name: "Merge target")
+        context.insert(source)
+        context.insert(target)
+        try context.save()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "chekinana-edit-preflight-idol-merge-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory,
+            idolIDs: [source.id]
+        )
+
+        _ = try ChekinanaIdolPersistence.merge(
+            sourceID: source.id,
+            into: target.id,
+            in: context,
+            avatarDirectory: directory
+        )
+
+        let restartContext = ModelContext(container)
+        XCTAssertNoThrow(
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: restartContext,
+                directory: directory
+            )
+        )
+        let persisted = try ChekinanaModelContextResolver.cheki(
+            id: retained.item.id,
+            in: restartContext
+        )
+        XCTAssertEqual(persisted.idolIDs, [target.id])
+        XCTAssertTrue(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).isEmpty
+        )
+    }
+
+    func testConflictingChekiEditIntentBlocksImportAndClearBeforeGenerationChange() async throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let directory = try ChekiImageRefResolver.chekiImagesDirectory()
+        let retained = try retainedChekiEditIntent(
+            in: context,
+            directory: directory
+        )
+        let journal = try retained.handle.load()
+        defer {
+            retained.item.note = journal.databaseAfter.note
+            retained.item.updatedAt = journal.databaseAfter.updatedAt
+            try? context.save()
+            try? retained.handle.completeDatabaseAfter()
+            try? FileManager.default.removeItem(at: retained.targetURL)
+        }
+        retained.item.note = "later conflicting edit"
+        retained.item.updatedAt = Date(timeIntervalSinceReferenceDate: 499)
+        try context.save()
+        let prepared = try await emptyPreparedImport()
+        defer { ChekinanaDataImportTemporaryFiles.cleanup(prepared) }
+
+        do {
+            try await ChekinanaDataImporter.replaceLocalLibrary(
+                with: prepared,
+                in: context
+            )
+            XCTFail("conflicting retained intent must block import")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .fileRecoveryFailed
+            )
+        }
+        XCTAssertEqual(
+            try ChekinanaLibraryGenerationStore.current(in: ModelContext(container)),
+            retained.generation
+        )
+        XCTAssertTrue(
+            try ChekinanaImportTransactionHandle.discover(in: directory).isEmpty
+        )
+
+        do {
+            _ = try await ChekinanaLocalDataClearer.clear(
+                modelContext: context,
+                managedImagesDirectory: directory
+            )
+            XCTFail("conflicting retained intent must block clear")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("No data was cleared"))
+        }
+        XCTAssertEqual(
+            try ChekinanaLibraryGenerationStore.current(in: ModelContext(container)),
+            retained.generation
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            ChekinanaLocalDataClearJournalStore.journalURL(in: directory).path
+        ))
+        XCTAssertEqual(
+            try ChekinanaChekiEditPublicationHandle.discover(in: directory).count,
+            1
+        )
+        XCTAssertEqual(try Data(contentsOf: retained.targetURL), retained.preparedData)
     }
 
     func testExifAndInputQuarterTurnFeedUprightImportGeometry() async throws {
@@ -14524,6 +27626,964 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(request.hasClientToken)
     }
 
+    func testEdgeFitManifestDecodesDeliveredSchemaKeys() throws {
+        let manifest = try JSONDecoder().decode(
+            ChekinanaEdgeDetectorManifest.self,
+            from: Data(#"{"algorithmID":"ChekiEdgeFit-RT","semver":"2.0.0","build":"2026.09.03","outputSchemaVersion":"1.0.0","assetVersion":"cefrt2-fp32-20260903.1"}"#.utf8)
+        )
+
+        XCTAssertEqual(manifest.algorithmID, "ChekiEdgeFit-RT")
+        XCTAssertEqual(manifest.semver, "2.0.0")
+        XCTAssertEqual(manifest.build, "2026.09.03")
+        XCTAssertEqual(manifest.outputSchemaVersion, "1.0.0")
+        XCTAssertEqual(manifest.assetVersion, "cefrt2-fp32-20260903.1")
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            ChekinanaEdgeDetectorManifest.self,
+            from: Data(#"{"algorithmID":"ChekiEdgeFit-RT","version":"2.0.0","build":"1","schema":"1.0.0","assetVersion":"cefrt2-fp32-20260903.1"}"#.utf8)
+        ))
+    }
+
+    func testEdgeFitGeometryAllowsOutsideCornersAndRejectsInvalidQuads() throws {
+        let outside = [
+            ChekinanaScannerQuadrilateralPoint(x: -10, y: -20),
+            .init(x: 110, y: -20),
+            .init(x: 110, y: 220),
+            .init(x: -10, y: 220),
+        ]
+        XCTAssertEqual(
+            try ChekinanaEdgeFitGeometry.validated(
+                outside,
+                sourcePixelWidth: 100,
+                sourcePixelHeight: 200
+            ),
+            outside,
+            "The delivered schema permits original-pixel corners outside the image extent."
+        )
+        XCTAssertEqual(
+            try ChekinanaEdgeFitGeometry.orientation(of: outside),
+            .portrait
+        )
+        XCTAssertEqual(
+            try ChekinanaEdgeFitGeometry.orientation(of: [
+                .init(x: 0, y: 0), .init(x: 200, y: 0),
+                .init(x: 200, y: 100), .init(x: 0, y: 100),
+            ]),
+            .landscape
+        )
+
+        let invalid: [[ChekinanaScannerQuadrilateralPoint]] = [
+            [
+                .init(x: .nan, y: 0), .init(x: 10, y: 0),
+                .init(x: 10, y: 10), .init(x: 0, y: 10),
+            ],
+            [
+                .init(x: 0, y: 0), .init(x: 10, y: 0),
+                .init(x: 10, y: 0), .init(x: 0, y: 10),
+            ],
+            [
+                .init(x: 0, y: 0), .init(x: 10, y: 0),
+                .init(x: 20, y: 0), .init(x: 30, y: 0),
+            ],
+            [
+                .init(x: 0, y: 0), .init(x: 10, y: 10),
+                .init(x: 0, y: 10), .init(x: 10, y: 0),
+            ],
+        ]
+        for quadrilateral in invalid {
+            XCTAssertThrowsError(try ChekinanaEdgeFitGeometry.validated(
+                quadrilateral,
+                sourcePixelWidth: 100,
+                sourcePixelHeight: 200
+            ))
+        }
+    }
+
+    func testEdgeFitGeometrySortsCenterXThenY() {
+        func quad(centerX: Double, centerY: Double) -> [ChekinanaScannerQuadrilateralPoint] {
+            [
+                .init(x: centerX - 1, y: centerY - 1),
+                .init(x: centerX + 1, y: centerY - 1),
+                .init(x: centerX + 1, y: centerY + 1),
+                .init(x: centerX - 1, y: centerY + 1),
+            ]
+        }
+        let lowerRight = quad(centerX: 20, centerY: 30)
+        let upperRight = quad(centerX: 20, centerY: 10)
+        let left = quad(centerX: 10, centerY: 50)
+
+        XCTAssertEqual(
+            ChekinanaEdgeFitGeometry.sortedByCenter([
+                lowerRight, upperRight, left,
+            ]),
+            [left, upperRight, lowerRight]
+        )
+    }
+
+    func testEdgeFitRectificationClampsOutsideSamplesAndWritesUprightMini() async throws {
+        let source = scannerJPEGData(
+            color: .red,
+            size: CGSize(width: 100, height: 200)
+        )
+        let output = try await ChekinanaEdgeFitRectifier.rectify(
+            sourceData: source,
+            quadrilateral: [
+                .init(x: -10, y: -10), .init(x: 110, y: -10),
+                .init(x: 110, y: 210), .init(x: -10, y: 210),
+            ]
+        )
+
+        XCTAssertEqual(output.orientation, .portrait)
+        XCTAssertEqual(output.pixelWidth, 1_200)
+        XCTAssertEqual(output.pixelHeight, 1_908)
+        let imageSource = try XCTUnwrap(CGImageSourceCreateWithData(
+            output.data as CFData,
+            nil
+        ))
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil)
+                as? [CFString: Any]
+        )
+        XCTAssertEqual(
+            (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+            1_200
+        )
+        XCTAssertEqual(
+            (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+            1_908
+        )
+        let corner = try rgbaPixel(output.data, x: 1, y: 1)
+        XCTAssertGreaterThan(corner.red, 180)
+        XCTAssertLessThan(corner.green, 80)
+        XCTAssertLessThan(corner.blue, 80)
+    }
+
+    func testEdgeFitRectificationAppliesWhiteBalanceFromRectifiedBorder() async throws {
+        XCTAssertEqual(ChekinanaEdgeFitRectifier.whiteBalanceMinimumChannelValue, 140)
+        let size = CGSize(width: 300, height: 477)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let source = UIGraphicsImageRenderer(size: size, format: format).image {
+            context in
+            UIColor(red: 150 / 255, green: 200 / 255, blue: 220 / 255, alpha: 1)
+                .setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            UIColor(white: 0.16, alpha: 1).setFill()
+            context.fill(CGRect(x: 21, y: 38, width: 258, height: 345))
+        }.jpegData(compressionQuality: 0.98)!
+        let quadrilateral: [ChekinanaScannerQuadrilateralPoint] = [
+            .init(x: 0, y: 0), .init(x: 300, y: 0),
+            .init(x: 300, y: 477), .init(x: 0, y: 477),
+        ]
+
+        let unbalanced = try await ChekinanaEdgeFitRectifier.rectify(
+            sourceData: source,
+            quadrilateral: quadrilateral,
+            appliesWhiteBalance: false
+        )
+        let balanced = try await ChekinanaEdgeFitRectifier.rectify(
+            sourceData: source,
+            quadrilateral: quadrilateral,
+            appliesWhiteBalance: true
+        )
+
+        XCTAssertFalse(unbalanced.whiteBalanceApplied)
+        XCTAssertTrue(balanced.whiteBalanceApplied)
+        let before = try rgbaPixel(unbalanced.data, x: 10, y: 10)
+        let after = try rgbaPixel(balanced.data, x: 10, y: 10)
+        func channelSpread(
+            _ pixel: (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)
+        ) -> Int {
+            let channels = [Int(pixel.red), Int(pixel.green), Int(pixel.blue)]
+            return channels.max()! - channels.min()!
+        }
+        func targetDistance(
+            _ pixel: (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8)
+        ) -> Int {
+            abs(Int(pixel.red) - 240)
+                + abs(Int(pixel.green) - 240)
+                + abs(Int(pixel.blue) - 240)
+        }
+        XCTAssertGreaterThan(channelSpread(before), 25)
+        XCTAssertLessThan(channelSpread(after), channelSpread(before))
+        XCTAssertLessThan(targetDistance(after), targetDistance(before))
+    }
+
+    func testOnDeviceScannerErrorsTrackLanguageWithoutCachingOldCopy() throws {
+        let manifest = ChekinanaEdgeDetectorManifest(
+            algorithmID: "test",
+            semver: "1.0.0",
+            build: "test",
+            outputSchemaVersion: "test",
+            assetVersion: "test"
+        )
+        let errors: [ChekinanaOnDeviceScannerError] = [
+            .assetUnavailable,
+            .adapterUnavailable(manifest),
+            .invalidAssetManifest,
+            .modelUnavailable,
+            .modelOutputInvalid,
+            .detectorRuntimeFailure,
+            .invalidSourceImage,
+            .sourceGeometryMismatch,
+            .invalidQuadrilateral,
+            .rectificationFailed,
+            .noResults,
+        ]
+        let expectations: [(ChekinanaAppLanguage, [String])] = [
+            (.english, [
+                "The on-device Cheki scanner asset is not installed in this build.",
+                "This Cheki scanner asset does not yet have a compatible on-device adapter.",
+                "The installed Cheki scanner manifest is invalid.",
+                "A required on-device Cheki scanner model could not be loaded.",
+                "The on-device Cheki scanner returned an invalid model output.",
+                "The on-device Cheki scanner could not process this image.",
+                "The selected scan image is invalid.",
+                "The scanner result does not match the selected image.",
+                "The on-device scanner returned invalid Cheki corners.",
+                "The detected Cheki could not be extracted on this device.",
+                "No Cheki was detected in the selected image.",
+            ]),
+            (.japanese, [
+                "オンデバイスのチェキスキャナーアセットがこのビルドにインストールされていません。",
+                "このチェキスキャナーアセットには、対応するオンデバイスアダプターがまだありません。",
+                "インストール済みのチェキスキャナーマニフェストが無効です。",
+                "必要なオンデバイスのチェキスキャナーモデルを読み込めませんでした。",
+                "オンデバイスのチェキスキャナーから無効なモデル出力が返されました。",
+                "オンデバイスのチェキスキャナーでこの画像を処理できませんでした。",
+                "選択したスキャン画像が無効です。",
+                "スキャナーの結果が選択した画像と一致しません。",
+                "オンデバイススキャナーから無効なチェキの四隅が返されました。",
+                "検出したチェキをこのデバイスで切り出せませんでした。",
+                "選択した画像からチェキを検出できませんでした。",
+            ]),
+            (.simplifiedChinese, [
+                "此版本未安装设备端拍立得扫描资源。",
+                "此拍立得扫描资源尚无兼容的设备端适配器。",
+                "已安装的拍立得扫描清单无效。",
+                "无法加载所需的设备端拍立得扫描模型。",
+                "设备端拍立得扫描返回了无效的模型输出。",
+                "设备端拍立得扫描无法处理此图片。",
+                "所选扫描图片无效。",
+                "扫描结果与所选图片不匹配。",
+                "设备端扫描返回了无效的拍立得四角坐标。",
+                "无法在此设备上提取检测到的拍立得。",
+                "在所选图片中未检测到拍立得。",
+            ]),
+        ]
+        let store = ChekinanaLanguageStore.shared
+        let original = store.language
+        defer { store.language = original }
+
+        for (language, expected) in expectations {
+            store.language = language
+            XCTAssertEqual(
+                try errors.map { try XCTUnwrap($0.errorDescription) },
+                expected,
+                language.rawValue
+            )
+        }
+    }
+
+    func testOnDeviceScannerUsesInjectedDetectorAndAlwaysReturnsMini() async throws {
+        let source = scannerJPEGData(
+            color: .purple,
+            size: CGSize(width: 200, height: 120)
+        )
+        let manifest = ChekinanaEdgeDetectorManifest(
+            algorithmID: "ChekiEdgeFit-RT",
+            semver: "2.0.0",
+            build: "2026.09.03",
+            outputSchemaVersion: "quad-upright-pixels-v1",
+            assetVersion: "cefrt2-fp32-20260903.1"
+        )
+        let detector = StaticEdgeDetector(output: .init(
+            manifest: manifest,
+            sourcePixelWidth: 200,
+            sourcePixelHeight: 120,
+            quadrilaterals: [[
+                .init(x: 10, y: 10), .init(x: 190, y: 10),
+                .init(x: 190, y: 110), .init(x: 10, y: 110),
+            ]]
+        ))
+        let result = try await ChekinanaOnDeviceScannerClient(
+            detector: detector
+        ).process(
+            ChekinanaPendingChekiImage(data: source, filenameExtension: "jpg"),
+            options: scannerOptions(dateRecognitionEnabled: false)
+        )
+
+        let detectCount = await detector.detectCount()
+        XCTAssertEqual(detectCount, 1)
+        XCTAssertEqual(result.images.count, 1)
+        XCTAssertEqual(result.images.first?.inferredChekiSize, .mini)
+        XCTAssertEqual(result.images.first?.imagePixelWidth, 1_908)
+        XCTAssertEqual(result.images.first?.imagePixelHeight, 1_200)
+        XCTAssertEqual(result.images.first?.filenameExtension, "jpg")
+        let sourceAnnotation = try XCTUnwrap(result.images.first?.sourceAnnotation)
+        XCTAssertTrue(sourceAnnotation.isValid)
+        XCTAssertEqual(sourceAnnotation.sourcePixelWidth, 200)
+        XCTAssertEqual(sourceAnnotation.sourcePixelHeight, 120)
+        XCTAssertNil(sourceAnnotation.previewImageData)
+        let reviewSource = try XCTUnwrap(result.images.first?.reviewRectificationSource)
+        let rendered = await ChekinanaScannerAnnotationPreviewRenderer.renderFromSource(
+            reviewSource
+        )
+        let annotationData = try XCTUnwrap(rendered.data)
+        let annotationSource = try XCTUnwrap(CGImageSourceCreateWithData(
+            annotationData as CFData, nil
+        ))
+        XCTAssertEqual(CGImageSourceGetType(annotationSource) as String?, "public.jpeg")
+    }
+
+    func testOnDeviceScannerDefersPortraitAnnotationPreviewUntilRequested() async throws {
+        let source = scannerJPEGData(
+            color: .cyan,
+            size: CGSize(width: 900, height: 1_400)
+        )
+        let detector = StaticEdgeDetector(output: .init(
+            manifest: ChekinanaEdgeDetectorManifest(
+                algorithmID: "ChekiEdgeFit-RT",
+                semver: "2.0.0",
+                build: "2026.09.03",
+                outputSchemaVersion: "quad-upright-pixels-v1",
+                assetVersion: "cefrt2-fp32-20260903.1"
+            ),
+            sourcePixelWidth: 900,
+            sourcePixelHeight: 1_400,
+            quadrilaterals: [[
+                .init(x: 20, y: 20), .init(x: 880, y: 20),
+                .init(x: 880, y: 1_380), .init(x: 20, y: 1_380),
+            ]]
+        ))
+
+        let result = try await ChekinanaOnDeviceScannerClient(
+            detector: detector
+        ).process(
+            ChekinanaPendingChekiImage(data: source, filenameExtension: "jpg"),
+            options: scannerOptions(dateRecognitionEnabled: false)
+        )
+
+        let annotation = try XCTUnwrap(result.images.first?.sourceAnnotation)
+        XCTAssertNil(annotation.previewImageData)
+        let reviewSource = try XCTUnwrap(result.images.first?.reviewRectificationSource)
+        let outcome = await ChekinanaScannerAnnotationPreviewRenderer.renderFromSource(
+            reviewSource
+        )
+        let renderedData = try XCTUnwrap(outcome.data)
+        let previewSource = try XCTUnwrap(CGImageSourceCreateWithData(
+            renderedData as CFData,
+            nil
+        ))
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(previewSource, 0, nil)
+                as? [CFString: Any]
+        )
+        let width = try XCTUnwrap(
+            (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
+        )
+        let height = try XCTUnwrap(
+            (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+        )
+        XCTAssertLessThanOrEqual(
+            max(width, height),
+            ChekinanaLiveScannerUploadPreparer.maximumAnnotationPreviewDimension + 1
+        )
+    }
+
+    func testOnDeviceScannerSharesOneOriginalAcrossMultipleDetections() async throws {
+        let source = scannerJPEGData(
+            color: .cyan,
+            size: CGSize(width: 240, height: 160)
+        )
+        let detector = StaticEdgeDetector(output: .init(
+            manifest: ChekinanaEdgeDetectorManifest(
+                algorithmID: "ChekiEdgeFit-RT",
+                semver: "2.0.0",
+                build: "2026.09.03",
+                outputSchemaVersion: "quad-upright-pixels-v1",
+                assetVersion: "cefrt2-fp32-20260903.1"
+            ),
+            sourcePixelWidth: 240,
+            sourcePixelHeight: 160,
+            quadrilaterals: [
+                [
+                    .init(x: 5, y: 5), .init(x: 115, y: 5),
+                    .init(x: 115, y: 155), .init(x: 5, y: 155),
+                ],
+                [
+                    .init(x: 125, y: 5), .init(x: 235, y: 5),
+                    .init(x: 235, y: 155), .init(x: 125, y: 155),
+                ],
+            ]
+        ))
+        let result = try await ChekinanaOnDeviceScannerClient(detector: detector).process(
+            ChekinanaPendingChekiImage(data: source, filenameExtension: "jpg"),
+            options: scannerOptions(dateRecognitionEnabled: false)
+        )
+
+        XCTAssertEqual(result.images.count, 2)
+        let first = try XCTUnwrap(result.images[0].reviewRectificationSource)
+        let second = try XCTUnwrap(result.images[1].reviewRectificationSource)
+        XCTAssertTrue(first.sourceImage === second.sourceImage)
+        XCTAssertEqual(first.sourceIdentity, second.sourceIdentity)
+        XCTAssertNil(result.images[0].sourceAnnotation?.previewImageData)
+        XCTAssertNil(result.images[1].sourceAnnotation?.previewImageData)
+    }
+
+    func testProductionOnDeviceScannerLoadsFrozenRTV2AssetsWithoutRemoteFallback() {
+        XCTAssertNoThrow(try ChekinanaEdgeDetectorAssetRegistry.productionDetector())
+        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.modelResourceNames.count, 3)
+        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.detectorThreshold, 0.9267578125)
+        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.semanticVersion, "2.0.0")
+    }
+
+    func testEdgeFitClippedFloatResizeMatchesTheFullOpenCVResizeSlice() {
+        let inputWidth = 9
+        let inputHeight = 7
+        let outputWidth = 173
+        let outputHeight = 129
+        let values = (0..<(inputWidth * inputHeight)).map { index in
+            Float(sin(Double(index) * 0.29) * 0.45 + 0.5)
+        }
+        let destinationX = 41..<132
+        let destinationY = 17..<101
+        let full = ChekinanaEdgeFitRTV2ReferenceMath.openCVLinearResizeFloat(
+            values,
+            width: inputWidth,
+            height: inputHeight,
+            outputWidth: outputWidth,
+            outputHeight: outputHeight
+        )
+        let clipped = ChekinanaEdgeFitRTV2ReferenceMath.openCVLinearResizeFloatRegion(
+            values,
+            width: inputWidth,
+            height: inputHeight,
+            outputWidth: outputWidth,
+            outputHeight: outputHeight,
+            destinationX: destinationX,
+            destinationY: destinationY
+        )
+        let expected = destinationY.flatMap { y in
+            destinationX.map { x in full[y * outputWidth + x] }
+        }
+
+        XCTAssertEqual(clipped, expected)
+    }
+
+    func testEdgeFitRTV2StaticAuditIsFP32Only() throws {
+        let modelRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Chekinana/Models/ChekiEdgeFit-RT-v2")
+        let sourceRoot = modelRoot.appendingPathComponent("Provenance")
+        for name in ChekinanaEdgeFitRTV2Contract.modelResourceNames {
+            let audit = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: sourceRoot
+                    .appendingPathComponent("\(name)_audit.json"))) as? [String: Any]
+            )
+            XCTAssertEqual(audit["computePrecision"] as? String, "FLOAT32")
+            let staticAudit = try XCTUnwrap(audit["static_type_audit"] as? [String: Any])
+            XCTAssertEqual(staticAudit["all_float_mil_types_fp32"] as? Bool, true)
+            let occurrences = try XCTUnwrap(
+                staticAudit["tensor_type_occurrences"] as? [String: Any]
+            )
+            XCTAssertNil(occurrences["FLOAT16"])
+            let specification = try Data(contentsOf: modelRoot.appendingPathComponent(
+                "\(name).mlpackage/Data/com.apple.CoreML/model.mlmodel"
+            ))
+            XCTAssertNil(
+                specification.range(of: Data("FLOAT16".utf8)),
+                "The packaged Core ML graph must not contain a FLOAT16 type marker."
+            )
+        }
+    }
+
+    func testEdgeFitRTV2ManifestUsesDeliveredIdentity() throws {
+        let manifestURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(
+                "Chekinana/Models/ChekiEdgeFit-RT-v2/ChekiEdgeFit-RT-v2.manifest.json"
+            )
+        let manifest = try JSONDecoder().decode(
+            ChekinanaEdgeDetectorManifest.self,
+            from: Data(contentsOf: manifestURL)
+        )
+        XCTAssertEqual(manifest.algorithmID, "ChekiEdgeFit-RT")
+        XCTAssertEqual(manifest.semver, "2.0.0")
+        XCTAssertEqual(manifest.build, "2026.09.03")
+        XCTAssertEqual(manifest.outputSchemaVersion, "1.0.0")
+        XCTAssertEqual(manifest.assetVersion, "cefrt2-fp32-20260903.1")
+    }
+
+    func testEdgeFitRTV2DetectorFixtureOneAllowsOnlyKnownInactivePairSwap() throws {
+        let root = try XCTUnwrap(Bundle(for: type(of: self)).url(
+            forResource: "ChekiEdgeFitRTV2",
+            withExtension: nil
+        ))
+        func floats(_ name: String) throws -> [Float] {
+            let data = try Data(contentsOf: root.appendingPathComponent("Fixtures/\(name)"))
+            XCTAssertTrue(data.count.isMultiple(of: 4))
+            return data.withUnsafeBytes { bytes in
+                (0..<(data.count / 4)).map { index in
+                    Float(bitPattern: UInt32(littleEndian: bytes.loadUnaligned(
+                        fromByteOffset: index * 4,
+                        as: UInt32.self
+                    )))
+                }
+            }
+        }
+        let inputValues = try floats("CEFRT2Detector_1_image.f32")
+        let input = try MLMultiArray(
+            shape: [1, 3, 768, 768],
+            dataType: .float32
+        )
+        XCTAssertTrue(RTV2MultiArray.isContiguous(input, shape: [1, 3, 768, 768]))
+        inputValues.withUnsafeBufferPointer { source in
+            guard let sourceBase = source.baseAddress else { return }
+            input.dataPointer.copyMemory(
+                from: sourceBase,
+                byteCount: source.count * MemoryLayout<Float>.size
+            )
+        }
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .cpuOnly
+        configuration.allowLowPrecisionAccumulationOnGPU = false
+        let modelURL = try XCTUnwrap(Bundle.main.url(
+            forResource: "CEFRT2Detector",
+            withExtension: "mlmodelc"
+        ))
+        let model = try MLModel(contentsOf: modelURL, configuration: configuration)
+        let result = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+            "image": MLFeatureValue(multiArray: input),
+        ]))
+        let actualLogits = try RTV2ArrayView(
+            XCTUnwrap(result.featureValue(for: "logits")?.multiArrayValue),
+            shape: [1, 300]
+        ).contiguousValues()
+        let actualBoxes = try RTV2ArrayView(
+            XCTUnwrap(result.featureValue(for: "boxes_cxcywh")?.multiArrayValue),
+            shape: [1, 300, 4]
+        ).contiguousValues()
+        let expectedLogits = try floats("CEFRT2Detector_1_logits.f32")
+        let expectedBoxes = try floats("CEFRT2Detector_1_boxes_cxcywh.f32")
+        func failed(
+            _ actual: [Float],
+            _ expected: [Float],
+            absolute: Double,
+            relative: Double
+        ) -> Int {
+            zip(actual, expected).filter { actual, expected in
+                let difference = abs(Double(actual) - Double(expected))
+                return !actual.isFinite
+                    || difference > absolute + relative * abs(Double(expected))
+            }.count
+        }
+        let directFailures = failed(
+            actualLogits,
+            expectedLogits,
+            absolute: 0.001,
+            relative: 0.0001
+        ) + failed(
+            actualBoxes,
+            expectedBoxes,
+            absolute: 0.001,
+            relative: 0.0001
+        )
+        var pairedLogits = actualLogits
+        pairedLogits.swapAt(190, 191)
+        var pairedBoxes = actualBoxes
+        for coordinate in 0..<4 {
+            pairedBoxes.swapAt(190 * 4 + coordinate, 191 * 4 + coordinate)
+        }
+        let pairedFailures = failed(
+            pairedLogits,
+            expectedLogits,
+            absolute: 0.001,
+            relative: 0.0001
+        ) + failed(
+            pairedBoxes,
+            expectedBoxes,
+            absolute: 0.001,
+            relative: 0.0001
+        )
+        XCTAssertTrue(directFailures == 0 || pairedFailures == 0)
+        func active(_ logits: [Float]) -> [Int] {
+            logits.enumerated().compactMap { index, logit in
+                let score = 1 / (1 + exp(-logit))
+                return score >= ChekinanaEdgeFitRTV2Contract.detectorThreshold
+                    ? index : nil
+            }
+        }
+        XCTAssertEqual(active(actualLogits), active(expectedLogits))
+        XCTAssertFalse(active(actualLogits).contains(190))
+        XCTAssertFalse(active(actualLogits).contains(191))
+    }
+
+    func testEdgeFitRTV2PillowFModeBilinearPreservesFractionalPixels() {
+        let enlarged = ChekinanaEdgeFitRTV2ReferenceMath.pillowBilinearResizeFloat(
+            [0, 10, 20, 30],
+            width: 2,
+            height: 2,
+            outputWidth: 4,
+            outputHeight: 4
+        )
+        XCTAssertEqual(enlarged, [
+            0, 2.5, 7.5, 10,
+            5, 7.5, 12.5, 15,
+            15, 17.5, 22.5, 25,
+            20, 22.5, 27.5, 30,
+        ])
+
+        let reduced = ChekinanaEdgeFitRTV2ReferenceMath.pillowBilinearResizeFloat(
+            [0, 7, 14, 21],
+            width: 4,
+            height: 1,
+            outputWidth: 2,
+            outputHeight: 1
+        )
+        XCTAssertEqual(reduced[0], 4, accuracy: 0.000_001)
+        XCTAssertEqual(reduced[1], 17, accuracy: 0.000_001)
+    }
+
+    func testEdgeFitRTV2MaskResizeUsesAlignCornersFalseThenStrictZeroThreshold() {
+        let resized = ChekinanaEdgeFitRTV2ReferenceMath.resizeAlignCornersFalse(
+            [0, 10, 20, 30],
+            width: 2,
+            height: 2,
+            outputWidth: 4,
+            outputHeight: 4
+        )
+        XCTAssertEqual(resized, [
+            0, 2.5, 7.5, 10,
+            5, 7.5, 12.5, 15,
+            15, 17.5, 22.5, 25,
+            20, 22.5, 27.5, 30,
+        ])
+        let thresholded = ChekinanaEdgeFitRTV2ReferenceMath
+            .resizeAlignCornersFalseAndThreshold(
+                [-1, 0, 0, 1],
+                width: 2,
+                height: 2,
+                outputWidth: 2,
+                outputHeight: 2
+            )
+        XCTAssertEqual(thresholded, [false, false, false, true])
+    }
+
+    func testEdgeFitRTV2Square20AndFP64InverseRoundTrip() throws {
+        let source = Array(repeating: UInt8(127), count: 120 * 80 * 3)
+        let crop = try ChekinanaEdgeFitRTV2ReferenceMath.openCVSquare20WarpFP32(
+            source,
+            width: 120,
+            height: 80,
+            box: [20.25, 10.5, 99.75, 69.5],
+            borderRGB: [123.675, 116.28, 103.53]
+        )
+        XCTAssertEqual(crop.side, 111)
+        let cropCorners = [
+            RTV2Point(x: 0, y: 0),
+            RTV2Point(x: Double(crop.side - 1), y: 0),
+            RTV2Point(x: Double(crop.side - 1), y: Double(crop.side - 1)),
+            RTV2Point(x: 0, y: Double(crop.side - 1)),
+        ]
+        let restored = ChekinanaEdgeFitRTV2ReferenceMath.restoreCropPointsFP64(
+            cropCorners,
+            crop: crop
+        )
+        XCTAssertEqual(restored[0].x, Double(crop.sourceMinimumX), accuracy: 0.000_001)
+        XCTAssertEqual(restored[0].y, Double(crop.sourceMinimumY), accuracy: 0.000_001)
+        XCTAssertEqual(
+            restored[2].x,
+            Double(crop.sourceMinimumX + crop.sourceWidth),
+            accuracy: 0.000_01
+        )
+        XCTAssertEqual(
+            restored[2].y,
+            Double(crop.sourceMinimumY + crop.sourceHeight),
+            accuracy: 0.000_01
+        )
+    }
+
+    func testEdgeFitRTV2FrozenGUsesDeliveredDefaultsOnRectangle() throws {
+        let width = 80
+        let height = 100
+        var values = Array(repeating: false, count: width * height)
+        for y in 20...79 {
+            for x in 10...69 { values[y * width + x] = true }
+        }
+        let fitted = try RTV2QuadrilateralFitter.fit(mask: RTV2BinaryMask(
+            width: width,
+            height: height,
+            values: values
+        ))
+        let expected = [
+            RTV2Point(x: 10, y: 20), RTV2Point(x: 69, y: 20),
+            RTV2Point(x: 69, y: 79), RTV2Point(x: 10, y: 79),
+        ]
+        XCTAssertEqual(fitted.count, expected.count)
+        for (actual, expected) in zip(fitted, expected) {
+            XCTAssertEqual(actual.x, expected.x, accuracy: 0.001)
+            XCTAssertEqual(actual.y, expected.y, accuracy: 0.001)
+        }
+    }
+
+    func testAllEightSyntheticEdgeFitVectorsDecodeUprightAndValidateGeometry() throws {
+        let root = try XCTUnwrap(
+            Bundle(for: type(of: self)).url(
+                forResource: "ChekiEdgeFitRTV2",
+                withExtension: nil
+            )
+        )
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(
+                "expected_geometry.json"
+            ))) as? [String: Any]
+        )
+        let records = try XCTUnwrap(payload["records"] as? [[String: Any]])
+        XCTAssertEqual(records.count, 8)
+        for record in records {
+            let path = try XCTUnwrap(record["path"] as? String)
+            let rawSize = try XCTUnwrap(record["rawSize"] as? [Int])
+            let orientation = try XCTUnwrap(record["exifOrientation"] as? Int)
+            let data = try Data(contentsOf: root.appendingPathComponent(path))
+            let upright = try ChekinanaEdgeFitRTV2Contract.uprightPixelDimensions(in: data)
+            XCTAssertEqual(upright.0, orientation == 6 ? rawSize[1] : rawSize[0], path)
+            XCTAssertEqual(upright.1, orientation == 6 ? rawSize[0] : rawSize[1], path)
+
+            let groups = record["groundTruthRawQuadrilaterals"] as? [[[Double]]] ?? []
+            for raw in groups {
+                let points = raw.map {
+                    ChekinanaScannerQuadrilateralPoint(x: $0[0], y: $0[1])
+                }
+                XCTAssertNoThrow(try ChekinanaEdgeFitGeometry.validated(
+                    points,
+                    sourcePixelWidth: rawSize[0],
+                    sourcePixelHeight: rawSize[1]
+                ), path)
+            }
+        }
+    }
+
+    func testDateRecognitionReceivesScannerExtractedBytesAndExtension() async throws {
+        let rectified = scannerJPEGData(
+            color: .orange,
+            size: CGSize(width: 24, height: 40)
+        )
+        let probe = DateAnnotationInputProbe()
+        let fixture = try makeFixture(
+            scannerProcess: { _, _ in
+                ChekinanaScannerProcessResult(images: [
+                    ChekinanaScannerResultImage(
+                        data: rectified,
+                        imagePixelWidth: 24,
+                        imagePixelHeight: 40,
+                        filenameExtension: "jpg",
+                        inferredChekiSize: .mini
+                    ),
+                ], warningCount: 0)
+            },
+            dateAnnotate: { image in
+                await probe.record(image)
+                return .notDetected
+            }
+        )
+
+        guard case .chekiScannedCards = await fixture.executor.execute(
+            "scancheki date_recognition=true",
+            pendingChekiImages: [testImage(1)]
+        ) else {
+            return XCTFail("expected scan review cards")
+        }
+        let snapshot = await probe.snapshot()
+        let received = try XCTUnwrap(snapshot)
+        XCTAssertEqual(received.data, rectified)
+        XCTAssertEqual(received.filenameExtension, "jpg")
+    }
+
+    func testStreamingScanOverlapsLaterSourceProcessingWithReadyRecognition() async throws {
+        let probe = StreamingScanOverlapProbe()
+        let sourceIDs = (0..<4).map { _ in UUID() }
+        let sourceIndexByID = Dictionary(
+            uniqueKeysWithValues: sourceIDs.enumerated().map { ($0.element, $0.offset) }
+        )
+        let inputData = scannerPNGData(color: .white)
+        let resultData = scannerPNGData(color: .orange)
+        let fixture = try makeFixture(
+            scannerProcess: { input, _ in
+                let sourceIndex = sourceIndexByID[input.sourceID ?? UUID()] ?? -1
+                await probe.processingStarted(sourceIndex: sourceIndex)
+                try await Task.sleep(for: .milliseconds(sourceIndex.isMultiple(of: 2) ? 20 : 10))
+                await probe.processingFinished()
+                return ChekinanaScannerProcessResult(images: [
+                    ChekinanaScannerResultImage(
+                        data: resultData,
+                        imagePixelWidth: 2,
+                        imagePixelHeight: 2,
+                        filenameExtension: "png",
+                        inferredChekiSize: .mini
+                    ),
+                ], warningCount: 0)
+            },
+            dateAnnotate: { _ in
+                await probe.recognitionStarted()
+                try await Task.sleep(for: .milliseconds(180))
+                await probe.recognitionFinished()
+                return .notDetected
+            }
+        )
+
+        let response = await fixture.executor.executeStreamingScan(
+            "scancheki date_recognition=true",
+            sourceCount: sourceIDs.count
+        ) { sourceIndex in
+            ChekinanaPendingChekiImage(
+                data: inputData,
+                filenameExtension: "png",
+                sourceID: sourceIDs[sourceIndex],
+                sourceOrigin: .library
+            )
+        }
+
+        guard case .chekiScannedCards(_, warningCount: _, let cards) = response else {
+            return XCTFail("expected streaming scan cards")
+        }
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(cards.count, 4)
+        XCTAssertEqual(snapshot.maximumProcessingInFlight, 2)
+        XCTAssertTrue(snapshot.laterSourceStartedDuringRecognition)
+        XCTAssertEqual(snapshot.processingInFlight, 0)
+        XCTAssertEqual(snapshot.recognitionInFlight, 0)
+    }
+
+    func testStreamingScanCountsOneLoadFailureOnceAndKeepsProgressWithinTotals() async throws {
+        var updates: [ChekinanaScanProgress] = []
+        var embedding = Array(repeating: Float.zero, count: 256)
+        embedding[0] = 1
+        let resultData = scannerPNGData(color: .orange)
+        let fixture = try makeFixture(
+            scannerProcess: { _, _ in
+                ChekinanaScannerProcessResult(images: [resultData], warningCount: 0)
+            },
+            patternEncode: { _ in embedding },
+            dateAnnotate: { _ in .notDetected },
+            scanProgressObserver: { updates.append($0) }
+        )
+        let idol = Idol(name: "Streaming Progress Candidate")
+        idol.patterns = [embedding]
+        fixture.context.insert(idol)
+        try fixture.context.save()
+
+        let response = await fixture.executor.executeStreamingScan(
+            "scancheki date_recognition=true idol_recognition=true "
+                + "candidates=\(idol.id.uuidString.lowercased())",
+            sourceCount: 2
+        ) { sourceIndex in
+            if sourceIndex == 0 { throw ScannerMockError.failed }
+            return self.testImage(UInt8(sourceIndex + 1))
+        }
+
+        guard case .chekiScannedCards(let count, let warningCount, _) = response else {
+            return XCTFail("expected the successfully loaded source to reach Review")
+        }
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(warningCount, 1)
+        XCTAssertEqual(updates.map(\.imageProcessedCount).max(), 2)
+        XCTAssertEqual(updates.last?.imageProcessedCount, 2)
+        XCTAssertEqual(updates.last?.imageProcessTotal, 2)
+        XCTAssertEqual(updates.last?.dateCompletedCount, 1)
+        XCTAssertEqual(updates.last?.dateTotalCount, 1)
+        XCTAssertEqual(updates.last?.idolCompletedCount, 1)
+        XCTAssertEqual(updates.last?.idolTotalCount, 1)
+        XCTAssertTrue(updates.allSatisfy { progress in
+            progress.imageProcessedCount <= progress.imageProcessTotal
+                && progress.dateCompletedCount <= progress.dateTotalCount
+                && progress.idolCompletedCount <= progress.idolTotalCount
+        })
+    }
+
+    func testStreamingScanCountsMultipleLoadFailuresOnceEach() async throws {
+        var updates: [ChekinanaScanProgress] = []
+        let resultData = scannerPNGData(color: .orange)
+        let fixture = try makeFixture(
+            scannerProcess: { _, _ in
+                ChekinanaScannerProcessResult(images: [resultData], warningCount: 0)
+            },
+            scanProgressObserver: { updates.append($0) }
+        )
+
+        let response = await fixture.executor.executeStreamingScan(
+            "scancheki",
+            sourceCount: 3
+        ) { sourceIndex in
+            if sourceIndex != 1 { throw ScannerMockError.failed }
+            return self.testImage(UInt8(sourceIndex + 1))
+        }
+
+        guard case .chekiScannedCards(let count, let warningCount, _) = response else {
+            return XCTFail("expected the successfully loaded source to reach Review")
+        }
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(warningCount, 2)
+        XCTAssertEqual(updates.map(\.imageProcessedCount).max(), 3)
+        XCTAssertEqual(updates.last?.imageProcessedCount, 3)
+        XCTAssertEqual(updates.last?.imageProcessTotal, 3)
+        XCTAssertTrue(updates.allSatisfy {
+            $0.imageProcessedCount <= $0.imageProcessTotal
+                && $0.dateCompletedCount <= $0.dateTotalCount
+                && $0.idolCompletedCount <= $0.idolTotalCount
+        })
+    }
+
+    func testCancelledStreamingLoadNeverOverCompletesProgress() async throws {
+        var updates: [ChekinanaScanProgress] = []
+        let fixture = try makeFixture(
+            scannerProcess: { _, _ in
+                ChekinanaScannerProcessResult(
+                    images: [self.scannerPNGData(color: .orange)],
+                    warningCount: 0
+                )
+            },
+            scanProgressObserver: { updates.append($0) }
+        )
+        let task = Task { @MainActor in
+            await fixture.executor.executeStreamingScan(
+                "scancheki",
+                sourceCount: 4
+            ) { sourceIndex in
+                try await Task.sleep(for: .seconds(2))
+                return self.testImage(UInt8(sourceIndex + 1))
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(30))
+        task.cancel()
+        _ = await task.value
+
+        XCTAssertTrue(updates.allSatisfy {
+            $0.imageProcessedCount <= $0.imageProcessTotal
+                && $0.dateCompletedCount <= $0.dateTotalCount
+                && $0.idolCompletedCount <= $0.idolTotalCount
+        })
+        XCTAssertLessThanOrEqual(updates.map(\.imageProcessedCount).max() ?? 0, 4)
+    }
+
+    func testProductStreamingProgressDoesNotTranslateLoadFailuresTwice() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("imageLoadFailureCount"))
+        XCTAssertFalse(source.contains(
+            "progress.imageProcessedCount + imageLoadFailureCount"
+        ))
+        XCTAssertTrue(source.contains(
+            "imageCompleted: min(progress.imageProcessedCount, progress.imageProcessTotal)"
+        ))
+    }
+
     func testScannerProcessMakesNoImplicitRuntimeControlRequest() async throws {
         let probe = ScannerManagedProxyProbe(resultImage: scannerPNGData(color: .white))
         ChekinanaRuntimeMockURLProtocol.handler = { request in
@@ -14625,7 +28685,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testMediaRelationshipResolverRefetchesAcrossModelContextsBeforeInsert() throws {
-        let schema = Schema([Idol.self, IdolPatternState.self, Event.self, EventImage.self, Cheki.self, Shame.self, Douga.self])
+        let schema = Schema([Idol.self, IdolPatternState.self, Event.self, EventImage.self, MediaItem.self])
         let configuration = ModelConfiguration(
             schema: schema,
             isStoredInMemoryOnly: true
@@ -14651,9 +28711,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(relationships.idols.allSatisfy { $0.modelContext === writeContext })
         XCTAssertTrue(relationships.event?.modelContext === writeContext)
 
-        let shame = Shame()
-        let douga = Douga()
-        let cheki = Cheki()
+        let shame = MediaItem(imageRef: "relationship-shame.jpg")
+        let douga = MediaItem(videoRef: "relationship-douga.mov")
+        let cheki = MediaItem(imageRef: "relationship-cheki.jpg")
         writeContext.insert(shame)
         writeContext.insert(douga)
         writeContext.insert(cheki)
@@ -14665,15 +28725,15 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         let verificationContext = ModelContext(container)
         let savedShame = try XCTUnwrap(
-            try verificationContext.fetch(FetchDescriptor<Shame>())
+            try verificationContext.fetch(FetchDescriptor<MediaItem>())
                 .first(where: { $0.id == shame.id })
         )
         let savedDouga = try XCTUnwrap(
-            try verificationContext.fetch(FetchDescriptor<Douga>())
+            try verificationContext.fetch(FetchDescriptor<MediaItem>())
                 .first(where: { $0.id == douga.id })
         )
         let savedCheki = try XCTUnwrap(
-            try verificationContext.fetch(FetchDescriptor<Cheki>())
+            try verificationContext.fetch(FetchDescriptor<MediaItem>())
                 .first(where: { $0.id == cheki.id })
         )
         for ids in [
@@ -14684,6 +28744,36 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             XCTAssertEqual(ids, idolIDs)
         }
         XCTAssertEqual(savedCheki.event?.id, eventID)
+    }
+
+    func testMediaRelationshipResolverUsesBoundedPredicateFetches() throws {
+        let dataModelURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaDataModel.swift")
+        let source = try String(contentsOf: dataModelURL, encoding: .utf8)
+        let resolverStart = try XCTUnwrap(
+            source.range(of: "enum ChekinanaModelContextResolver")?.lowerBound
+        )
+        let resolverEnd = try XCTUnwrap(source.range(
+            of: "enum ChekinanaDataStore",
+            range: resolverStart..<source.endIndex
+        )?.lowerBound)
+        let resolver = String(source[resolverStart..<resolverEnd])
+
+        XCTAssertTrue(resolver.contains(
+            "predicate: #Predicate { requestedIDs.contains($0.id) }"
+        ))
+        XCTAssertTrue(resolver.contains("descriptor.fetchLimit = requestedIDs.count"))
+        XCTAssertTrue(resolver.contains("predicate: #Predicate { $0.id == eventID }"))
+        XCTAssertTrue(resolver.contains("descriptor.fetchLimit = 1"))
+        XCTAssertFalse(resolver.contains(
+            "modelContext.fetch(FetchDescriptor<Idol>())"
+        ))
+        XCTAssertFalse(resolver.contains(
+            "modelContext.fetch(FetchDescriptor<Event>())"
+        ))
     }
 
     func testScannerRuntimeClientPreservesBusyStop409Status() async throws {
@@ -14749,7 +28839,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "name=\"sleeve\"\r\n\r\n1",
             "name=\"wb\"\r\n\r\n1",
             "name=\"denoise\"\r\n\r\n1",
-            "name=\"sharpen\"\r\n\r\n1",
+            "name=\"sharpen\"\r\n\r\n0",
             "name=\"file\"; filename=\"source.png\"",
         ] {
             XCTAssertNotNil(multipartData.range(of: Data(expected.utf8)), expected)
@@ -14795,29 +28885,88 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(snapshot.events.first, "process")
     }
 
-    func testSleeveMultipartDefaultsOffAndMapsPostprocessFlags() throws {
+    func testScannerPostprocessIsFixedToDenoiseWithoutSharpening() throws {
         let client = ChekinanaScannerClient(baseURL: try XCTUnwrap(URL(string: "https://scanner.test")))
         let image = ChekinanaPendingChekiImage(
             data: scannerPNGData(color: .white),
             filenameExtension: "png"
         )
-        let cases: [(ChekinanaScannerPostprocessMode, String, String)] = [
-            (.off, "0", "0"),
-            (.denoise, "1", "0"),
-            (.sharpen, "1", "1"),
-        ]
-        for (mode, denoise, sharpen) in cases {
+        for requestedMode in [
+            ChekinanaScannerPostprocessMode.off,
+            .denoise,
+            .sharpen,
+        ] {
+            let options = scannerOptions(
+                dateRecognitionEnabled: false,
+                postprocessMode: requestedMode
+            )
+            XCTAssertEqual(options.postprocessMode.rawValue, "denoise")
             let body = client.multipartBody(
                 for: image,
-                options: scannerOptions(
-                    dateRecognitionEnabled: false,
-                    postprocessMode: mode
-                ),
+                options: options,
                 boundary: "fields"
             )
             XCTAssertNotNil(body.range(of: Data("name=\"sleeve\"\r\n\r\n0".utf8)))
-            XCTAssertNotNil(body.range(of: Data("name=\"denoise\"\r\n\r\n\(denoise)".utf8)))
-            XCTAssertNotNil(body.range(of: Data("name=\"sharpen\"\r\n\r\n\(sharpen)".utf8)))
+            XCTAssertNotNil(body.range(of: Data("name=\"denoise\"\r\n\r\n1".utf8)))
+            XCTAssertNotNil(body.range(of: Data("name=\"sharpen\"\r\n\r\n0".utf8)))
+        }
+        XCTAssertEqual(ChekinanaScannerPostprocessor.fixedMode.rawValue, "denoise")
+        XCTAssertGreaterThan(ChekinanaScannerPostprocessor.noiseLevel, 0)
+        XCTAssertEqual(ChekinanaScannerPostprocessor.sharpness, 0)
+
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+        let executorSource = try String(
+            contentsOf: sourceRoot.appendingPathComponent("ChekinanaCommandExecutor.swift"),
+            encoding: .utf8
+        )
+        let deviceSource = try String(
+            contentsOf: sourceRoot.appendingPathComponent("ChekinanaOnDeviceScanner.swift"),
+            encoding: .utf8
+        )
+        let productSource = try String(
+            contentsOf: sourceRoot.appendingPathComponent("ChekinanaProductShell.swift"),
+            encoding: .utf8
+        )
+        let importStart = try XCTUnwrap(executorSource.range(
+            of: "enum ChekinanaLocalImportChekiProcessor"
+        )?.lowerBound)
+        let importEnd = try XCTUnwrap(executorSource.range(
+            of: "enum ChekinanaScanCleanImageRotation",
+            range: importStart..<executorSource.endIndex
+        )?.lowerBound)
+        let directImportProcessor = executorSource[importStart..<importEnd]
+        XCTAssertTrue(directImportProcessor.contains("let output = try await normalize("))
+        XCTAssertFalse(directImportProcessor.contains("applyingFixedDenoise"))
+        let stageImportStart = try XCTUnwrap(productSource.range(
+            of: "private func stageImportInput("
+        )?.lowerBound)
+        let stageImportEnd = try XCTUnwrap(productSource.range(
+            of: "private func executeNativeScan(",
+            range: stageImportStart..<productSource.endIndex
+        )?.lowerBound)
+        XCTAssertTrue(productSource[stageImportStart..<stageImportEnd].contains(
+            "ChekinanaLocalImportChekiProcessor.normalize("
+        ))
+        XCTAssertEqual(
+            deviceSource.components(separatedBy: ".applyingFixedDenoise(to: rendered)").count - 1,
+            1
+        )
+        XCTAssertFalse(executorSource.contains("CISharpenLuminance"))
+        XCTAssertFalse(deviceSource.contains("CISharpenLuminance"))
+    }
+
+    func testScanRejectsRemovedPostprocessArgumentAsUnknown() async throws {
+        let fixture = try makeFixture()
+        for value in ["denoise", "off", "sharpen"] {
+            let response = await fixture.executor.execute(
+                "scancheki postprocess=\(value)"
+            )
+            let output = text(from: response)
+            XCTAssertTrue(output.contains("scancheki [expected=<positive_int>]"), value)
+            XCTAssertFalse(output.contains("[postprocess="), value)
         }
     }
 
@@ -14865,12 +29014,32 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ]
         )
         XCTAssertTrue(valid.isValid)
-        XCTAssertFalse(ChekinanaScannerSourceAnnotation(
+        let outside = ChekinanaScannerSourceAnnotation(
             previewImageData: preview,
             sourcePixelWidth: 100,
             sourcePixelHeight: 200,
             quadrilateral: [
                 .init(x: -1, y: 2), .init(x: 99, y: 2),
+                .init(x: 105, y: 205), .init(x: 1, y: 198),
+            ]
+        )
+        XCTAssertTrue(outside.isValid)
+        XCTAssertEqual(outside.quadrilateral[0].x, -1)
+        XCTAssertNotNil(ChekinanaScannerAnnotationPreviewRenderer.render(
+            sourcePreviewData: scannerJPEGData(
+                color: .white,
+                size: CGSize(width: 100, height: 200)
+            ),
+            sourcePixelWidth: 100,
+            sourcePixelHeight: 200,
+            quadrilateral: outside.quadrilateral
+        ))
+        XCTAssertFalse(ChekinanaScannerSourceAnnotation(
+            previewImageData: preview,
+            sourcePixelWidth: 100,
+            sourcePixelHeight: 200,
+            quadrilateral: [
+                .init(x: .nan, y: 2), .init(x: 99, y: 2),
                 .init(x: 99, y: 198), .init(x: 1, y: 198),
             ]
         ).isValid)
@@ -14879,25 +29048,41 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             CGFloat(1_200) / CGFloat(1_908),
             accuracy: 0.000_001
         )
+        XCTAssertEqual(
+            ChekinanaChekiDisplayFramePolicy.contentMode,
+            .fill
+        )
+        XCTAssertEqual(
+            ChekinanaChekiDisplayFramePolicy.cropAxis(
+                sourceWidth: 1_600,
+                sourceHeight: 1_908
+            ),
+            .horizontal
+        )
+        XCTAssertEqual(
+            ChekinanaChekiDisplayFramePolicy.cropAxis(
+                sourceWidth: 1_000,
+                sourceHeight: 1_908
+            ),
+            .vertical
+        )
+        XCTAssertEqual(
+            ChekinanaChekiDisplayFramePolicy.cropAxis(
+                sourceWidth: 1_200,
+                sourceHeight: 1_908
+            ),
+            .none
+        )
     }
 
-    func testPreRenderedSourceAnnotationIsDisplayedWithoutSecondQuadrilateralStroke() {
+    func testTransientSourceAnnotationIsDisplayedWithoutSecondQuadrilateralStroke() {
         let clean = scannerPNGData(color: .white)
         let renderedAnnotation = scannerPNGData(color: .orange)
-        let annotation = ChekinanaScannerSourceAnnotation(
-            previewImageData: renderedAnnotation,
-            sourcePixelWidth: 2,
-            sourcePixelHeight: 2,
-            quadrilateral: [
-                .init(x: 0, y: 0), .init(x: 2, y: 0),
-                .init(x: 2, y: 2), .init(x: 0, y: 2),
-            ]
-        )
         XCTAssertFalse(ChekinanaScanAnnotationDisplayPolicy.drawsQuadrilateralInView)
         XCTAssertEqual(
             ChekinanaScanAnnotationDisplayPolicy.displayedData(
                 cleanImageData: clean,
-                sourceAnnotation: annotation,
+                renderedAnnotationData: renderedAnnotation,
                 showsSourceAnnotation: true
             ),
             renderedAnnotation
@@ -14905,7 +29090,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(
             ChekinanaScanAnnotationDisplayPolicy.displayedData(
                 cleanImageData: clean,
-                sourceAnnotation: annotation,
+                renderedAnnotationData: renderedAnnotation,
                 showsSourceAnnotation: false
             ),
             clean
@@ -14933,34 +29118,416 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             isRotating: false,
             isDownloading: true
         ))
+        XCTAssertFalse(ChekinanaScanReviewInteractionPolicy.allowsCardInteraction(
+            isSaving: false,
+            isSavingToPhotos: true,
+            isRotating: false,
+            isDownloading: false
+        ))
         XCTAssertTrue(ChekinanaScanReviewInteractionPolicy.allowsConfirmAll(
             isSaving: false,
             hasRotations: false,
+            hasSizePreviews: false,
             hasDownloads: false
         ))
         XCTAssertFalse(ChekinanaScanReviewInteractionPolicy.allowsConfirmAll(
             isSaving: false,
             hasRotations: false,
+            hasSizePreviews: false,
             hasDownloads: true
+        ))
+        XCTAssertFalse(ChekinanaScanReviewInteractionPolicy.allowsConfirmAll(
+            isSaving: false,
+            hasRotations: false,
+            hasSizePreviews: true,
+            hasDownloads: false
         ))
     }
 
+    func testReviewPhotoSavePolicyUsesVisibleCardOrderAndRejectsStaleImages() {
+        let first = UUID()
+        let second = UUID()
+        let images = [first: Data([0x01]), second: Data([0x02])]
+        XCTAssertEqual(
+            ChekinanaScanReviewPhotoSavePolicy.orderedImageData(
+                cardIDs: [second, first],
+                imageData: { images[$0] }
+            ),
+            [Data([0x02]), Data([0x01])]
+        )
+        XCTAssertNil(ChekinanaScanReviewPhotoSavePolicy.orderedImageData(
+            cardIDs: [first, UUID()],
+            imageData: { images[$0] }
+        ))
+    }
+
+    func testReviewHasDistinctBatchPhotosAndLibrarySaveActions() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let start = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaNativeScanReview")?.lowerBound
+        )
+        let end = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaTemporaryImagePreview",
+            range: start..<source.endIndex
+        )?.lowerBound)
+        let review = String(source[start..<end])
+        XCTAssertTrue(review.contains("chekinana.scan.review.save-all-to-photos"))
+        XCTAssertTrue(review.contains("chekinana.scan.review.confirm"))
+        XCTAssertTrue(review.contains("ChekinanaProductPhotoSaver.saveImages(imageData)"))
+        XCTAssertTrue(review.contains("cards.map(\\.id)"))
+    }
+
     func testPreviewPublicationRejectsCancelledOrStaleThumbnailLoads() {
+        let cleanRoute = ChekinanaScanPreviewLoadPublicationPolicy.route(
+            usesSourceAnnotation: false
+        )
+        let annotationRoute = ChekinanaScanPreviewLoadPublicationPolicy.route(
+            usesSourceAnnotation: true
+        )
+        XCTAssertTrue(
+            ChekinanaScanPreviewLoadPublicationPolicy.usesGlobalCache(
+                for: cleanRoute
+            )
+        )
+        XCTAssertFalse(
+            ChekinanaScanPreviewLoadPublicationPolicy.usesGlobalCache(
+                for: annotationRoute
+            )
+        )
         XCTAssertTrue(ChekinanaScanPreviewLoadPublicationPolicy.canPublish(
             completedToken: "source-2",
             requestedToken: "source-2",
+            completedRoute: annotationRoute,
+            currentRoute: annotationRoute,
             isCancelled: false
         ))
         XCTAssertFalse(ChekinanaScanPreviewLoadPublicationPolicy.canPublish(
             completedToken: "clean-1",
             requestedToken: "source-2",
+            completedRoute: cleanRoute,
+            currentRoute: annotationRoute,
             isCancelled: false
         ))
         XCTAssertFalse(ChekinanaScanPreviewLoadPublicationPolicy.canPublish(
             completedToken: "source-2",
             requestedToken: "source-2",
+            completedRoute: annotationRoute,
+            currentRoute: annotationRoute,
             isCancelled: true
         ))
+        XCTAssertFalse(ChekinanaScanPreviewLoadPublicationPolicy.canPublish(
+            completedToken: "source-2",
+            requestedToken: "source-2",
+            completedRoute: annotationRoute,
+            currentRoute: cleanRoute,
+            isCancelled: false
+        ))
+    }
+
+    func testReviewSizePreviewPublicationAcceptsOnlyLatestMatchingRotation() {
+        XCTAssertEqual(
+            ChekinanaScanReviewSizePreviewPublicationPolicy.nextGeneration(
+                after: nil
+            ),
+            1
+        )
+        XCTAssertEqual(
+            ChekinanaScanReviewSizePreviewPublicationPolicy.nextGeneration(
+                after: 4
+            ),
+            5
+        )
+        XCTAssertTrue(ChekinanaScanReviewSizePreviewPublicationPolicy.canPublish(
+            completedGeneration: 5,
+            currentGeneration: 5,
+            expectedRotationQuarterTurns: 2,
+            currentRotationQuarterTurns: 2,
+            isCancelled: false
+        ))
+        XCTAssertFalse(ChekinanaScanReviewSizePreviewPublicationPolicy.canPublish(
+            completedGeneration: 4,
+            currentGeneration: 5,
+            expectedRotationQuarterTurns: 2,
+            currentRotationQuarterTurns: 2,
+            isCancelled: false
+        ))
+        XCTAssertFalse(ChekinanaScanReviewSizePreviewPublicationPolicy.canPublish(
+            completedGeneration: 5,
+            currentGeneration: 5,
+            expectedRotationQuarterTurns: 2,
+            currentRotationQuarterTurns: 3,
+            isCancelled: false
+        ))
+        XCTAssertFalse(ChekinanaScanReviewSizePreviewPublicationPolicy.canPublish(
+            completedGeneration: 5,
+            currentGeneration: 5,
+            expectedRotationQuarterTurns: 2,
+            currentRotationQuarterTurns: 2,
+            isCancelled: true
+        ))
+    }
+
+    func testReviewRefitFailedPresentationPreservesPixelsAndRequiresUndoBeforeSave() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1, 2]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 2)
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+        let before = try XCTUnwrap(ledger.temporaryCheki(id))
+        let request = try XCTUnwrap(ledger.beginTemporaryChekiRefit(id: id))
+        XCTAssertEqual(ledger.publishTemporaryChekiRefitFailure(
+            id: id, intent: request.intent
+        ), .published)
+        let failed = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertTrue(failed.isRefitFailed)
+        XCTAssertTrue(failed.hasRefitUndo)
+        XCTAssertNil(failed.refitUndo)
+        XCTAssertEqual(ledger.temporaryStorageByteCount, 2)
+        XCTAssertEqual(failed.image, before.image)
+        XCTAssertEqual(failed.reviewRectificationSource, before.reviewRectificationSource)
+        XCTAssertFalse(ledger.areTemporaryChekiTransformsSettled([id]))
+        XCTAssertThrowsError(try ledger.resolveTemporaryCheki(id.uuidString))
+        XCTAssertThrowsError(try ledger.resolveTemporaryChekis("all"))
+        XCTAssertNil(ledger.beginTemporaryChekiTransform(id: id, desiredSize: .wide))
+        XCTAssertNil(ledger.beginTemporaryChekiRefit(id: id))
+        let laterIdol = UUID()
+        XCTAssertTrue(ledger.replaceTemporaryChekiIdols(id: id, idolIDs: [laterIdol]))
+        XCTAssertTrue(ledger.undoTemporaryChekiRefit(id: id))
+        let restored = try ledger.resolveTemporaryCheki(id.uuidString)
+        XCTAssertFalse(restored.isRefitFailed)
+        XCTAssertFalse(restored.hasRefitUndo)
+        XCTAssertEqual(restored.image, image)
+        XCTAssertEqual(restored.idolIDs, [laterIdol])
+        XCTAssertGreaterThan(restored.transformSourceVersion, failed.transformSourceVersion)
+        XCTAssertEqual(ledger.publishTemporaryChekiRefitFailure(
+            id: id, intent: request.intent
+        ), .stale)
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
+    }
+
+    func testReviewRefitUndoRestoresImageGeometryButKeepsMetadataEdits() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1, 2]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger()
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [Data([3])]
+        ).inserted.first?.id)
+        let source = ChekinanaReviewRectificationSource(
+            imageData: image.data, sourcePixelWidth: 100, sourcePixelHeight: 100,
+            quadrilateral: [
+                .init(x: 0, y: 0), .init(x: 100, y: 0),
+                .init(x: 100, y: 100), .init(x: 0, y: 100),
+            ], appliesWhiteBalance: false, postprocessing: .perspectiveOnly
+        )
+        let before = try XCTUnwrap(ledger.temporaryCheki(id))
+        let request = try XCTUnwrap(ledger.beginTemporaryChekiRefit(id: id))
+        XCTAssertEqual(request.sourceImage, before.image)
+        XCTAssertNil(ledger.beginTemporaryChekiTransform(id: id, counterclockwiseQuarterTurns: 1))
+        XCTAssertEqual(ledger.publishTemporaryChekiRefit(
+            id: id, intent: request.intent,
+            image: .init(data: Data([9]), filenameExtension: "jpg"),
+            thumbnailImageData: Data([8]), reviewSource: source, sourceAnnotation: nil
+        ), .published)
+        let after = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertEqual(after.dateAnnotationState, .unavailable)
+        XCTAssertEqual(after.reviewRectificationSource?.postprocessing, .perspectiveOnly)
+        XCTAssertGreaterThan(after.transformSourceVersion, before.transformSourceVersion)
+        let turn = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 1
+        ))
+        XCTAssertEqual(ledger.publishTemporaryChekiTransform(
+            id: id, intent: turn.intent, image: .init(data: Data([7]), filenameExtension: "jpg"),
+            thumbnailImageData: nil, dateAnnotationState: .unavailable
+        ), .published)
+        let laterIdol = UUID()
+        XCTAssertTrue(ledger.replaceTemporaryChekiIdols(id: id, idolIDs: [laterIdol]))
+        XCTAssertTrue(ledger.undoTemporaryChekiRefit(id: id))
+        let undone = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertEqual(undone.image, before.image)
+        XCTAssertEqual(undone.thumbnailImageData, before.thumbnailImageData)
+        XCTAssertEqual(undone.size, before.size)
+        XCTAssertEqual(undone.imageRotationQuarterTurns, before.imageRotationQuarterTurns)
+        XCTAssertEqual(undone.dateAnnotationState, before.dateAnnotationState)
+        XCTAssertEqual(undone.idolIDs, [laterIdol])
+        XCTAssertFalse(undone.explicitlyEditedFields.contains(.size))
+        XCTAssertTrue(undone.explicitlyEditedFields.contains(.idols))
+        XCTAssertNil(undone.refitUndo)
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
+    }
+
+    func testReviewRefitCapacityAndCancellationNeverReplaceOriginal() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 2)
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+        let source = ChekinanaReviewRectificationSource(
+            imageData: image.data, sourcePixelWidth: 100, sourcePixelHeight: 100,
+            quadrilateral: [
+                .init(x: 0, y: 0), .init(x: 100, y: 0),
+                .init(x: 100, y: 100), .init(x: 0, y: 100),
+            ], appliesWhiteBalance: false, postprocessing: .perspectiveOnly
+        )
+        let request = try XCTUnwrap(ledger.beginTemporaryChekiRefit(id: id))
+        XCTAssertEqual(ledger.publishTemporaryChekiRefit(
+            id: id, intent: request.intent, image: image,
+            thumbnailImageData: nil, reviewSource: source, sourceAnnotation: nil
+        ), .capacityExceeded)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, image)
+        XCTAssertNil(ledger.temporaryCheki(id)?.refitUndo)
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
+        let stale = try XCTUnwrap(ledger.beginTemporaryChekiRefit(id: id))
+        XCTAssertTrue(ledger.invalidateTemporaryChekiTransform(id: id))
+        XCTAssertEqual(ledger.publishTemporaryChekiRefit(
+            id: id, intent: stale.intent, image: image,
+            thumbnailImageData: nil, reviewSource: source, sourceAnnotation: nil
+        ), .stale)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, image)
+    }
+
+    func testOnDeviceRefitKeepsSelectedCanvasAndPerspectiveOnlySave() async throws {
+        let data = scannerJPEGData(color: .purple, size: CGSize(width: 200, height: 120))
+        let image = ChekinanaPendingChekiImage(data: data, filenameExtension: "jpg")
+        let detector = StaticEdgeDetector(output: .init(
+            manifest: .init(algorithmID: "test", semver: "2", build: "test",
+                            outputSchemaVersion: "quad-upright-pixels-v1", assetVersion: "test"),
+            sourcePixelWidth: 200, sourcePixelHeight: 120,
+            quadrilaterals: [[
+                .init(x: 10, y: 10), .init(x: 190, y: 10),
+                .init(x: 190, y: 110), .init(x: 10, y: 110),
+            ]]
+        ))
+        guard case .image(let result) = try await ChekinanaOnDeviceScannerClient(
+            detector: detector
+        ).refit(image, size: .wide) else {
+            return XCTFail("Expected one refitted image")
+        }
+        XCTAssertEqual(result.imagePixelWidth, 2_400)
+        XCTAssertEqual(result.imagePixelHeight, 1_908)
+        let source = try XCTUnwrap(result.reviewRectificationSource)
+        XCTAssertEqual(source.postprocessing, .perspectiveOnly)
+        XCTAssertFalse(source.appliesWhiteBalance)
+        XCTAssertEqual(source.imageData, data)
+        let saved = try await ChekinanaReviewChekiImagePreparer.standardizedForSave(
+            fallbackImage: image, reviewSource: source, rotationQuarterTurns: 0, size: .wide
+        )
+        XCTAssertEqual(saved.data, result.data)
+    }
+
+    func testUnifiedReviewTransformKeepsLatestSizeAndRotationIntent() throws {
+        let original = ChekinanaPendingChekiImage(
+            data: scannerJPEGDataWithOrientation(1),
+            filenameExtension: "jpg"
+        )
+        let ledger = ChekinanaConfirmationLedger()
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [original], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+
+        let sizeThenRotate = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 0
+        ))
+        let latest = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: nil, counterclockwiseQuarterTurns: 1
+        ))
+        XCTAssertEqual(latest.intent.size, .wide)
+        XCTAssertEqual(latest.intent.rotationQuarterTurns, 1)
+        XCTAssertEqual(ledger.publishTemporaryChekiTransform(
+            id: id,
+            intent: sizeThenRotate.intent,
+            image: original,
+            thumbnailImageData: Data([1]),
+            dateAnnotationState: .notRequested
+        ), .stale)
+        XCTAssertEqual(ledger.publishTemporaryChekiTransform(
+            id: id,
+            intent: latest.intent,
+            image: .init(data: Data([2]), filenameExtension: "jpg"),
+            thumbnailImageData: Data([3]),
+            dateAnnotationState: .notRequested
+        ), .published)
+        let value = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertEqual(value.size, .wide)
+        XCTAssertEqual(value.imageRotationQuarterTurns, 1)
+        XCTAssertEqual(value.image.data, Data([2]))
+        XCTAssertEqual(value.thumbnailImageData, Data([3]))
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
+    }
+
+    func testUnifiedReviewTransformAccumulatesRapidRotationsAroundSizeChange() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger()
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+        _ = ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: nil, counterclockwiseQuarterTurns: 1
+        )
+        _ = ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 0
+        )
+        let latest = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: nil, counterclockwiseQuarterTurns: 3
+        ))
+        XCTAssertEqual(latest.intent.size, .wide)
+        XCTAssertEqual(latest.intent.rotationQuarterTurns, 0)
+    }
+
+    func testUnifiedReviewTransformFailureCancellationAndExportGate() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger()
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+        let failed = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 1
+        ))
+        XCTAssertFalse(ledger.areTemporaryChekiTransformsSettled([id]))
+        XCTAssertThrowsError(try ledger.resolveTemporaryCheki(id.uuidString))
+        XCTAssertTrue(ledger.failTemporaryChekiTransform(id: id, intent: failed.intent))
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
+        XCTAssertEqual(ledger.temporaryCheki(id)?.size, .mini)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, image)
+
+        let cancelled = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 0
+        ))
+        XCTAssertTrue(ledger.invalidateTemporaryChekiTransform(id: id))
+        XCTAssertEqual(ledger.publishTemporaryChekiTransform(
+            id: id,
+            intent: cancelled.intent,
+            image: .init(data: Data([9]), filenameExtension: "jpg"),
+            thumbnailImageData: nil,
+            dateAnnotationState: .notRequested
+        ), .stale)
+        XCTAssertEqual(ledger.temporaryCheki(id)?.image, image)
+    }
+
+    func testUnifiedReviewTransformCapacityFailurePublishesNothing() throws {
+        let image = ChekinanaPendingChekiImage(data: Data([1]), filenameExtension: "jpg")
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 2)
+        let id = try XCTUnwrap(ledger.insertTemporaryChekis(
+            [image], thumbnailImageData: [nil]
+        ).inserted.first?.id)
+        let intent = try XCTUnwrap(ledger.beginTemporaryChekiTransform(
+            id: id, desiredSize: .wide, counterclockwiseQuarterTurns: 0
+        ))
+        XCTAssertEqual(ledger.publishTemporaryChekiTransform(
+            id: id,
+            intent: intent.intent,
+            image: .init(data: Data([2, 3]), filenameExtension: "jpg"),
+            thumbnailImageData: Data([4]),
+            dateAnnotationState: .notRequested
+        ), .capacityExceeded)
+        let value = try XCTUnwrap(ledger.temporaryCheki(id))
+        XCTAssertEqual(value.image, image)
+        XCTAssertEqual(value.thumbnailImageData, nil)
+        XCTAssertEqual(value.size, .mini)
+        XCTAssertTrue(ledger.areTemporaryChekiTransformsSettled([id]))
     }
 
     func testRotateChangesCleanImageOnlyAndKeepsSourceAnnotationEphemeral() async throws {
@@ -15133,14 +29700,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             return XCTFail("Expected the rotated Review image to save.")
         }
         let saved = try XCTUnwrap(fixture.context.fetch(
-            FetchDescriptor<Cheki>(predicate: #Predicate { $0.id == savedID })
+            FetchDescriptor<MediaItem>(predicate: #Predicate { $0.id == savedID })
         ).first)
         let savedURL = try XCTUnwrap(ChekiImageRefResolver.managedChekiFileURL(
             for: saved.imageRef,
             chekiID: saved.id
         ))
         let savedData = try Data(contentsOf: savedURL)
-        XCTAssertEqual(savedData, downloadSource)
+        XCTAssertNotEqual(savedData, downloadSource)
+        let savedDimensions = try XCTUnwrap(
+            ChekinanaImagePixelGeometry.uprightDimensions(in: savedData)
+        )
+        XCTAssertEqual(savedDimensions.width, 1_200)
+        XCTAssertEqual(savedDimensions.height, 1_908)
         XCTAssertEqual(try quadrantColorLabels(savedData), [1, 3, 0, 2])
     }
 
@@ -15313,7 +29885,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(temporaryImages.allSatisfy { $0.filenameExtension == "jpg" })
         XCTAssertTrue(temporaryImages.allSatisfy { UIImage(data: $0.data) != nil })
         XCTAssertTrue(temporaryImages.allSatisfy { !sourceImages.map(\.data).contains($0.data) })
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testChekiIndexIdentityUsesUnorderedIdolSetAndDateNotEvent() throws {
@@ -15353,6 +29925,433 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ), 1)
     }
 
+    func testChekiIndexIdentityIncludesUndatedAndUnassignedGroups() throws {
+        let firstIdol = UUID()
+        let secondIdol = UUID()
+        let undated = try XCTUnwrap(ChekinanaChekiGroupKey(
+            idolIDs: [firstIdol, secondIdol],
+            date: nil
+        ))
+        let reorderedUndated = try XCTUnwrap(ChekinanaChekiGroupKey(
+            idolIDs: [secondIdol, firstIdol, secondIdol],
+            date: nil
+        ))
+        let unassigned = try XCTUnwrap(ChekinanaChekiGroupKey(
+            idolIDs: [],
+            date: nil
+        ))
+        XCTAssertEqual(undated, reorderedUndated)
+        XCTAssertNotEqual(undated, unassigned)
+        XCTAssertNil(undated.date)
+        XCTAssertTrue(unassigned.idolIDs.isEmpty)
+    }
+
+    func testChekiIndexRepairPreservesValidGapsAndRepairsSignsAndDuplicates() throws {
+        let group = try XCTUnwrap(ChekinanaChekiGroupKey(
+            idolIDs: [UUID()],
+            date: nil
+        ))
+        let base = Date(timeIntervalSinceReferenceDate: 1_000)
+        let favoriteFirst = UUID()
+        let favoriteSecond = UUID()
+        let standardFirst = UUID()
+        let standardDuplicate = UUID()
+        let standardGap = UUID()
+        let invalid = [
+            ChekinanaChekiIndexSnapshot(
+                chekiID: favoriteFirst, group: group, idx: 4,
+                isFavorite: true, createdAt: base
+            ),
+            ChekinanaChekiIndexSnapshot(
+                chekiID: favoriteSecond, group: group, idx: nil,
+                isFavorite: true, createdAt: base.addingTimeInterval(1)
+            ),
+            ChekinanaChekiIndexSnapshot(
+                chekiID: standardFirst, group: group, idx: 1,
+                createdAt: base.addingTimeInterval(2)
+            ),
+            ChekinanaChekiIndexSnapshot(
+                chekiID: standardDuplicate, group: group, idx: 1,
+                createdAt: base.addingTimeInterval(3)
+            ),
+            ChekinanaChekiIndexSnapshot(
+                chekiID: standardGap, group: group, idx: 7,
+                createdAt: base.addingTimeInterval(4)
+            ),
+        ]
+        let repaired = try ChekinanaChekiIndexing.repairAssignments(for: invalid)
+        XCTAssertEqual(repaired[favoriteFirst], -2)
+        XCTAssertEqual(repaired[favoriteSecond], -1)
+        XCTAssertEqual(repaired[standardFirst], 1)
+        XCTAssertEqual(repaired[standardDuplicate], 2)
+        XCTAssertEqual(repaired[standardGap], 7)
+
+        let validWithGaps = invalid.map { snapshot in
+            ChekinanaChekiIndexSnapshot(
+                chekiID: snapshot.chekiID,
+                group: snapshot.group,
+                idx: repaired[snapshot.chekiID] ?? snapshot.idx,
+                isFavorite: snapshot.isFavorite,
+                createdAt: snapshot.createdAt
+            )
+        }
+        XCTAssertTrue(try ChekinanaChekiIndexing.repairAssignments(
+            for: validWithGaps
+        ).isEmpty)
+    }
+
+    func testChekiIndexRepairPersistsIdempotentlyAndClearsNonChekiIndex() throws {
+        let schema = Schema(ChekinanaSchemaV16.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        let idol = Idol(name: "Repair")
+        context.insert(idol)
+        let favorite = MediaItem(
+            date: nil, idx: 3, imageRef: "favorite.jpg", isFavorite: true
+        )
+        let standard = MediaItem(date: nil, idx: nil, imageRef: "standard.jpg")
+        let duplicate = MediaItem(date: nil, idx: nil, imageRef: "duplicate.jpg")
+        let shame = MediaItem(kind: .shame, mediaRef: "shame.jpg")
+        shame.idx = 8
+        for value in [favorite, standard, duplicate] {
+            context.insert(value)
+            value.idols = [idol]
+        }
+        context.insert(shame)
+        try context.save()
+
+        XCTAssertEqual(
+            try ChekinanaChekiIndexing.repairPersistedMediaItems(in: context),
+            4
+        )
+        try context.save()
+        let chekis = try context.fetch(FetchDescriptor<MediaItem>())
+            .filter { $0.kind == .cheki }
+        XCTAssertEqual(Set(chekis.compactMap(\.idx)).count, 3)
+        XCTAssertTrue(chekis.allSatisfy {
+            ChekinanaChekiIndexing.isValid($0.idx, isFavorite: $0.isFavorite)
+        })
+        XCTAssertNil(shame.idx)
+        XCTAssertEqual(
+            try ChekinanaChekiIndexing.repairPersistedMediaItems(in: context),
+            0
+        )
+    }
+
+    func testUnifiedChekiReorderReusesOnlyMovedIntervalIndices() throws {
+        let favorite = UUID()
+        let first = UUID()
+        let second = UUID()
+        let moving = UUID()
+        let outside = UUID()
+        let base = Date(timeIntervalSinceReferenceDate: 2_000)
+        let values = [
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: favorite, isFavorite: true, idx: -1, createdAt: base
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: first, isFavorite: false, idx: 1,
+                createdAt: base.addingTimeInterval(1)
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: second, isFavorite: false, idx: 4,
+                createdAt: base.addingTimeInterval(2)
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: moving, isFavorite: false, idx: 9,
+                createdAt: base.addingTimeInterval(3)
+            ),
+            ChekinanaUnifiedChekiOrderSnapshot(
+                id: outside, isFavorite: false, idx: 20,
+                createdAt: base.addingTimeInterval(4)
+            ),
+        ]
+        let assignments = try ChekinanaUnifiedChekiOrderPolicy
+            .minimalIndexAssignments(
+                moving: moving,
+                toPartitionIndex: 0,
+                values: values
+            )
+        XCTAssertEqual(assignments, [moving: 1, first: 4, second: 9])
+        XCTAssertNil(assignments[favorite])
+        XCTAssertNil(assignments[outside])
+    }
+
+    func testChekiEditCommitMovesOnlyEditedItemAcrossDateAndFullIdolSet() async throws {
+        let fixture = try makeFixture()
+        let firstDate = utcDate(2026, 8, 10)
+        let targetDate = utcDate(2026, 8, 11)
+        let firstIdol = Idol(name: "Visible")
+        let hiddenIdol = Idol(name: "Hidden")
+        fixture.context.insert(firstIdol)
+        fixture.context.insert(hiddenIdol)
+
+        let moving = MediaItem(date: firstDate, idx: 2, imageRef: "moving.jpg")
+        fixture.context.insert(moving)
+        moving.idols = [firstIdol]
+        let targetFirst = MediaItem(date: targetDate, idx: 3, imageRef: "target-3.jpg")
+        fixture.context.insert(targetFirst)
+        targetFirst.idols = [hiddenIdol, firstIdol]
+        let targetLast = MediaItem(date: targetDate, idx: 8, imageRef: "target-8.jpg")
+        fixture.context.insert(targetLast)
+        targetLast.idols = [firstIdol, hiddenIdol]
+        try fixture.context.save()
+
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(moving),
+            in: fixture.context
+        )
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: authorization,
+            imageReplacement: nil,
+            in: fixture.context
+        ) { target in
+            target.date = targetDate
+            target.idols = [hiddenIdol, firstIdol]
+            return true
+        }
+
+        XCTAssertEqual(moving.idx, 9)
+        XCTAssertEqual(targetFirst.idx, 3)
+        XCTAssertEqual(targetLast.idx, 8)
+        XCTAssertEqual(moving.date, targetDate)
+        XCTAssertEqual(Set(moving.idolIDs), Set([firstIdol.id, hiddenIdol.id]))
+    }
+
+    func testChekiEditCommitAllocatesEnteringValidGroupAndClearsLeavingIt() async throws {
+        let fixture = try makeFixture()
+        let targetDate = utcDate(2026, 8, 12)
+        let idol = Idol(name: "Optional Date")
+        fixture.context.insert(idol)
+        let targetOwner = MediaItem(
+            date: targetDate,
+            idx: 4,
+            imageRef: "target-owner.jpg"
+        )
+        fixture.context.insert(targetOwner)
+        targetOwner.idols = [idol]
+        let moving = MediaItem(date: nil, idx: nil, imageRef: "undated.jpg")
+        fixture.context.insert(moving)
+        moving.idols = [idol]
+        try fixture.context.save()
+
+        var authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(moving),
+            in: fixture.context
+        )
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: authorization,
+            imageReplacement: nil,
+            in: fixture.context
+        ) { target in
+            target.date = targetDate
+            return true
+        }
+        XCTAssertEqual(moving.idx, 5)
+        XCTAssertEqual(targetOwner.idx, 4)
+
+        authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(moving),
+            in: fixture.context
+        )
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: authorization,
+            imageReplacement: nil,
+            in: fixture.context
+        ) { target in
+            target.date = nil
+            return true
+        }
+        XCTAssertEqual(moving.idx, 1)
+        XCTAssertNil(moving.date)
+        XCTAssertEqual(targetOwner.idx, 4)
+    }
+
+    func testChekiEditCommitKeepsIndexForEveryNonGroupingField() async throws {
+        let fixture = try makeFixture()
+        let date = utcDate(2026, 8, 13)
+        let idol = Idol(name: "Stable Group")
+        let firstEvent = Event(name: "First", date: date)
+        let secondEvent = Event(name: "Second", date: date)
+        fixture.context.insert(idol)
+        fixture.context.insert(firstEvent)
+        fixture.context.insert(secondEvent)
+        let cheki = MediaItem(
+            date: date,
+            idx: 7,
+            userAppears: false,
+            size: .mini,
+            imageRef: "stable.jpg",
+            isFavorite: false,
+            hasPostedToSNS: false,
+            note: "before"
+        )
+        fixture.context.insert(cheki)
+        cheki.idols = [idol]
+        cheki.event = firstEvent
+        try fixture.context.save()
+
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(cheki),
+            in: fixture.context
+        )
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: authorization,
+            imageReplacement: nil,
+            in: fixture.context
+        ) { target in
+            target.event = secondEvent
+            target.userAppears = true
+            target.size = .wide
+            target.isFavorite = true
+            target.hasPostedToSNS = true
+            target.note = "after"
+            return true
+        }
+
+        XCTAssertEqual(cheki.idx, -1)
+        XCTAssertEqual(cheki.eventID, secondEvent.id)
+        XCTAssertTrue(cheki.userAppears)
+        XCTAssertEqual(cheki.size, .wide)
+        XCTAssertTrue(cheki.isFavorite)
+        XCTAssertTrue(cheki.hasPostedToSNS)
+        XCTAssertEqual(cheki.note, "after")
+    }
+
+    func testChekiEditCommitSerializesStaleAuthorizationsFromDifferentContexts() async throws {
+        let schema = Schema(versionedSchema: ChekinanaSchemaV14.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [
+                ModelConfiguration(schema: schema, isStoredInMemoryOnly: true),
+            ]
+        )
+        let setup = ModelContext(container)
+        let idol = Idol(name: "Concurrent")
+        setup.insert(idol)
+        let firstDate = utcDate(2026, 8, 14)
+        let secondDate = utcDate(2026, 8, 15)
+        let targetDate = utcDate(2026, 8, 16)
+        let firstID = UUID()
+        let secondID = UUID()
+        let targetOwner = MediaItem(
+            date: targetDate,
+            idx: 10,
+            imageRef: "target-10.jpg"
+        )
+        setup.insert(targetOwner)
+        targetOwner.idols = [idol]
+        let first = MediaItem(
+            id: firstID,
+            date: firstDate,
+            idx: 1,
+            imageRef: "first.jpg"
+        )
+        setup.insert(first)
+        first.idols = [idol]
+        let second = MediaItem(
+            id: secondID,
+            date: secondDate,
+            idx: 1,
+            imageRef: "second.jpg"
+        )
+        setup.insert(second)
+        second.idols = [idol]
+        try setup.save()
+
+        let firstContext = ModelContext(container)
+        let secondContext = ModelContext(container)
+        let firstTarget = try ChekinanaModelContextResolver.cheki(
+            id: firstID,
+            in: firstContext
+        )
+        let secondTarget = try ChekinanaModelContextResolver.cheki(
+            id: secondID,
+            in: secondContext
+        )
+        let firstAuthorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(firstTarget),
+            in: firstContext
+        )
+        let secondAuthorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(secondTarget),
+            in: secondContext
+        )
+
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: firstAuthorization,
+            imageReplacement: nil,
+            in: firstContext
+        ) { target in
+            target.date = targetDate
+            return true
+        }
+        _ = try await ChekinanaChekiEditCommitter.commit(
+            authorization: secondAuthorization,
+            imageReplacement: nil,
+            in: secondContext
+        ) { target in
+            target.date = targetDate
+            return true
+        }
+
+        let verification = ModelContext(container)
+        let moved = try verification.fetch(FetchDescriptor<MediaItem>())
+            .filter { $0.id == firstID || $0.id == secondID }
+        XCTAssertEqual(Set(moved.compactMap(\.idx)), Set([11, 12]))
+        XCTAssertEqual(moved.count, 2)
+    }
+
+    func testChekiEditCommitRejectsTargetGroupAtIntMaxAndRollsBack() async throws {
+        let fixture = try makeFixture()
+        let originalDate = utcDate(2026, 8, 17)
+        let targetDate = utcDate(2026, 8, 18)
+        let idol = Idol(name: "Overflow")
+        fixture.context.insert(idol)
+        let maximum = MediaItem(
+            date: targetDate,
+            idx: Int.max,
+            imageRef: "maximum.jpg"
+        )
+        fixture.context.insert(maximum)
+        maximum.idols = [idol]
+        let moving = MediaItem(
+            date: originalDate,
+            idx: 3,
+            imageRef: "overflow-moving.jpg"
+        )
+        fixture.context.insert(moving)
+        moving.idols = [idol]
+        try fixture.context.save()
+        let authorization = try await ChekinanaChekiEditCommitter.authorize(
+            expected: ChekinanaChekiEditRecordSnapshot(moving),
+            in: fixture.context
+        )
+
+        do {
+            _ = try await ChekinanaChekiEditCommitter.commit(
+                authorization: authorization,
+                imageReplacement: nil,
+                in: fixture.context
+            ) { target in
+                target.date = targetDate
+                return true
+            }
+            XCTFail("an exhausted target group must fail explicitly")
+        } catch {
+            XCTAssertEqual(
+                error as? ChekinanaChekiEditCommitError,
+                .indexOverflow
+            )
+        }
+        XCTAssertEqual(moving.date, originalDate)
+        XCTAssertEqual(moving.idx, 3)
+        XCTAssertEqual(maximum.idx, Int.max)
+    }
+
     func testCalendarBatchWriterStoresLargeQuantityInOneSimpleRecord() throws {
         let fixture = try makeFixture()
         let date = utcDate(2026, 8, 10)
@@ -15360,14 +30359,14 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let otherIdol = Idol(name: "Other Group")
         fixture.context.insert(selectedIdol)
         fixture.context.insert(otherIdol)
-        let existing = Cheki(
+        let existing = MediaItem(
             date: date.addingTimeInterval(12 * 60 * 60),
             idx: 7,
             imageRef: "existing.jpg"
         )
         fixture.context.insert(existing)
         existing.idols = [selectedIdol]
-        let otherGroup = Cheki(date: date, idx: 99, imageRef: "other.jpg")
+        let otherGroup = MediaItem(date: date, idx: 99, imageRef: "other.jpg")
         fixture.context.insert(otherGroup)
         otherGroup.idols = [otherIdol]
         try fixture.context.save()
@@ -15386,7 +30385,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
 
         XCTAssertEqual(insertedIDs.count, 1)
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Cheki>()), 2)
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 2)
         let inserted = try XCTUnwrap(
             fixture.context.fetch(FetchDescriptor<ChekiRecord>()).first
         )
@@ -15416,7 +30415,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             existing: earlySnapshots
         ), [1, 2])
 
-        let lateOwner = Cheki(date: date.addingTimeInterval(16 * 60 * 60), idx: 1)
+        let lateOwner = MediaItem(date: date.addingTimeInterval(16 * 60 * 60), idx: 1, imageRef: "late-owner.jpg")
         fixture.context.insert(lateOwner)
         lateOwner.idols = [idol]
         try fixture.context.save()
@@ -15433,7 +30432,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             in: fixture.context
         )
         let insertedIDSet = Set(insertedIDs)
-        let insertedIndices = try fixture.context.fetch(FetchDescriptor<Cheki>())
+        let insertedIndices = try fixture.context.fetch(FetchDescriptor<MediaItem>())
             .filter { insertedIDSet.contains($0.id) }
             .compactMap(\.idx)
             .sorted()
@@ -15457,7 +30456,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             existing: []
         ), [10, 11, 12])
 
-        let lateOwner = Cheki(date: date.addingTimeInterval(8 * 60 * 60), idx: 11)
+        let lateOwner = MediaItem(date: date.addingTimeInterval(8 * 60 * 60), idx: 11, imageRef: "late-collision.jpg")
         fixture.context.insert(lateOwner)
         lateOwner.idols = [idol]
         try fixture.context.save()
@@ -15475,7 +30474,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )) { error in
             XCTAssertTrue(error.localizedDescription.contains("already used"))
         }
-        let remaining = try fixture.context.fetch(FetchDescriptor<Cheki>())
+        let remaining = try fixture.context.fetch(FetchDescriptor<MediaItem>())
         XCTAssertEqual(remaining.map(\.id), [lateOwner.id])
         XCTAssertEqual(remaining.first?.idx, 11)
     }
@@ -15548,8 +30547,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
                 )
             }
         }
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Shame>()), 0)
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Douga>()), 0)
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 0)
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 0)
     }
 
     func testCalendarWriterRejectsSingleNoMediaShameAndDouga() throws {
@@ -15573,8 +30572,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             ))
         }
         let verificationContext = ModelContext(fixture.context.container)
-        XCTAssertEqual(try verificationContext.fetchCount(FetchDescriptor<Shame>()), 0)
-        XCTAssertEqual(try verificationContext.fetchCount(FetchDescriptor<Douga>()), 0)
+        XCTAssertEqual(try verificationContext.fetchCount(FetchDescriptor<MediaItem>()), 0)
+        XCTAssertEqual(try verificationContext.fetchCount(FetchDescriptor<MediaItem>()), 0)
     }
 
     func testTemporaryEditConfirmUsesDateIdentityAndPersistsCleanImageOnly() async throws {
@@ -15640,9 +30639,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(pendingCards[0].size, .mini)
         try requireSuccess(await fixture.executor.execute("confirm"))
         let firstSaved = try XCTUnwrap(
-            try fixture.context.fetch(FetchDescriptor<Cheki>()).first
+            try fixture.context.fetch(FetchDescriptor<MediaItem>()).first
         )
-        XCTAssertEqual(firstSaved.idx, 1)
+        XCTAssertEqual(firstSaved.idx, -1)
         XCTAssertEqual(Set(firstSaved.idols.map(\.id)), Set([firstIdol.id, secondIdol.id]))
         XCTAssertEqual(firstSaved.event?.id, firstEvent.id)
         XCTAssertEqual(firstSaved.date, firstDate)
@@ -15663,8 +30662,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         _ = await fixture.executor.execute("addscancheki \(shortID(second.id))")
         try requireSuccess(await fixture.executor.execute("confirm"))
-        let savedAfterSecond = try fixture.context.fetch(FetchDescriptor<Cheki>())
-        XCTAssertEqual(savedAfterSecond.first(where: { $0.idols.count == 2 && $0.event?.id == secondEvent.id })?.idx, 2)
+        let savedAfterSecond = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(savedAfterSecond.first(where: { $0.idols.count == 2 && $0.event?.id == secondEvent.id })?.idx, -2)
 
         let otherDate = try insert(
             idols: [firstIdol, secondIdol],
@@ -15674,9 +30673,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         _ = await fixture.executor.execute("addscancheki \(shortID(otherDate.id))")
         try requireSuccess(await fixture.executor.execute("confirm"))
         XCTAssertEqual(
-            try fixture.context.fetch(FetchDescriptor<Cheki>())
+            try fixture.context.fetch(FetchDescriptor<MediaItem>())
                 .first(where: { $0.date == secondDate })?.idx,
-            1
+            -1
         )
 
         let undated = try insert(idols: [firstIdol], date: nil, event: nil)
@@ -15689,21 +30688,81 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         try requireSuccess(await fixture.executor.execute("confirm \(undatedCode)"))
         let savedUndated = try XCTUnwrap(
-            try fixture.context.fetch(FetchDescriptor<Cheki>())
+            try fixture.context.fetch(FetchDescriptor<MediaItem>())
                 .first(where: { $0.date == nil && $0.event == nil })
         )
         XCTAssertNil(savedUndated.event)
-        XCTAssertNil(savedUndated.idx)
+        XCTAssertEqual(savedUndated.idx, -1)
         XCTAssertFalse(fixture.ledger.containsTemporaryCheki(undated.id))
 
         let deleted = try insert(idols: [], date: firstDate, event: nil)
-        let countBeforeDelete = try fixture.context.fetchCount(FetchDescriptor<Cheki>())
+        let countBeforeDelete = try fixture.context.fetchCount(FetchDescriptor<MediaItem>())
         fixture.ledger.discardTemporaryCheki(id: deleted.id)
         XCTAssertFalse(fixture.ledger.containsTemporaryCheki(deleted.id))
         XCTAssertEqual(
-            try fixture.context.fetchCount(FetchDescriptor<Cheki>()),
+            try fixture.context.fetchCount(FetchDescriptor<MediaItem>()),
             countBeforeDelete
         )
+    }
+
+    func testScanReviewFavoriteToggleFlowsIntoConfirmedCheki() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let temporary = try fixture.ledger.insertTemporaryChekis(
+            [ChekinanaPendingChekiImage(
+                data: scannerPNGData(color: .orange),
+                filenameExtension: "png"
+            )],
+            thumbnailImageData: [nil],
+            dates: [utcDate(2026, 8, 30)]
+        ).inserted[0]
+
+        XCTAssertEqual(
+            fixture.ledger.toggleTemporaryChekiFavorite(id: temporary.id),
+            true
+        )
+        let prepared = await fixture.executor.execute(
+            "addscancheki \(shortID(temporary.id))"
+        )
+        guard case .pendingChekiCards(_, let cards, _) = prepared,
+              let code = cards.first?.confirmationCode,
+              let entry = fixture.ledger.entry(for: code),
+              case .addCheki(let payload) = entry.action else {
+            return XCTFail("expected a favorite Add Cheki payload")
+        }
+        XCTAssertTrue(payload.isFavorite)
+
+        try requireSuccess(await fixture.executor.execute("confirm \(code)"))
+        let saved = try XCTUnwrap(
+            try fixture.context.fetch(FetchDescriptor<MediaItem>()).first
+        )
+        XCTAssertTrue(saved.isFavorite)
+    }
+
+    func testScanReviewCardSeparatesFavoriteAndShotTypeControls() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let cardStart = try XCTUnwrap(source.range(
+            of: "private func temporaryCard("
+        )?.lowerBound)
+        let cardEnd = try XCTUnwrap(source.range(
+            of: "private func temporaryMetadataGrid(",
+            range: cardStart..<source.endIndex
+        )?.lowerBound)
+        let card = String(source[cardStart..<cardEnd])
+
+        XCTAssertTrue(card.contains("toggleFavorite(temporary.id)"))
+        XCTAssertTrue(card.contains(
+            "Image(systemName: temporary.isFavorite ? \"star.fill\" : \"star\")"
+        ))
+        XCTAssertTrue(card.contains("chekinana.scan.review.favorite."))
+        XCTAssertTrue(card.contains("VStack(spacing: 0)"))
+        XCTAssertTrue(card.contains("chekinana.scan.review.user-appears."))
+        XCTAssertTrue(card.contains("toggleUserAppears(temporary.id)"))
     }
 
     func testTemporaryChekiInsertionHasNoImageCountLimit() throws {
@@ -15808,25 +30867,236 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(result.note, "preserve me")
     }
 
-    func testTemporaryChekiByteCapacityRejectionIsAtomic() throws {
+    func testScanReviewExplicitEventChoicePropagatesOnlyToMatchingBlankSiblings() throws {
         let fixture = try makeFixture()
-        let existing = try fixture.ledger.insertTemporaryChekis(
+        let firstIdolID = UUID()
+        let secondIdolID = UUID()
+        let otherIdolID = UUID()
+        let selectedEventID = UUID()
+        let existingEventID = UUID()
+        let day = utcDate(2026, 9, 13)
+        let nextDay = utcDate(2026, 9, 14)
+        let image = ChekinanaPendingChekiImage(
+            data: scannerPNGData(color: .purple),
+            filenameExtension: "png"
+        )
+        let inserted = try fixture.ledger.insertTemporaryChekis(
+            Array(repeating: image, count: 9),
+            thumbnailImageData: Array(repeating: nil, count: 9)
+        ).inserted
+
+        func configure(
+            _ index: Int,
+            idols: [UUID],
+            date: Date?,
+            eventID: UUID?,
+            explicitEvent: Bool = false
+        ) {
+            let value = inserted[index]
+            XCTAssertTrue(fixture.ledger.updateTemporaryCheki(
+                id: value.id,
+                idolIDs: idols,
+                date: date,
+                eventID: eventID,
+                userAppears: value.userAppears,
+                size: value.size,
+                isFavorite: value.isFavorite,
+                hasPostedToSNS: value.hasPostedToSNS,
+                note: value.note,
+                eventWasExplicitlyEdited: explicitEvent
+            ))
+        }
+
+        configure(0, idols: [firstIdolID, secondIdolID], date: day, eventID: nil)
+        configure(
+            1,
+            idols: [secondIdolID, firstIdolID],
+            date: day.addingTimeInterval(12 * 60 * 60),
+            eventID: nil
+        )
+        configure(2, idols: [firstIdolID], date: day, eventID: nil)
+        configure(
+            3,
+            idols: [firstIdolID, secondIdolID, otherIdolID],
+            date: day,
+            eventID: nil
+        )
+        configure(4, idols: [firstIdolID, secondIdolID], date: nextDay, eventID: nil)
+        configure(
+            5,
+            idols: [firstIdolID, secondIdolID],
+            date: day,
+            eventID: existingEventID
+        )
+        // An explicitly selected None is still a blank Event and follows the
+        // user's requested Review propagation rule.
+        configure(
+            6,
+            idols: [firstIdolID, secondIdolID],
+            date: day,
+            eventID: nil,
+            explicitEvent: true
+        )
+        // This otherwise-matching card belongs to another Review batch.
+        configure(
+            7,
+            idols: [firstIdolID, secondIdolID],
+            date: day,
+            eventID: nil
+        )
+        configure(
+            8,
+            idols: [firstIdolID, secondIdolID],
+            date: day,
+            eventID: nil
+        )
+        XCTAssertNotNil(fixture.ledger.beginTemporaryChekiTransform(
+            id: inserted[8].id,
+            counterclockwiseQuarterTurns: 1
+        ))
+
+        let currentReviewIDs = Set(inserted.enumerated().compactMap { entry in
+            entry.offset == 7 ? nil : entry.element.id
+        })
+
+        let affected = try XCTUnwrap(
+            fixture.ledger.updateTemporaryChekiEventAndMatchingBlanks(
+                id: inserted[0].id,
+                eventID: selectedEventID,
+                allowedIDs: currentReviewIDs
+            )
+        )
+        XCTAssertEqual(Set(affected), Set([
+            inserted[0].id,
+            inserted[1].id,
+            inserted[6].id,
+        ]))
+        for index in [0, 1, 6] {
+            let value = try XCTUnwrap(fixture.ledger.temporaryCheki(inserted[index].id))
+            XCTAssertEqual(value.eventID, selectedEventID)
+            XCTAssertFalse(value.eventWasAutoMatched)
+            XCTAssertTrue(value.explicitlyEditedFields.contains(.event))
+        }
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[2].id)?.eventID)
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[3].id)?.eventID)
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[4].id)?.eventID)
+        XCTAssertEqual(
+            fixture.ledger.temporaryCheki(inserted[5].id)?.eventID,
+            existingEventID
+        )
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[7].id)?.eventID)
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[8].id)?.eventID)
+
+        XCTAssertEqual(
+            fixture.ledger.updateTemporaryChekiEventAndMatchingBlanks(
+                id: inserted[0].id,
+                eventID: nil,
+                allowedIDs: currentReviewIDs
+            ),
+            [inserted[0].id]
+        )
+        XCTAssertNil(fixture.ledger.temporaryCheki(inserted[0].id)?.eventID)
+        XCTAssertEqual(
+            fixture.ledger.temporaryCheki(inserted[1].id)?.eventID,
+            selectedEventID
+        )
+    }
+
+    func testScanReviewQuickEventSelectionIncludesNoneExactDayAndOther() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let reviewStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeScanReview"
+        )?.lowerBound)
+        let quickSelectionStart = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeEventSelectionView",
+            range: reviewStart..<source.endIndex
+        )?.lowerBound)
+        let quickSelectionEnd = try XCTUnwrap(source.range(
+            of: "private struct ChekinanaNativeDateSelectionView",
+            range: quickSelectionStart..<source.endIndex
+        )?.lowerBound)
+        let review = source[reviewStart..<quickSelectionStart]
+        let quickSelection = source[quickSelectionStart..<quickSelectionEnd]
+
+        XCTAssertTrue(review.contains("eventsOnExactDate("))
+        XCTAssertTrue(review.contains("allEvents: events"))
+        XCTAssertTrue(review.contains("schedules: eventSchedules"))
+        XCTAssertTrue(quickSelection.contains("scan.review.no_event"))
+        XCTAssertTrue(quickSelection.contains("ForEach(dayEvents)"))
+        XCTAssertTrue(quickSelection.contains("common.other"))
+        XCTAssertTrue(quickSelection.contains("ChekinanaAllEventSelectionView("))
+        XCTAssertTrue(quickSelection.contains("eventID: $eventID"))
+        XCTAssertTrue(quickSelection.contains("if onSave(eventID)"))
+    }
+
+    func testTemporaryChekiByteCapacityRejectionIsAtomic() throws {
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 10)
+        let existing = try ledger.insertTemporaryChekis(
             [ChekinanaPendingChekiImage(data: Data([0x01]), filenameExtension: "jpg")],
             thumbnailImageData: [nil]
         ).inserted[0]
         let oversized = ChekinanaPendingChekiImage(
-            data: Data(count: 100 * 1_024 * 1_024 + 1),
+            data: Data(count: 11),
             filenameExtension: "jpg"
         )
 
-        XCTAssertThrowsError(try fixture.ledger.insertTemporaryChekis(
+        XCTAssertThrowsError(try ledger.insertTemporaryChekis(
             [oversized],
             thumbnailImageData: [nil]
         ))
-        XCTAssertTrue(fixture.ledger.containsTemporaryCheki(existing.id))
+        XCTAssertTrue(ledger.containsTemporaryCheki(existing.id))
         XCTAssertEqual(
-            fixture.ledger.availableTemporaryChekiChoices().map(\.id),
+            ledger.availableTemporaryChekiChoices().map(\.id),
             [existing.id]
+        )
+    }
+
+    func testTemporaryChekisShareOneSourceIdentityAndCountItOnce() throws {
+        let sharedImage = ChekinanaSharedReviewSourceImage(data: Data(count: 6))
+        func source(_ offset: Double) -> ChekinanaReviewRectificationSource {
+            ChekinanaReviewRectificationSource(
+                sourceImage: sharedImage,
+                sourcePixelWidth: 10,
+                sourcePixelHeight: 10,
+                quadrilateral: [
+                    .init(x: offset, y: 0), .init(x: 10, y: 0),
+                    .init(x: 10, y: 10), .init(x: offset, y: 10),
+                ],
+                appliesWhiteBalance: false
+            )
+        }
+        let ledger = ChekinanaConfirmationLedger(maximumTemporaryChekiBytes: 10)
+        let inserted = try ledger.insertTemporaryChekis(
+            [
+                .init(data: Data(count: 2), filenameExtension: "jpg"),
+                .init(data: Data(count: 2), filenameExtension: "jpg"),
+            ],
+            thumbnailImageData: [nil, nil],
+            reviewRectificationSources: [source(0), source(1)]
+        ).inserted
+
+        XCTAssertEqual(inserted.count, 2)
+        XCTAssertTrue(
+            inserted[0].reviewRectificationSource?.sourceImage
+                === inserted[1].reviewRectificationSource?.sourceImage
+        )
+        XCTAssertEqual(ledger.temporaryStorageByteCount, 10)
+        XCTAssertTrue(ledger.discardTemporaryCheki(id: inserted[0].id))
+        XCTAssertEqual(ledger.temporaryStorageByteCount, 8)
+        XCTAssertNotNil(ledger.temporaryCheki(inserted[1].id)?.reviewRectificationSource)
+        XCTAssertTrue(ledger.discardTemporaryCheki(id: inserted[1].id))
+        XCTAssertEqual(ledger.temporaryStorageByteCount, 0)
+    }
+
+    func testDefaultTemporaryChekiCapacityIsFourHundredMiB() {
+        XCTAssertEqual(
+            ChekinanaConfirmationLedger().temporaryStorageCapacityBytes,
+            400 * 1_024 * 1_024
         )
     }
 
@@ -15990,7 +31260,73 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             hasPostedToSNS: false,
             note: "retryable"
         ))
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Cheki>()), 1)
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 1)
+    }
+
+    func testReferenceOnlyExistingManualIdolPreservesManagedAvatar() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let idol = Idol(name: "Existing Manual")
+        let oldRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idol.id)
+        idol.avatarImageRef = oldRef
+        fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idol.id,
+            source: .custom,
+            intent: .userSelected
+        ))
+        try fixture.context.save()
+        let oldURL = directory.appendingPathComponent(oldRef)
+        let oldData = Data("old-avatar".utf8)
+        try oldData.write(to: oldURL)
+        let target = ChekinanaCatalogueIdolTarget(idol: idol, shouldInsert: false)
+        let targetKind = ChekinanaIdolReferenceAvatarPolicy.targetKind(for: target)
+        XCTAssertEqual(targetKind, .existingManual)
+        var stageCount = 0
+
+        let preparation = try await ChekinanaIdolReferenceAvatarPreparation.prepare(
+            referenceData: Data("reference".utf8),
+            explicitAvatarData: nil,
+            targetKind: targetKind,
+            targetHasManagedAvatar: ChekinanaIdolReferenceStore.hasManagedAvatarFile(
+                imageRef: oldRef,
+                idolID: idol.id,
+                directory: directory
+            ),
+            explicitlyRemovingAvatar: false,
+            encodeReference: { _ in [0.125] },
+            stageAvatar: { _ in
+                stageCount += 1
+                throw ScannerMockError.failed
+            }
+        )
+        let result = try ChekinanaIdolPersistence.save(
+            idol,
+            inserting: false,
+            previousAvatarRef: oldRef,
+            stagedAvatar: preparation.stagedAvatar,
+            in: fixture.context,
+            avatarDirectory: directory
+        ) { target in
+            target.avatarImageRef = oldRef
+        }
+
+        XCTAssertEqual(preparation.encodedReferencePattern, [0.125])
+        XCTAssertNil(preparation.stagedAvatar)
+        XCTAssertFalse(preparation.initializedAvatarFromReference)
+        XCTAssertEqual(stageCount, 0)
+        XCTAssertNil(result.pendingAvatarCleanup)
+        XCTAssertEqual(idol.avatarImageRef, oldRef)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldURL.path))
+        XCTAssertEqual(try Data(contentsOf: oldURL), oldData)
+        XCTAssertEqual(
+            try ChekinanaIdolAvatarStatePersistence.snapshot(
+                for: idol.id,
+                in: fixture.context
+            ).intent,
+            .userSelected
+        )
     }
 
     func testIdolAvatarSaveFailureRemovesNewFileAndPreservesOldReference() throws {
@@ -16220,19 +31556,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         let other = Idol(name: "Other", sortOrder: 2)
         let event = Event(name: "Event", date: Date(timeIntervalSince1970: 10_000))
-        let cheki = Cheki(
+        let cheki = MediaItem(
             idols: [source, other],
             event: event,
             date: Date(timeIntervalSince1970: 20_000),
             imageRef: "cheki.jpg",
             note: "cheki"
         )
-        let chekiAlreadyLinked = Cheki(
+        let chekiAlreadyLinked = MediaItem(
             idols: [source, target, other],
             imageRef: "already.jpg"
         )
-        let shame = Shame(imageRef: "shame.jpg", idols: [source, target, other])
-        let douga = Douga(videoRef: "douga.mov", idols: [other, source])
+        let shame = MediaItem(imageRef: "shame.jpg", idols: [source, target, other])
+        let douga = MediaItem(videoRef: "douga.mov", idols: [other, source])
         let recordDate = Date(timeIntervalSince1970: 30_000)
         let record = ChekiRecord(
             idols: [source, target, other],
@@ -16349,9 +31685,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let source = Idol(name: "Source")
         let target = Idol(name: "Target")
         let other = Idol(name: "Other")
-        let cheki = Cheki(idols: [source, other], imageRef: "cheki.jpg")
-        let shame = Shame(imageRef: "shame.jpg", idols: [source, target])
-        let douga = Douga(videoRef: "douga.mov", idols: [source])
+        let cheki = MediaItem(idols: [source, other], imageRef: "cheki.jpg")
+        let shame = MediaItem(imageRef: "shame.jpg", idols: [source, target])
+        let douga = MediaItem(videoRef: "douga.mov", idols: [source])
         let record = ChekiRecord(idols: [source, other], note: "keep", count: 3)
         let sourceState = IdolPatternState(
             idolID: source.id,
@@ -16392,6 +31728,163 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(record.count, 3)
         XCTAssertNotNil(try fixture.context.fetch(FetchDescriptor<IdolPatternState>())
             .first { $0.idolID == source.id })
+    }
+
+    func testIdolMergeRepairsCollisionsAndPreservesGapsInOnlyAffectedGroups() throws {
+        for date in [nil, Date(timeIntervalSince1970: 1_700_000_000)] as [Date?] {
+            for multipleIdols in [false, true] {
+                let fixture = try makeFixture()
+                let source = Idol(name: "Source")
+                let target = Idol(name: "Target")
+                let other = Idol(name: "Other")
+                for idol in [source, target, other] { fixture.context.insert(idol) }
+                let targetIDs = multipleIdols ? [target.id, other.id] : [target.id]
+                // Include both source and target, duplicates, and reversed order.
+                let sourceIDs = multipleIdols
+                    ? [other.id, source.id, target.id, source.id] : [source.id]
+                func item(_ idx: Int?, favorite: Bool = false, moving: Bool) -> MediaItem {
+                    let value = MediaItem(
+                        date: date, idx: idx, imageRef: "merge-\(UUID().uuidString).jpg",
+                        isFavorite: favorite
+                    )
+                    value.idolIDs = moving ? sourceIDs : targetIDs
+                    fixture.context.insert(value)
+                    return value
+                }
+                let targetFirst = item(1, moving: false)
+                let targetGap = item(7, moving: false)
+                let targetFavorite = item(-1, favorite: true, moving: false)
+                let targetFavoriteGap = item(-7, favorite: true, moving: false)
+                let incomingCollision = item(1, moving: true)
+                let incomingAnchor = item(2, moving: true)
+                let incomingFavoriteCollision = item(-1, favorite: true, moving: true)
+                let incomingFavoriteAnchor = item(-2, favorite: true, moving: true)
+                let unrelated = MediaItem(date: date, idx: 0, imageRef: "unrelated.jpg")
+                unrelated.idolIDs = [other.id]
+                fixture.context.insert(unrelated)
+                let otherDate = MediaItem(
+                    date: date == nil ? Date(timeIntervalSince1970: 1_700_000_000) : nil,
+                    idx: nil, imageRef: "other-date.jpg"
+                )
+                otherDate.idolIDs = targetIDs
+                fixture.context.insert(otherDate)
+                let shame = MediaItem(kind: .shame, mediaRef: "shame.jpg")
+                shame.idolIDs = sourceIDs
+                fixture.context.insert(shame)
+                try fixture.context.save()
+                var saves = 0
+
+                _ = try ChekinanaIdolPersistence.merge(
+                    sourceID: source.id, into: target.id, in: fixture.context,
+                    saveContext: { context in
+                        saves += 1
+                        try context.save()
+                    }
+                )
+
+                XCTAssertEqual(saves, 1)
+                XCTAssertEqual(targetFirst.idx, 1)
+                XCTAssertEqual(targetGap.idx, 7)
+                XCTAssertEqual(targetFavorite.idx, -1)
+                XCTAssertEqual(targetFavoriteGap.idx, -7)
+                XCTAssertEqual(incomingCollision.idx, 8)
+                XCTAssertEqual(incomingAnchor.idx, 2)
+                XCTAssertEqual(incomingFavoriteCollision.idx, -8)
+                XCTAssertEqual(incomingFavoriteAnchor.idx, -2)
+                XCTAssertEqual(unrelated.idx, 0)
+                XCTAssertEqual(unrelated.idolIDs, [other.id])
+                XCTAssertNil(otherDate.idx)
+                XCTAssertNil(shame.idx)
+                for moved in [incomingCollision, incomingAnchor,
+                              incomingFavoriteCollision, incomingFavoriteAnchor, shame] {
+                    XCTAssertEqual(Set(moved.idolIDs), Set(targetIDs))
+                    XCTAssertEqual(moved.idolIDs.count, targetIDs.count)
+                }
+                let merged = try ChekinanaChekiIndexing.snapshots(in: fixture.context)
+                    .filter { $0.group == ChekinanaChekiGroupKey(idolIDs: targetIDs, date: date) }
+                XCTAssertEqual(merged.count, 8)
+                XCTAssertEqual(Set(merged.compactMap(\.idx)).count, 8)
+                XCTAssertTrue(merged.allSatisfy {
+                    ChekinanaChekiIndexing.isValid($0.idx, isFavorite: $0.isFavorite)
+                })
+            }
+        }
+    }
+
+    func testIdolMergeSaveFailureRestoresChangedTargetAndSourceIndices() throws {
+        let fixture = try makeFixture()
+        let source = Idol(name: "Source")
+        let target = Idol(name: "Target")
+        fixture.context.insert(source)
+        fixture.context.insert(target)
+        let moving = MediaItem(idols: [source], idx: 1, imageRef: "moving.jpg")
+        let targetInvalid = MediaItem(idols: [target], idx: 0, imageRef: "target.jpg")
+        let movingFavorite = MediaItem(
+            idols: [source], idx: 4, imageRef: "favorite.jpg", isFavorite: true
+        )
+        for value in [moving, targetInvalid, movingFavorite] { fixture.context.insert(value) }
+        try fixture.context.save()
+        let sourceID = source.id
+        let targetID = target.id
+        var cleanupCalls = 0
+        XCTAssertThrowsError(try ChekinanaIdolPersistence.merge(
+            sourceID: sourceID, into: targetID, in: fixture.context,
+            saveContext: { _ in
+                XCTAssertEqual(targetInvalid.idx, 1)
+                XCTAssertEqual(moving.idx, 2)
+                XCTAssertEqual(movingFavorite.idx, -1)
+                XCTAssertEqual(moving.idolIDs, [targetID])
+                throw NSError(domain: "merge-save", code: 1)
+            },
+            removeManagedAvatar: { _, _, _ in cleanupCalls += 1; return false }
+        ))
+        XCTAssertEqual(targetInvalid.idx, 0)
+        XCTAssertEqual(moving.idx, 1)
+        XCTAssertEqual(movingFavorite.idx, 4)
+        XCTAssertEqual(moving.idolIDs, [sourceID])
+        XCTAssertEqual(movingFavorite.idolIDs, [sourceID])
+        XCTAssertEqual(targetInvalid.idolIDs, [targetID])
+        XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<Idol>()).count, 2)
+        XCTAssertEqual(cleanupCalls, 0)
+        let persisted = ModelContext(fixture.context.container)
+        let restored = try persisted.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(restored.first { $0.id == targetInvalid.id }?.idx, 0)
+        XCTAssertEqual(restored.first { $0.id == moving.id }?.idx, 1)
+        XCTAssertEqual(restored.first { $0.id == moving.id }?.idolIDs, [sourceID])
+    }
+
+    func testIdolMergeIndexOverflowDoesNotSaveOrChangeAssociations() throws {
+        for (idx, favorite) in [(Int.max, false), (Int.min, true)] {
+            let fixture = try makeFixture()
+            let source = Idol(name: "Source")
+            let target = Idol(name: "Target")
+            fixture.context.insert(source)
+            fixture.context.insert(target)
+            let moving = MediaItem(
+                idols: [source], idx: idx, imageRef: "moving.jpg", isFavorite: favorite
+            )
+            let existing = MediaItem(
+                idols: [target], idx: idx, imageRef: "target.jpg", isFavorite: favorite
+            )
+            fixture.context.insert(moving)
+            fixture.context.insert(existing)
+            try fixture.context.save()
+            let sourceID = source.id
+            let targetID = target.id
+            var saves = 0
+            XCTAssertThrowsError(try ChekinanaIdolPersistence.merge(
+                sourceID: sourceID, into: targetID, in: fixture.context,
+                saveContext: { _ in saves += 1 }
+            )) { error in
+                XCTAssertEqual(error as? ChekinanaChekiIndexingError, .overflow)
+            }
+            XCTAssertEqual(saves, 0)
+            XCTAssertEqual(moving.idolIDs, [sourceID])
+            XCTAssertEqual(existing.idolIDs, [targetID])
+            XCTAssertEqual(moving.idx, idx)
+            XCTAssertEqual(existing.idx, idx)
+            XCTAssertEqual(try fixture.context.fetch(FetchDescriptor<Idol>()).count, 2)
+        }
     }
 
     func testIdolMergeTargetsUseStableOrderAndExcludeSourceAndHiddenIdols() {
@@ -16445,10 +31938,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         for code in cards.compactMap(\.confirmationCode) {
             try requireSuccess(await fixture.executor.execute("confirm \(code)"))
         }
-        let saved = try fixture.context.fetch(FetchDescriptor<Cheki>())
+        let saved = try fixture.context.fetch(FetchDescriptor<MediaItem>())
         XCTAssertEqual(saved.count, 2)
-        XCTAssertEqual(saved.filter { $0.date == nil && $0.idx == nil }.count, 1)
-        XCTAssertEqual(saved.filter { $0.date != nil && $0.idx == nil }.count, 1)
+        XCTAssertEqual(saved.filter { $0.date == nil && $0.idx == 1 }.count, 1)
+        XCTAssertEqual(saved.filter { $0.date != nil && $0.idx == 1 }.count, 1)
         XCTAssertTrue(inserted.allSatisfy { !fixture.ledger.containsTemporaryCheki($0.id) })
     }
 
@@ -16764,7 +32257,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(cards.count, 1)
         let temporary = try fixture.ledger.resolveTemporaryCheki(shortID(cards[0].id))
         XCTAssertFalse(sourceImages.map(\.data).contains(temporary.image.data))
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testHumanBodyPoseCountMappingAndInvalidImageFallback() {
@@ -16928,7 +32421,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         let savedID = try XCTUnwrap(savedCards.first?.id)
         let saved = try XCTUnwrap(fixture.context.fetch(
-            FetchDescriptor<Cheki>(predicate: #Predicate { $0.id == savedID })
+            FetchDescriptor<MediaItem>(predicate: #Predicate { $0.id == savedID })
         ).first)
         XCTAssertEqual(saved.userAppears, false)
         XCTAssertFalse(fixture.ledger.containsTemporaryCheki(temporary.id))
@@ -16985,7 +32478,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
         let savedID = card.id
         let saved = try XCTUnwrap(fixture.context.fetch(
-            FetchDescriptor<Cheki>(predicate: #Predicate { $0.id == savedID })
+            FetchDescriptor<MediaItem>(predicate: #Predicate { $0.id == savedID })
         ).first)
         XCTAssertEqual(saved.userAppears, true)
         XCTAssertFalse(fixture.ledger.containsTemporaryCheki(temporary.id))
@@ -16994,8 +32487,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testSingleConfirmAttachAdoptsDetectionWhenExistingValueIsNil() async throws {
         let fixture = try makeFixture()
         defer { cleanupManagedImages(in: fixture.context) }
-        let target = Cheki(date: utcDate(2026, 8, 11), userAppears: nil)
-        target.userAppears = nil
+        let target = ChekiRecord(date: utcDate(2026, 8, 11), count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let prepared = try await prepareSingleAttachConfirmation(
@@ -17008,18 +32500,98 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let response = await fixture.executor.execute("confirm \(prepared.code)")
         XCTAssertTrue(ChekinanaConfirmationResponseValidator.isAddScanChekiSuccess(
             response,
-            expectedChekiID: target.id
+            expectedChekiID: prepared.chekiID
         ))
-        XCTAssertEqual(target.userAppears, true)
-        XCTAssertFalse(ChekinanaNoMediaPolicy.hasNoImage(target.imageRef))
-        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<Cheki>()), 1)
+        let saved = try XCTUnwrap(fixture.context.fetch(FetchDescriptor<MediaItem>()).first)
+        XCTAssertEqual(saved.userAppears, true)
+        XCTAssertEqual(try fixture.context.fetchCount(FetchDescriptor<MediaItem>()), 1)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
         XCTAssertFalse(fixture.ledger.containsTemporaryCheki(prepared.temporaryID))
     }
 
-    func testSingleConfirmAttachPreservesExistingNonNilAutomaticValue() async throws {
+    func testExistingChekiAutomaticMatchAllowsSiblingCardsToShareOneCandidate() {
+        let first = UUID()
+        let second = UUID()
+        XCTAssertEqual(
+            ChekinanaExistingChekiMatchPolicy.availableCandidateIDs(
+                allCandidateIDs: [first],
+                reservedBySiblingCards: [first]
+            ),
+            [first]
+        )
+        XCTAssertEqual(
+            ChekinanaExistingChekiMatchPolicy.automaticTargetID(
+                allCandidateIDs: [first],
+                availableCandidateIDs: [first]
+            ),
+            first
+        )
+        XCTAssertNil(ChekinanaExistingChekiMatchPolicy.automaticTargetID(
+            allCandidateIDs: [first, second],
+            availableCandidateIDs: [first, second]
+        ))
+        XCTAssertNil(ChekinanaExistingChekiMatchPolicy.automaticTargetID(
+            allCandidateIDs: [first],
+            availableCandidateIDs: []
+        ))
+    }
+
+    func testAttachImageConsumesOneRecordQuantityAndInheritsRecordFields() async throws {
         let fixture = try makeFixture()
         defer { cleanupManagedImages(in: fixture.context) }
-        let target = Cheki(date: utcDate(2026, 8, 12), userAppears: true)
+        let idol = Idol(name: "Attach Target")
+        let event = Event(name: "Inherited Event")
+        let date = utcDate(2026, 8, 18)
+        let target = ChekiRecord(
+            idols: [idol],
+            event: event,
+            date: date,
+            size: .wide,
+            note: "inherited note",
+            count: 3
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(event)
+        fixture.context.insert(target)
+        try fixture.context.save()
+        let totalBefore = ChekinanaChekiRecordStore.totalCount([target])
+        let prepared = try await prepareSingleAttachConfirmation(
+            in: fixture,
+            target: target,
+            imageData: scannerPNGData(color: .orange),
+            detectedUserAppears: false
+        )
+
+        let response = await fixture.executor.execute("confirm \(prepared.code)")
+        XCTAssertTrue(ChekinanaConfirmationResponseValidator.isAddScanChekiSuccess(
+            response,
+            expectedChekiID: prepared.chekiID
+        ))
+        let savedID = prepared.chekiID
+        let targetID = target.id
+        let saved = try XCTUnwrap(fixture.context.fetch(
+            FetchDescriptor<MediaItem>(predicate: #Predicate {
+                $0.id == savedID
+            })
+        ).first)
+        let remaining = try XCTUnwrap(fixture.context.fetch(
+            FetchDescriptor<ChekiRecord>(predicate: #Predicate {
+                $0.id == targetID
+            })
+        ).first)
+        XCTAssertEqual(remaining.count, 2)
+        XCTAssertEqual(saved.idols.map(\.id), [idol.id])
+        XCTAssertEqual(saved.event?.id, event.id)
+        XCTAssertEqual(saved.date, date)
+        XCTAssertEqual(saved.size, .wide)
+        XCTAssertEqual(saved.note, "inherited note")
+        XCTAssertEqual(1 + ChekinanaChekiRecordStore.totalCount([remaining]), totalBefore)
+    }
+
+    func testSingleConfirmAttachUsesDetectionWhenRecordHasNoShotType() async throws {
+        let fixture = try makeFixture()
+        defer { cleanupManagedImages(in: fixture.context) }
+        let target = ChekiRecord(date: utcDate(2026, 8, 12), count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let prepared = try await prepareSingleAttachConfirmation(
@@ -17033,15 +32605,18 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let response = await fixture.executor.execute("confirm \(prepared.code)")
         XCTAssertTrue(ChekinanaConfirmationResponseValidator.isAddScanChekiSuccess(
             response,
-            expectedChekiID: target.id
+            expectedChekiID: prepared.chekiID
         ))
-        XCTAssertEqual(target.userAppears, true)
+        XCTAssertEqual(
+            try fixture.context.fetch(FetchDescriptor<MediaItem>()).first?.userAppears,
+            false
+        )
     }
 
     func testSingleConfirmAttachExplicitToggleOverridesExistingValue() async throws {
         let fixture = try makeFixture()
         defer { cleanupManagedImages(in: fixture.context) }
-        let target = Cheki(date: utcDate(2026, 8, 13), userAppears: true)
+        let target = ChekiRecord(date: utcDate(2026, 8, 13), count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let prepared = try await prepareSingleAttachConfirmation(
@@ -17055,14 +32630,17 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let response = await fixture.executor.execute("confirm \(prepared.code)")
         XCTAssertTrue(ChekinanaConfirmationResponseValidator.isAddScanChekiSuccess(
             response,
-            expectedChekiID: target.id
+            expectedChekiID: prepared.chekiID
         ))
-        XCTAssertEqual(target.userAppears, false)
+        XCTAssertEqual(
+            try fixture.context.fetch(FetchDescriptor<MediaItem>()).first?.userAppears,
+            false
+        )
     }
 
-    func testSingleConfirmAttachRejectsLateMediaWithoutWritingAFile() async throws {
+    func testSingleConfirmAttachRejectsLateRecordChangeWithoutWritingAFile() async throws {
         let fixture = try makeFixture()
-        let target = Cheki(date: utcDate(2026, 8, 14), imageRef: nil)
+        let target = ChekiRecord(date: utcDate(2026, 8, 14), note: "before", count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let prepared = try await prepareSingleAttachConfirmation(
@@ -17072,24 +32650,23 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             detectedUserAppears: false
         )
         let filesBefore = try managedChekiFilenames()
-        target.imageRef = "late-external.jpg"
-        target.updatedAt = Date()
+        target.note = "late change"
         try fixture.context.save()
 
         guard case .text(let message) = await fixture.executor.execute(
             "confirm \(prepared.code)"
         ) else { return XCTFail("expected a retained confirmation failure") }
         XCTAssertTrue(message.hasPrefix("error:"))
-        XCTAssertEqual(target.imageRef, "late-external.jpg")
+        XCTAssertEqual(target.note, "late change")
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
         XCTAssertEqual(try managedChekiFilenames(), filesBefore)
         XCTAssertNotNil(fixture.ledger.entry(for: prepared.code))
         XCTAssertTrue(fixture.ledger.containsTemporaryCheki(prepared.temporaryID))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
     }
 
     func testSingleConfirmAttachInvalidImageLeavesTargetAndLedgerRecoverable() async throws {
         let fixture = try makeFixture()
-        let target = Cheki(date: utcDate(2026, 8, 15), imageRef: nil)
+        let target = ChekiRecord(date: utcDate(2026, 8, 15), count: 1)
         fixture.context.insert(target)
         try fixture.context.save()
         let prepared = try await prepareSingleAttachConfirmation(
@@ -17104,11 +32681,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "confirm \(prepared.code)"
         ) else { return XCTFail("expected image validation failure") }
         XCTAssertTrue(message.hasPrefix("error:"))
-        XCTAssertTrue(ChekinanaNoMediaPolicy.hasNoImage(target.imageRef))
+        XCTAssertEqual(target.count, 1)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
         XCTAssertEqual(try managedChekiFilenames(), filesBefore)
         XCTAssertNotNil(fixture.ledger.entry(for: prepared.code))
         XCTAssertTrue(fixture.ledger.containsTemporaryCheki(prepared.temporaryID))
-        XCTAssertFalse(fixture.ledger.isTemporaryExistingChekiTargetReserved(target.id))
     }
 
     func testTemporaryExistingSelectionUsesEffectiveUserAppearsUntilExplicitToggle() throws {
@@ -17152,10 +32729,9 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     func testBatchAttachUserAppearsPreservesExistingUnlessNilOrExplicitlyEdited() async throws {
         let fixture = try makeFixture()
         defer { cleanupManagedImages(in: fixture.context) }
-        let preserved = Cheki(date: utcDate(2026, 8, 1), userAppears: true)
-        let inferred = Cheki(date: utcDate(2026, 8, 2), userAppears: nil)
-        inferred.userAppears = nil
-        let overridden = Cheki(date: utcDate(2026, 8, 3), userAppears: true)
+        let preserved = ChekiRecord(date: utcDate(2026, 8, 1), count: 1)
+        let inferred = ChekiRecord(date: utcDate(2026, 8, 2), count: 1)
+        let overridden = ChekiRecord(date: utcDate(2026, 8, 3), count: 1)
         fixture.context.insert(preserved)
         fixture.context.insert(inferred)
         fixture.context.insert(overridden)
@@ -17189,12 +32765,13 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             .confirmTemporaryChekiBatch(confirmationCodes: codes) else {
             return XCTFail("expected mixed attach batch to save")
         }
-        XCTAssertEqual(cards.map(\.id), [preserved.id, inferred.id, overridden.id])
-        let saved = try fixture.context.fetch(FetchDescriptor<Cheki>())
-        XCTAssertEqual(saved.first { $0.id == preserved.id }?.userAppears, true)
-        XCTAssertEqual(saved.first { $0.id == inferred.id }?.userAppears, true)
-        XCTAssertEqual(saved.first { $0.id == overridden.id }?.userAppears, false)
+        XCTAssertEqual(cards.count, 3)
+        let saved = try fixture.context.fetch(FetchDescriptor<MediaItem>())
+        XCTAssertEqual(saved.first { $0.date == preserved.date }?.userAppears, false)
+        XCTAssertEqual(saved.first { $0.date == inferred.date }?.userAppears, true)
+        XCTAssertEqual(saved.first { $0.date == overridden.date }?.userAppears, false)
         XCTAssertTrue(saved.allSatisfy { !ChekinanaNoMediaPolicy.hasNoImage($0.imageRef) })
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<ChekiRecord>()).isEmpty)
     }
 
     func testScanSubmitsAllSourcesBeforeLocalResultPreparation() async throws {
@@ -17370,7 +32947,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         XCTAssertTrue(text(from: response).contains("no Cheki images"))
         XCTAssertTrue(fixture.ledger.availableTemporaryChekiChoices().isEmpty)
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testCancelledScanIgnoresLateNonCooperativeScannerResult() async throws {
@@ -17395,7 +32972,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         _ = await task.value
 
         XCTAssertTrue(fixture.ledger.availableTemporaryChekiChoices().isEmpty)
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testCancelledMultiSourceScanDrainsLateTasksAndSuppressesProgressBeforeReturning() async throws {
@@ -17445,7 +33022,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(returnedAfterRelease)
         XCTAssertEqual(progressUpdates.count, progressCountAtCancellation)
         XCTAssertTrue(fixture.ledger.availableTemporaryChekiChoices().isEmpty)
-        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Cheki>()).isEmpty)
+        XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<MediaItem>()).isEmpty)
     }
 
     func testScanWithoutPodFailsLocallyBeforeScannerOrTemporaryWrite() async throws {
@@ -18747,7 +34324,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<EventSchedule>()).isEmpty)
     }
 
-    func testMediaEventLinksRoundTripUpdateClearAndRemainUniquePerMediaKind() throws {
+    func testV9MediaEventLinkCarrierRoundTripsUpdateClearAndUniqueKindKeys() throws {
         let schema = Schema(versionedSchema: ChekinanaSchemaV9.self)
         let container = try ModelContainer(
             for: schema,
@@ -18757,49 +34334,40 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )]
         )
         let context = ModelContext(container)
-        let firstEvent = Event(name: "First")
-        let secondEvent = Event(name: "Second")
-        let shame = Shame(imageRef: "shame.jpg")
-        let douga = Douga(videoRef: "douga.mov")
+        let firstEvent = ChekinanaLegacyMediaSchema.Event(name: "First")
+        let secondEvent = ChekinanaLegacyMediaSchema.Event(name: "Second")
+        let shame = ChekinanaLegacyMediaSchema.Shame()
+        shame.imageRef = "shame.jpg"
+        let douga = ChekinanaLegacyMediaSchema.Douga()
+        douga.videoRef = "douga.mov"
         [firstEvent, secondEvent].forEach(context.insert)
         context.insert(shame)
         context.insert(douga)
         try context.save()
 
-        XCTAssertNil(ChekinanaMediaEventLinkStore.eventID(
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MediaEventLink>()).isEmpty)
+        let shameLink = MediaEventLink(
             mediaID: shame.id,
             kind: .shame,
-            links: try context.fetch(FetchDescriptor<MediaEventLink>())
-        ))
-        try ChekinanaMediaEventLinkStore.set(
-            mediaID: shame.id,
-            kind: .shame,
-            eventID: firstEvent.id,
-            in: context
+            eventID: firstEvent.id
         )
-        try ChekinanaMediaEventLinkStore.set(
+        let dougaLink = MediaEventLink(
             mediaID: douga.id,
             kind: .douga,
-            eventID: firstEvent.id,
-            in: context
+            eventID: firstEvent.id
         )
+        context.insert(shameLink)
+        context.insert(dougaLink)
+        try context.save()
         var links = try context.fetch(FetchDescriptor<MediaEventLink>())
         XCTAssertEqual(links.count, 2)
         XCTAssertEqual(
-            ChekinanaMediaEventLinkStore.eventID(
-                mediaID: shame.id,
-                kind: .shame,
-                links: links
-            ),
+            links.first { $0.id == MediaEventLink.key(mediaID: shame.id, kind: .shame) }?.eventID,
             firstEvent.id
         )
 
-        try ChekinanaMediaEventLinkStore.set(
-            mediaID: shame.id,
-            kind: .shame,
-            eventID: secondEvent.id,
-            in: context
-        )
+        shameLink.eventID = secondEvent.id
+        try context.save()
         links = try context.fetch(FetchDescriptor<MediaEventLink>())
         XCTAssertEqual(links.count, 2)
         XCTAssertEqual(
@@ -18807,12 +34375,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             secondEvent.id
         )
 
-        try ChekinanaMediaEventLinkStore.set(
-            mediaID: shame.id,
-            kind: .shame,
-            eventID: nil,
-            in: context
-        )
+        context.delete(shameLink)
+        try context.save()
         links = try context.fetch(FetchDescriptor<MediaEventLink>())
         XCTAssertEqual(links.count, 1)
         XCTAssertEqual(links.first?.mediaID, douga.id)
@@ -18824,7 +34388,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
-    func testMediaEventLinkCleanupRemovesMediaAndEventReferences() throws {
+    func testV9MediaEventLinkCarrierCleanupRemovesMediaAndEventReferences() throws {
         let schema = Schema(versionedSchema: ChekinanaSchemaV9.self)
         let container = try ModelContainer(
             for: schema,
@@ -18834,31 +34398,30 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )]
         )
         let context = ModelContext(container)
-        let event = Event(name: "Linked")
-        let shame = Shame(imageRef: "shame.jpg")
-        let douga = Douga(videoRef: "douga.mov")
+        let event = ChekinanaLegacyMediaSchema.Event(name: "Linked")
+        let shame = ChekinanaLegacyMediaSchema.Shame()
+        shame.imageRef = "shame.jpg"
+        let douga = ChekinanaLegacyMediaSchema.Douga()
+        douga.videoRef = "douga.mov"
         context.insert(event)
         context.insert(shame)
         context.insert(douga)
         try context.save()
-        try ChekinanaMediaEventLinkStore.set(
+        context.insert(MediaEventLink(
             mediaID: shame.id,
             kind: .shame,
-            eventID: event.id,
-            in: context
-        )
-        try ChekinanaMediaEventLinkStore.set(
+            eventID: event.id
+        ))
+        context.insert(MediaEventLink(
             mediaID: douga.id,
             kind: .douga,
-            eventID: event.id,
-            in: context
-        )
+            eventID: event.id
+        ))
+        try context.save()
 
-        try ChekinanaMediaEventLinkStore.delete(
-            mediaID: shame.id,
-            kind: .shame,
-            in: context
-        )
+        try context.fetch(FetchDescriptor<MediaEventLink>())
+            .filter { $0.mediaID == shame.id && $0.kind == .shame }
+            .forEach(context.delete)
         context.delete(shame)
         try context.save()
         XCTAssertEqual(
@@ -18866,14 +34429,19 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             [douga.id]
         )
 
-        try ChekinanaMediaEventLinkStore.delete(eventID: event.id, in: context)
+        try context.fetch(FetchDescriptor<MediaEventLink>())
+            .filter { $0.eventID == event.id }
+            .forEach(context.delete)
         context.delete(event)
         try context.save()
         XCTAssertTrue(try context.fetch(FetchDescriptor<MediaEventLink>()).isEmpty)
-        XCTAssertEqual(try context.fetch(FetchDescriptor<Douga>()).first?.id, douga.id)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Douga>()).first?.id,
+            douga.id
+        )
     }
 
-    func testMediaShotTypesRoundTripUpsertAndDeleteCleanup() throws {
+    func testV12MediaShotTypeCarrierRoundTripsUpdateAndDeleteCleanup() throws {
         let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
         let container = try ModelContainer(
             for: schema,
@@ -18883,55 +34451,38 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )]
         )
         let context = ModelContext(container)
-        let shame = Shame(imageRef: "shame.jpg")
-        let douga = Douga(videoRef: "douga.mov")
+        let shame = ChekinanaLegacyMediaSchema.Shame()
+        shame.imageRef = "shame.jpg"
+        let douga = ChekinanaLegacyMediaSchema.Douga()
+        douga.videoRef = "douga.mov"
         context.insert(shame)
         context.insert(douga)
         try context.save()
 
-        XCTAssertFalse(ChekinanaMediaShotTypeStore.userAppears(
+        XCTAssertTrue(try context.fetch(FetchDescriptor<MediaShotType>()).isEmpty)
+        let shameShot = MediaShotType(
             mediaID: shame.id,
             kind: .shame,
-            values: try context.fetch(FetchDescriptor<MediaShotType>())
-        ))
-        try ChekinanaMediaShotTypeStore.set(
-            mediaID: shame.id,
-            kind: .shame,
-            userAppears: true,
-            in: context
+            userAppears: true
         )
-        try ChekinanaMediaShotTypeStore.set(
+        let dougaShot = MediaShotType(
             mediaID: douga.id,
             kind: .douga,
-            userAppears: true,
-            in: context
+            userAppears: true
         )
-        try ChekinanaMediaShotTypeStore.set(
-            mediaID: shame.id,
-            kind: .shame,
-            userAppears: false,
-            in: context
-        )
+        context.insert(shameShot)
+        context.insert(dougaShot)
+        try context.save()
+        shameShot.userAppears = false
+        try context.save()
 
         let verification = ModelContext(container)
         let values = try verification.fetch(FetchDescriptor<MediaShotType>())
         XCTAssertEqual(values.count, 2)
-        XCTAssertFalse(ChekinanaMediaShotTypeStore.userAppears(
-            mediaID: shame.id,
-            kind: .shame,
-            values: values
-        ))
-        XCTAssertTrue(ChekinanaMediaShotTypeStore.userAppears(
-            mediaID: douga.id,
-            kind: .douga,
-            values: values
-        ))
+        XCTAssertFalse(values.first { $0.id == shameShot.id }?.userAppears ?? true)
+        XCTAssertTrue(values.first { $0.id == dougaShot.id }?.userAppears ?? false)
 
-        try ChekinanaMediaShotTypeStore.delete(
-            mediaID: shame.id,
-            kind: .shame,
-            in: context
-        )
+        context.delete(shameShot)
         context.delete(shame)
         try context.save()
         XCTAssertEqual(
@@ -18939,11 +34490,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             [douga.id]
         )
 
-        try ChekinanaMediaShotTypeStore.delete(
-            mediaID: douga.id,
-            kind: .douga,
-            in: context
-        )
+        context.delete(dougaShot)
         context.delete(douga)
         try context.save()
         XCTAssertTrue(try context.fetch(FetchDescriptor<MediaShotType>()).isEmpty)
@@ -18973,9 +34520,16 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v8Container))
-            context.insert(Event(id: eventID, name: "Preserved Event"))
-            context.insert(Shame(id: shameID, imageRef: "shame.jpg"))
-            context.insert(Douga(id: dougaID, videoRef: "douga.mov"))
+            context.insert(ChekinanaLegacyMediaSchema.Event(
+                id: eventID,
+                name: "Preserved Event"
+            ))
+            let shame = ChekinanaLegacyMediaSchema.Shame(id: shameID)
+            shame.imageRef = "shame.jpg"
+            context.insert(shame)
+            let douga = ChekinanaLegacyMediaSchema.Douga(id: dougaID)
+            douga.videoRef = "douga.mov"
+            context.insert(douga)
             try context.save()
         }
         v8Container = nil
@@ -18983,7 +34537,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let v9Schema = Schema(versionedSchema: ChekinanaSchemaV9.self)
         let v9Container = try ModelContainer(
             for: v9Schema,
-            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            migrationPlan: ChekinanaV8ToV9TestMigrationPlan.self,
             configurations: [ModelConfiguration(
                 "Chekinana",
                 schema: v9Schema,
@@ -18992,9 +34546,24 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             )]
         )
         let context = ModelContext(v9Container)
-        XCTAssertEqual(try context.fetch(FetchDescriptor<Event>()).first?.id, eventID)
-        XCTAssertEqual(try context.fetch(FetchDescriptor<Shame>()).first?.id, shameID)
-        XCTAssertEqual(try context.fetch(FetchDescriptor<Douga>()).first?.id, dougaID)
+        XCTAssertEqual(
+            try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Event>()
+            ).first?.id,
+            eventID
+        )
+        XCTAssertEqual(
+            try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Shame>()
+            ).first?.id,
+            shameID
+        )
+        XCTAssertEqual(
+            try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Douga>()
+            ).first?.id,
+            dougaID
+        )
         XCTAssertTrue(try context.fetch(FetchDescriptor<MediaEventLink>()).isEmpty)
     }
 
@@ -19020,7 +34589,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v9Container))
-            context.insert(Idol(id: idolID, name: "Preserved Idol"))
+            context.insert(ChekinanaLegacyMediaSchema.Idol(
+                id: idolID,
+                name: "Preserved Idol"
+            ))
             try context.save()
         }
         v9Container = nil
@@ -19028,7 +34600,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let v10Schema = Schema(versionedSchema: ChekinanaSchemaV10.self)
         var v10Container: ModelContainer? = try ModelContainer(
             for: v10Schema,
-            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            migrationPlan: ChekinanaV9ToV10TestMigrationPlan.self,
             configurations: [ModelConfiguration(
                 "Chekinana",
                 schema: v10Schema,
@@ -19038,7 +34610,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         do {
             let context = ModelContext(try XCTUnwrap(v10Container))
-            XCTAssertEqual(try context.fetch(FetchDescriptor<Idol>()).first?.id, idolID)
+            XCTAssertEqual(
+                try context.fetch(
+                    FetchDescriptor<ChekinanaLegacyMediaSchema.Idol>()
+                ).first?.id,
+                idolID
+            )
             XCTAssertTrue(try context.fetch(FetchDescriptor<CalendarGroupOrder>()).isEmpty)
             try ChekinanaCalendarGroupOrderStore.setOrder(
                 [idolID.uuidString.lowercased()],
@@ -19372,6 +34949,84 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
+    func testEventUpdateRejectsOutOfRangeDateWithoutPartialScheduleMutation() throws {
+        let fixture = try makeFixture()
+        let initialDate = ChekinanaProductDate.date(year: 2026, month: 8, day: 1)
+        let event = Event(name: "Boundary Update", date: initialDate)
+        fixture.context.insert(event)
+        try fixture.context.save()
+        try ChekinanaEventSchedulePersistence.set(
+            eventID: event.id,
+            openTime: "18:00",
+            startTime: "18:30",
+            in: fixture.context
+        )
+
+        for rejectedDate in [
+            ChekinanaProductDate.date(year: 2005, month: 12, day: 7),
+            ChekinanaProductDate.date(year: 2201, month: 1, day: 1),
+        ] {
+            let updateContext = ModelContext(fixture.context.container)
+            updateContext.autosaveEnabled = false
+            let persisted = try XCTUnwrap(
+                try updateContext.fetch(FetchDescriptor<Event>()).first
+            )
+            XCTAssertThrowsError(try ChekinanaEventPersistence.update(
+                eventID: event.id,
+                expectedUpdatedAt: persisted.updatedAt,
+                schedule: .init(openTime: "20:00", startTime: "20:30"),
+                in: updateContext,
+                apply: {
+                    $0.date = rejectedDate
+                    $0.updatedAt = persisted.updatedAt.addingTimeInterval(1)
+                }
+            )) { error in
+                XCTAssertEqual(
+                    error as? ChekinanaPersistedContentDateError,
+                    .outsideSupportedRange
+                )
+            }
+
+            let verification = ModelContext(fixture.context.container)
+            XCTAssertEqual(
+                try verification.fetch(FetchDescriptor<Event>()).first?.date,
+                initialDate
+            )
+            XCTAssertEqual(
+                try ChekinanaEventSchedulePersistence.value(
+                    for: event.id,
+                    in: verification
+                ),
+                .init(openTime: "18:00", startTime: "18:30")
+            )
+        }
+
+        for acceptedDate in [
+            ChekinanaProductDate.date(year: 2005, month: 12, day: 8),
+            ChekinanaProductDate.date(year: 2200, month: 12, day: 31),
+        ] {
+            let updateContext = ModelContext(fixture.context.container)
+            updateContext.autosaveEnabled = false
+            let persisted = try XCTUnwrap(
+                try updateContext.fetch(FetchDescriptor<Event>()).first
+            )
+            try ChekinanaEventPersistence.update(
+                eventID: event.id,
+                expectedUpdatedAt: persisted.updatedAt,
+                in: updateContext,
+                apply: {
+                    $0.date = acceptedDate
+                    $0.updatedAt = persisted.updatedAt.addingTimeInterval(1)
+                }
+            )
+            let verification = ModelContext(fixture.context.container)
+            XCTAssertEqual(
+                try verification.fetch(FetchDescriptor<Event>()).first?.date,
+                acceptedDate
+            )
+        }
+    }
+
     func testEventCreateSaveFailureRollsBackEventAndScheduleAndReleasesGate() throws {
         enum InjectedFailure: Error { case save }
 
@@ -19561,7 +35216,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         var fields = ChekinanaEventCandidateFields(
             name: "Price boundary",
             date: "",
-            city: "",
+            city: "Shanghai",
             livehouse: "",
             price: "",
             weiboURL: "",
@@ -19613,6 +35268,51 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         return field == ChekinanaL10n.text(
             "assistant.event.field.price",
             fallback: "Price"
+        )
+    }
+
+    func testEventCandidateRequiresTrimmedCity() {
+        var fields = ChekinanaEventCandidateFields(
+            name: "City required",
+            date: "",
+            city: " \n\t ",
+            livehouse: "",
+            weiboURL: "",
+            ticketURL: ""
+        )
+
+        XCTAssertTrue(
+            ChekinanaEventCandidateValidator.blockers(for: fields)
+                .contains(.missingCity)
+        )
+        fields.city = " 上海 "
+        XCTAssertFalse(
+            ChekinanaEventCandidateValidator.blockers(for: fields)
+                .contains(.missingCity)
+        )
+    }
+
+    func testEventCityRequiredLocalizationShipsAllSupportedLanguages() throws {
+        let localizationURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("Localizable.xcstrings")
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(contentsOf: localizationURL)
+            ) as? [String: Any]
+        )
+        let strings = try XCTUnwrap(root["strings"] as? [String: Any])
+        let entry = try XCTUnwrap(
+            strings["product.events.city_required"] as? [String: Any]
+        )
+        let localizations = try XCTUnwrap(
+            entry["localizations"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(localizations.keys),
+            Set(["en", "ja", "zh-Hans", "zh-Hant"])
         )
     }
 
@@ -19681,7 +35381,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     func testEventCandidateStrictEnvelopeInputAndGenerationGate() throws {
-        let success = Data(#"{"version":1,"kind":"candidate","candidate":{"name":"Live","date":"","city":"","livehouse":"中大二号馆","address":"","price":"88","avatar_url":"https://wx1.sinaimg.cn/avatar.jpg","imageUrls":["https://wx1.sinaimg.cn/large/first.jpg","https://wx2.sinaimg.cn/large/second.jpg"],"weiboURL":"https://weibo.com/123/AbC","ticketURL":""}}"#.utf8)
+        let success = Data(#"{"version":1,"kind":"candidate","candidate":{"name":"Live","date":"","city":"上海","livehouse":"中大二号馆","address":"","price":"88","avatar_url":"https://wx1.sinaimg.cn/avatar.jpg","imageUrls":["https://wx1.sinaimg.cn/large/first.jpg","https://wx2.sinaimg.cn/large/second.jpg"],"weiboURL":"https://weibo.com/123/AbC","ticketURL":""}}"#.utf8)
         let fields = try ChekinanaEventCandidateClient.decodeSuccess(success)
         XCTAssertEqual(fields.name, "Live")
         XCTAssertEqual(fields.price, "88")
@@ -19738,18 +35438,385 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertEqual(try ChekinanaEventCandidateClient.decodeSuccess(legacy).note, "")
     }
 
+    func testEventCandidateContentMetadataParsesCompatibilityStatesAndTokens() throws {
+        typealias Metadata = ChekinanaEventCandidateContentMetadata
+
+        XCTAssertEqual(
+            Metadata.parse(versionValue: nil, incompleteReasonsValue: nil),
+            .unknown
+        )
+        XCTAssertEqual(
+            Metadata.parse(
+                versionValue: nil,
+                incompleteReasonsValue: "local-truncation"
+            ),
+            .unknown
+        )
+        XCTAssertEqual(
+            Metadata.parse(
+                versionValue: "2",
+                incompleteReasonsValue: "local-truncation"
+            ),
+            .unknown
+        )
+        XCTAssertEqual(
+            Metadata.parse(versionValue: "1", incompleteReasonsValue: nil),
+            .complete
+        )
+        XCTAssertEqual(
+            Metadata.parse(
+                versionValue: " \t1\r\n",
+                incompleteReasonsValue: " , \t, "
+            ),
+            .complete
+        )
+
+        let combined = Metadata.parse(
+            versionValue: " 1 ",
+            incompleteReasonsValue:
+                " X-UPSTREAM-TRUNCATION, weibo-summary-fallback, "
+                    + "LOCAL-TRUNCATION, future-reason, local-truncation "
+        )
+        XCTAssertEqual(combined.completeness, .incomplete)
+        XCTAssertEqual(combined.reasons, Set(Metadata.IncompleteReason.allCases))
+        XCTAssertTrue(combined.containsUnknownReason)
+
+        let reordered = Metadata.parse(
+            versionValue: "1",
+            incompleteReasonsValue:
+                "local-truncation,x-upstream-truncation,weibo-summary-fallback"
+        )
+        XCTAssertEqual(reordered.completeness, .incomplete)
+        XCTAssertEqual(reordered.reasons, combined.reasons)
+        XCTAssertFalse(reordered.containsUnknownReason)
+
+        let unknownOnly = Metadata.parse(
+            versionValue: "1",
+            incompleteReasonsValue: "future-reason"
+        )
+        XCTAssertEqual(unknownOnly.completeness, .incomplete)
+        XCTAssertTrue(unknownOnly.reasons.isEmpty)
+        XCTAssertTrue(unknownOnly.containsUnknownReason)
+        XCTAssertTrue(unknownOnly.requiresWarning)
+        XCTAssertTrue(Metadata.unknown.requiresWarning)
+        XCTAssertFalse(Metadata.complete.requiresWarning)
+        XCTAssertNotNil(
+            ChekinanaEventContentWarningPresentation.message(for: unknownOnly)
+        )
+        XCTAssertNotNil(
+            ChekinanaEventContentWarningPresentation.message(for: .unknown)
+        )
+        XCTAssertNil(
+            ChekinanaEventContentWarningPresentation.message(for: .complete)
+        )
+
+        let lowercaseHeaderResponse = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://example.test")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "x-chekinana-content-metadata-version": "1",
+                "X-CHEKINANA-CONTENT-INCOMPLETE-REASONS":
+                    " local-truncation ",
+            ]
+        ))
+        XCTAssertEqual(
+            Metadata.parse(response: lowercaseHeaderResponse),
+            Metadata(
+                completeness: .incomplete,
+                reasons: [.localTruncation],
+                containsUnknownReason: false
+            )
+        )
+    }
+
+    func testEventContentMetadataWarningLocalizationShipsAllSupportedLanguages() throws {
+        let localizationURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("Localizable.xcstrings")
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(contentsOf: localizationURL)
+            ) as? [String: Any]
+        )
+        let strings = try XCTUnwrap(root["strings"] as? [String: Any])
+        let expectedLanguages = Set(["en", "ja", "zh-Hans", "zh-Hant"])
+        for key in [
+            "product.events.content_incomplete_warning",
+            "product.events.content_unknown_warning",
+        ] {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any])
+            let localizations = try XCTUnwrap(
+                entry["localizations"] as? [String: Any]
+            )
+            XCTAssertEqual(Set(localizations.keys), expectedLanguages, key)
+        }
+    }
+
+    func testEventEditorParseUserEditRevisionProtectsValueChangedBackToBaseline() {
+        let source = "https://weibo.com/123/EventA"
+        var coordinator = ChekinanaEventEditorParseCoordinator(
+            editorOwnerID: UUID()
+        )
+        var name = "baseline"
+        let request = coordinator.begin(sourceIdentity: source)
+
+        name = "manual value"
+        coordinator.recordUserEdit(.name)
+        name = "baseline"
+        coordinator.recordUserEdit(.name)
+
+        XCTAssertEqual(name, "baseline")
+        XCTAssertGreaterThan(
+            coordinator.fieldRevisions.revision(for: .name),
+            request.fieldRevisions.revision(for: .name)
+        )
+        XCTAssertFalse(coordinator.shouldApply(
+            .name,
+            from: request,
+            currentSourceIdentity: source
+        ))
+        XCTAssertTrue(coordinator.shouldApply(
+            .city,
+            from: request,
+            currentSourceIdentity: source
+        ))
+    }
+
+    func testEventEditorParseTreatsDateTimesAndAvatarAsAtomicIntentGroups() {
+        let source = "https://weibo.com/123/EventGroups"
+        let groupedFields: [ChekinanaEventEditorParsedField] = [
+            .date,
+            .openTime,
+            .startTime,
+            .avatar,
+        ]
+
+        for field in groupedFields {
+            var coordinator = ChekinanaEventEditorParseCoordinator(
+                editorOwnerID: UUID()
+            )
+            let request = coordinator.begin(sourceIdentity: source)
+
+            // Each entry is one revision group in the editor: date + hasDate,
+            // OPEN selection + enabled, START selection + enabled, and avatar
+            // content + explicit Clear intent.
+            coordinator.recordUserEdit(field)
+
+            XCTAssertFalse(
+                coordinator.shouldApply(
+                    field,
+                    from: request,
+                    currentSourceIdentity: source
+                ),
+                "A user edit to \(field) must block the whole grouped parse fill"
+            )
+            XCTAssertTrue(coordinator.shouldApply(
+                .name,
+                from: request,
+                currentSourceIdentity: source
+            ))
+        }
+    }
+
+    func testEventEditorParseRejectsOutOfOrderSourceOwnerAndClosedPageResults() {
+        let ownerA = UUID()
+        let ownerB = UUID()
+        let sourceA = "https://weibo.com/123/EventA"
+        let sourceB = "https://weibo.com/123/EventB"
+        var coordinator = ChekinanaEventEditorParseCoordinator(
+            editorOwnerID: ownerA
+        )
+        let requestA = coordinator.begin(sourceIdentity: sourceA)
+        coordinator.invalidateRequest()
+        let requestB = coordinator.begin(sourceIdentity: sourceB)
+
+        XCTAssertFalse(coordinator.accepts(
+            requestA,
+            currentSourceIdentity: sourceA,
+            isCancelled: false
+        ))
+        XCTAssertFalse(coordinator.finish(requestA))
+        XCTAssertTrue(coordinator.accepts(
+            requestB,
+            currentSourceIdentity: sourceB,
+            isCancelled: false
+        ))
+        XCTAssertFalse(coordinator.accepts(
+            requestB,
+            currentSourceIdentity: sourceA,
+            isCancelled: false
+        ))
+
+        XCTAssertTrue(coordinator.closeEditor())
+        XCTAssertFalse(coordinator.finish(requestB))
+        coordinator.activateIfNeeded(newOwnerID: ownerB)
+        let reopenedRequest = coordinator.begin(sourceIdentity: sourceB)
+        XCTAssertEqual(reopenedRequest.editorOwnerID, ownerB)
+        XCTAssertNotEqual(reopenedRequest.editorOwnerID, requestB.editorOwnerID)
+        XCTAssertFalse(coordinator.accepts(
+            requestB,
+            currentSourceIdentity: sourceB,
+            isCancelled: false
+        ))
+        XCTAssertTrue(coordinator.finish(reopenedRequest))
+        XCTAssertNil(coordinator.activeRequest)
+    }
+
+    func testEventEditorParseRejectsOldRequestContentWarningPublication() {
+        typealias Metadata = ChekinanaEventCandidateContentMetadata
+        let sourceA = "https://weibo.com/123/EventA"
+        let sourceB = "https://weibo.com/123/EventB"
+        var coordinator = ChekinanaEventEditorParseCoordinator(
+            editorOwnerID: UUID()
+        )
+        let requestA = coordinator.begin(sourceIdentity: sourceA)
+        let requestB = coordinator.begin(sourceIdentity: sourceB)
+
+        let staleWarning = Metadata.parse(
+            versionValue: "1",
+            incompleteReasonsValue: "weibo-summary-fallback"
+        )
+        XCTAssertFalse(coordinator.publishContentMetadata(
+            staleWarning,
+            from: requestA,
+            currentSourceIdentity: sourceA
+        ))
+        XCTAssertNil(coordinator.publishedContentMetadata)
+
+        XCTAssertTrue(coordinator.publishContentMetadata(
+            .unknown,
+            from: requestB,
+            currentSourceIdentity: sourceB
+        ))
+        XCTAssertEqual(
+            coordinator.contentMetadata(currentSourceIdentity: sourceB),
+            .unknown
+        )
+        XCTAssertNil(coordinator.contentMetadata(currentSourceIdentity: sourceA))
+        XCTAssertTrue(coordinator.finish(requestB))
+        XCTAssertFalse(coordinator.publishContentMetadata(
+            staleWarning,
+            from: requestA,
+            currentSourceIdentity: sourceA
+        ))
+        XCTAssertEqual(coordinator.publishedContentMetadata, .unknown)
+    }
+
+    func testEventAvatarSelectionBFinishesBeforeAAndOwnsCleanup() {
+        var state = ChekinanaEventAvatarSelectionState()
+        let ownerA = state.begin(selectionID: UUID())
+        let ownerB = state.begin(selectionID: UUID())
+
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: ownerB))
+        XCTAssertFalse(state.completeSuccess(ifOwnedBy: ownerA))
+        XCTAssertFalse(state.releaseTask(ifOwnedBy: ownerA))
+        XCTAssertEqual(state.taskOwner, ownerB)
+        XCTAssertTrue(state.allowsSave(preparedOwner: ownerB))
+        XCTAssertFalse(state.allowsSave(preparedOwner: ownerA))
+        XCTAssertTrue(state.releaseTask(ifOwnedBy: ownerB))
+        XCTAssertNil(state.taskOwner)
+    }
+
+    func testEventAvatarClearCancelAndExitInvalidateLateSelection() {
+        let reasons: [ChekinanaEventAvatarSelectionInvalidationReason] = [
+            .avatarCleared,
+            .pickerCancelled,
+            .editorExited,
+        ]
+        for reason in reasons {
+            var state = ChekinanaEventAvatarSelectionState()
+            let owner = state.begin(selectionID: UUID())
+            let generation = state.generation
+
+            state.invalidate(reason: reason)
+
+            XCTAssertGreaterThan(state.generation, generation)
+            XCTAssertEqual(state.lastInvalidationReason, reason)
+            XCTAssertFalse(state.completeSuccess(ifOwnedBy: owner))
+            XCTAssertFalse(state.releaseTask(ifOwnedBy: owner))
+            XCTAssertFalse(state.isPreparing)
+            XCTAssertTrue(state.allowsSave(preparedOwner: nil))
+        }
+
+        var reselected = ChekinanaEventAvatarSelectionState()
+        let clearedOwner = reselected.begin(selectionID: UUID())
+        reselected.invalidate(reason: .avatarCleared)
+        let replacementOwner = reselected.begin(selectionID: UUID())
+        XCTAssertNotEqual(clearedOwner.generation, replacementOwner.generation)
+        XCTAssertFalse(reselected.completeSuccess(ifOwnedBy: clearedOwner))
+        XCTAssertTrue(reselected.completeSuccess(ifOwnedBy: replacementOwner))
+        XCTAssertTrue(reselected.allowsSave(preparedOwner: replacementOwner))
+    }
+
+    func testEventAvatarFailureCannotReuseOldPreparedAvatarAndCanRetry() {
+        var state = ChekinanaEventAvatarSelectionState()
+        let oldOwner = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: oldOwner))
+        XCTAssertTrue(state.releaseTask(ifOwnedBy: oldOwner))
+
+        let failedOwner = state.begin(selectionID: UUID())
+        XCTAssertTrue(state.completeFailure(
+            ifOwnedBy: failedOwner,
+            message: "Deterministic fake load failure"
+        ))
+        XCTAssertEqual(state.failureMessage, "Deterministic fake load failure")
+        XCTAssertFalse(state.allowsSave(preparedOwner: oldOwner))
+        XCTAssertFalse(state.allowsSave(preparedOwner: failedOwner))
+        XCTAssertFalse(state.allowsSave(preparedOwner: nil))
+        XCTAssertTrue(state.releaseTask(ifOwnedBy: failedOwner))
+
+        let retryOwner = state.begin(selectionID: UUID())
+        XCTAssertNil(state.failureMessage)
+        XCTAssertTrue(state.isPreparing)
+        XCTAssertTrue(state.completeSuccess(ifOwnedBy: retryOwner))
+        XCTAssertTrue(state.allowsSave(preparedOwner: retryOwner))
+    }
+
+    func testEventAvatarClearIntentRejectsBothLatePickerAndLateParse() {
+        let source = "https://weibo.com/123/EventAvatar"
+        var parse = ChekinanaEventEditorParseCoordinator(
+            editorOwnerID: UUID()
+        )
+        let request = parse.begin(sourceIdentity: source)
+        var avatar = ChekinanaEventAvatarSelectionState()
+        let pickerOwner = avatar.begin(selectionID: UUID())
+
+        avatar.invalidate(reason: .avatarCleared)
+        parse.recordUserEdit(.avatar)
+
+        XCTAssertFalse(avatar.completeSuccess(ifOwnedBy: pickerOwner))
+        XCTAssertFalse(parse.shouldApply(
+            .avatar,
+            from: request,
+            currentSourceIdentity: source
+        ))
+        XCTAssertTrue(avatar.allowsSave(preparedOwner: nil))
+    }
+
     func testEventCandidateWeiboURLShapeMatchesWorkerContract() throws {
+        let requiredMobileURL =
+            "https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom"
         let accepted = [
             "https://weibo.com/123456/AbC123",
             "https://www.weibo.com/user_name/Z9",
             "https://weibo.com/%E5%81%B6%E5%83%8F/%41bC123",
             "https://weibo.com/\(String(repeating: "u", count: 200))/AbC123",
+            requiredMobileURL,
+            "https://m.weibo.cn/status/1",
+            "https://m.weibo.cn/detail/12345678901234567890",
+            "HTTPS://m.weibo.cn/status/1",
+            "https://M.WEIBO.CN/status/1",
         ]
         let rejected = [
             "http://weibo.com/123456/AbC123",
             "https://user@weibo.com/123456/AbC123",
             "https://weibo.com:443/123456/AbC123",
             "https://weibo.com/123456/AbC123?source=app",
+            " https://weibo.com/123456/AbC123",
+            "https://weibo.com/123456/AbC123 ",
             "https://weibo.com/123456/AbC123#detail",
             "https://weibo.com/123456/AbC123/",
             "https://weibo.com//123456/AbC123",
@@ -19770,9 +35837,28 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "https://weibo.com/123456/AbC%2F123",
             "https://weibo.com/\(String(repeating: "u", count: 201))/AbC123",
             "https://m.weibo.com/123456/AbC123",
+            "http://m.weibo.cn/status/5338498639071007",
+            "https://user@m.weibo.cn/status/5338498639071007",
+            "https://m.weibo.cn:443/status/5338498639071007",
+            "https://m.weibo.cn/status/5338498639071007#detail",
+            "https://www.m.weibo.cn/status/5338498639071007",
+            "https://weibo.cn/status/5338498639071007",
+            "https://m.weibo.cn/status/not-a-number",
+            "https://m.weibo.cn/status/123456789012345678901",
+            "https://m.weibo.cn/status/5338498639071007/extra",
+            "https://m.weibo.cn/status/5338498639071007?source=app",
+            "https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom&foo=1",
+            "https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom#detail",
+            "https://m.weibo.cn/status/5338498639071007/",
+            "https://m.weibo.cn/status/%31",
+            "https://m.weibo.cn/other/5338498639071007",
+            "https://m.weibo.cn/STATUS/1",
+            "https://m.weibo.cn/status/1?JUMPFROM=weibocom",
+            "https://m.weibo.cn/status/1?jumpfrom=WEIBOCOM",
         ]
         accepted.forEach {
             XCTAssertTrue(ChekinanaEventCandidateValidator.isPublicWeiboStatusURL($0), $0)
+            XCTAssertTrue(ChekinanaEventCandidateValidator.isPublicSocialStatusURL($0), $0)
         }
         rejected.forEach {
             XCTAssertFalse(ChekinanaEventCandidateValidator.isPublicWeiboStatusURL($0), $0)
@@ -19794,16 +35880,174 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(try fixture.context.fetch(FetchDescriptor<Event>()).isEmpty)
     }
 
+    func testEventCandidateXStatusURLShapeAndTicketDiveDomains() throws {
+        let sample = "https://x.com/yoruamiofficial/status/2085682463745970481?s=46"
+        let accepted = [
+            sample,
+            "https://www.x.com/idol_01/status/1",
+        ]
+        let rejected = [
+            "http://x.com/idol/status/1",
+            "https://user@x.com/idol/status/1",
+            "https://x.com:443/idol/status/1",
+            "https://mobile.x.com/idol/status/1",
+            "https://x.com/idol/status/not-a-number",
+            "https://x.com/idol/status/1/extra",
+            "https://x.com/idol/status/1#detail",
+            "https://x.com/idol%2Fother/status/1",
+            "https://x.com/idol/status/%31",
+            "https://x.com/idol/status/1?bad=%ZZ",
+            "https://x.com/idol/status/1?foo=1",
+            "https://x.com/idol/status/1?s=46&foo=1",
+            "https://x.com/idol/status/1?s=1234",
+            " https://x.com/idol/status/1",
+            "https://x.com/idol/status/1 ",
+            "https://x.com/abcdefghijklmnop/status/1",
+            "https://x.com/idol/status/123456789012345678901",
+            "https://x.com/idol/status/1\n",
+        ]
+        accepted.forEach {
+            XCTAssertTrue(ChekinanaEventCandidateValidator.isPublicXStatusURL($0), $0)
+            XCTAssertTrue(ChekinanaEventCandidateValidator.isPublicSocialStatusURL($0), $0)
+        }
+        rejected.forEach {
+            XCTAssertFalse(ChekinanaEventCandidateValidator.isPublicXStatusURL($0), $0)
+        }
+        XCTAssertTrue(ChekinanaEventCandidateValidator.isTrustedTicketURL("https://t-dv.com/events/1"))
+        XCTAssertTrue(ChekinanaEventCandidateValidator.isTrustedTicketURL("https://www.ticketdive.com/event/1"))
+    }
+
+    func testEventCandidateClientPostsXURLAndPersistsOriginalSourceURL() async throws {
+        let url = "https://x.com/yoruamiofficial/status/2085682463745970481?s=46"
+        let endpoint = try XCTUnwrap(URL(string: "https://windows.test/api/event/weibo-candidate"))
+        let request = try ChekinanaEventCandidateClient.makeRequest(
+            endpointURL: endpoint,
+            weiboURL: url
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), Set(["version", "weiboURL"]))
+        XCTAssertEqual(object["weiboURL"] as? String, url)
+
+        ChekinanaEventCandidateMockURLProtocol.handler = { _ in
+            Data(#"{"version":1,"kind":"candidate","candidate":{"name":"X Live","date":"","city":"上海","livehouse":"Venue","address":"","price":"","avatar_url":"https://pbs.twimg.com/profile_images/avatar.jpg","imageUrls":["https://pbs.twimg.com/media/post.jpg"],"weiboURL":"https://x.com/yoruamiofficial/status/2085682463745970481?s=46","ticketURL":"https://t-dv.com/events/1"}}"#.utf8)
+        }
+        defer { ChekinanaEventCandidateMockURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaEventCandidateMockURLProtocol.self]
+        let fields = try await ChekinanaEventCandidateClient(
+            endpointURL: endpoint,
+            session: URLSession(configuration: configuration)
+        ).fetch(weiboURL: url)
+        XCTAssertEqual(fields.weiboURL, url)
+        XCTAssertEqual(fields.avatarURL, "https://pbs.twimg.com/profile_images/avatar.jpg")
+
+        let fixture = try makeFixture()
+        guard case .eventCard(let card) = fixture.executor.prepareEventCandidate(fields),
+              let code = card.confirmationCode else {
+            return XCTFail("expected X Event confirmation")
+        }
+        try requireSuccess(await fixture.executor.execute("confirm \(code)"))
+        let saved = try XCTUnwrap(try fixture.context.fetch(FetchDescriptor<Event>()).first)
+        XCTAssertEqual(saved.weiboURL?.absoluteString, url)
+        XCTAssertEqual(saved.source, .x)
+    }
+
+    func testEventCandidateClientAcceptsMobileWeiboAndPersistsOriginalURL() async throws {
+        let url = "https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom"
+        let endpoint = try XCTUnwrap(
+            URL(string: "https://windows.test/api/event/weibo-candidate")
+        )
+        let request = try ChekinanaEventCandidateClient.makeRequest(
+            endpointURL: endpoint,
+            weiboURL: url
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        XCTAssertEqual(object["weiboURL"] as? String, url)
+
+        ChekinanaEventCandidateMockURLProtocol.handler = { _ in
+            Data(#"{"version":1,"kind":"candidate","candidate":{"name":"Mobile Weibo Live","date":"","city":"上海","livehouse":"Venue","address":"","price":"","avatar_url":"","imageUrls":[],"weiboURL":"https://m.weibo.cn/status/5338498639071007?jumpfrom=weibocom","ticketURL":""}}"#.utf8)
+        }
+        defer { ChekinanaEventCandidateMockURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaEventCandidateMockURLProtocol.self]
+        let fields = try await ChekinanaEventCandidateClient(
+            endpointURL: endpoint,
+            session: URLSession(configuration: configuration)
+        ).fetch(weiboURL: url)
+        XCTAssertEqual(fields.weiboURL, url)
+
+        let fixture = try makeFixture()
+        guard case .eventCard(let card) = fixture.executor.prepareEventCandidate(fields),
+              let code = card.confirmationCode else {
+            return XCTFail("expected mobile Weibo Event confirmation")
+        }
+        try requireSuccess(await fixture.executor.execute("confirm \(code)"))
+        let saved = try XCTUnwrap(
+            try fixture.context.fetch(FetchDescriptor<Event>()).first
+        )
+        XCTAssertEqual(saved.weiboURL?.absoluteString, url)
+        XCTAssertEqual(saved.source, .weibo)
+    }
+
+    func testEventCandidateVenueAddressMatchesSharedFixture() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtureURL = repositoryRoot
+            .appendingPathComponent("cloudflare-worker", isDirectory: true)
+            .appendingPathComponent("test", isDirectory: true)
+            .appendingPathComponent("event-venue-address.fixtures.json")
+        let fixtures = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [[String: Any]]
+        )
+
+        for fixture in fixtures {
+            let livehouse = try XCTUnwrap(fixture["livehouse"] as? String)
+            let separateAddress = try XCTUnwrap(fixture["separateAddress"] as? String)
+            let expectedPureVenue = try XCTUnwrap(fixture["expectedPureVenue"] as? Bool)
+            let fixtureID = fixture["id"] as? String ?? livehouse
+            let fields = ChekinanaEventCandidateFields(
+                name: "Fixture Event",
+                date: "",
+                city: "上海",
+                livehouse: livehouse,
+                address: separateAddress,
+                weiboURL: "",
+                ticketURL: ""
+            )
+            XCTAssertEqual(
+                !ChekinanaEventCandidateValidator.blockers(for: fields).contains(
+                    .livehouseLooksLikeAddress
+                ),
+                expectedPureVenue,
+                fixtureID
+            )
+        }
+    }
+
     func testEventCandidateConservativeLivehouseAddressBlocker() {
         let blocked = [
             "北京市朝阳区幸福路一百号",
             "北京市朝阳区幸福路东段",
             "幸福路东段",
             "上海市幸福路100号",
+            "幸福路100号厅",
+            "幸福路100号店",
+            "B区2单元301室",
             "北京市朝阳区幸福路",
             "朝阳区幸福街",
         ]
         let allowed = [
+            "8号仓库Livehouse",
+            "3号剧场",
+            "11号沙滩",
+            "9号Livehouse",
             "Fixture Livehouse 中大二号馆",
             "幸福Livehouse朝阳店",
             "新歌空间中大二号馆",
@@ -19878,6 +36122,39 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         let fields = try await client.fetch(weiboURL: url)
         XCTAssertEqual(fields.name, "Live")
         XCTAssertEqual(fields.city, "合肥")
+    }
+
+    func testEventCandidateClientReturnsResponseHeadersAsTransientMetadata() async throws {
+        let url = "https://weibo.com/123/AbC"
+        let endpoint = try XCTUnwrap(
+            URL(string: "https://windows.test:8787/api/event/weibo-candidate")
+        )
+        ChekinanaEventCandidateMockURLProtocol.handler = { _ in
+            Data(#"{"version":1,"kind":"candidate","candidate":{"name":"Incomplete Live","date":"","city":"上海","livehouse":"Venue","address":"","price":"","avatar_url":"","imageUrls":[],"weiboURL":"https://weibo.com/123/AbC","ticketURL":""}}"#.utf8)
+        }
+        ChekinanaEventCandidateMockURLProtocol.responseHeaders = [
+            "x-chekinana-content-metadata-version": " 1 ",
+            "X-CHEKINANA-CONTENT-INCOMPLETE-REASONS":
+                " local-truncation, future-reason ",
+        ]
+        defer {
+            ChekinanaEventCandidateMockURLProtocol.handler = nil
+            ChekinanaEventCandidateMockURLProtocol.responseHeaders = [:]
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChekinanaEventCandidateMockURLProtocol.self]
+
+        let response = try await ChekinanaEventCandidateClient(
+            endpointURL: endpoint,
+            session: URLSession(configuration: configuration)
+        ).fetchResponse(weiboURL: url)
+
+        XCTAssertEqual(response.fields.name, "Incomplete Live")
+        XCTAssertEqual(response.fields.weiboURL, url)
+        XCTAssertEqual(response.fields.note, "")
+        XCTAssertEqual(response.contentMetadata.completeness, .incomplete)
+        XCTAssertEqual(response.contentMetadata.reasons, [.localTruncation])
+        XCTAssertTrue(response.contentMetadata.containsUnknownReason)
     }
 
     func testEventCandidateClientDefaultAlwaysUsesProductionEndpoint() async throws {
@@ -19987,12 +36264,20 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             .appendingPathComponent("catalogue-avatar-repair-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let idolID = UUID()
+        let missingRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
         let idol = Idol(
+            id: idolID,
             sourceId: "catalogue-id-exact",
             name: "Exact Idol",
-            avatarImageRef: nil
+            avatarImageRef: missingRef
         )
         fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idol.id,
+            source: .catalogue,
+            intent: .automatic
+        ))
         try fixture.context.save()
         let candidate = ChekinanaEnrichedIdol(
             sourceId: "catalogue-id-exact",
@@ -20054,14 +36339,225 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     @MainActor
+    func testExplicitAvatarRemovalSurvivesReopenAndDoesNotRepair() async throws {
+        let fixture = try makeFixture()
+        let idolID = UUID()
+        let idol = Idol(
+            id: idolID,
+            sourceId: "catalogue-removed",
+            name: "Removed Idol",
+            avatarImageRef: ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idolID,
+            source: .catalogue,
+            intent: .automatic
+        ))
+        try fixture.context.save()
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            idol.avatarImageRef = nil
+            _ = try ChekinanaIdolAvatarStatePersistence.record(
+                idolID: idolID,
+                source: .none,
+                intent: .explicitlyRemoved,
+                in: fixture.context
+            )
+            try fixture.context.save()
+        }
+
+        let reopenedContext = ModelContext(fixture.context.container)
+        let reopened = try XCTUnwrap(reopenedContext.fetch(
+            FetchDescriptor<Idol>(predicate: #Predicate { $0.id == idolID })
+        ).first)
+        let state = try ChekinanaIdolAvatarStatePersistence.snapshot(
+            for: idolID,
+            in: reopenedContext
+        )
+        XCTAssertNil(reopened.avatarImageRef)
+        XCTAssertEqual(state.source, .none)
+        XCTAssertEqual(state.intent, .explicitlyRemoved)
+        let repaired = try await ChekinanaIdolAvatarRepairCoordinator.repairIfNeeded(
+            reopened,
+            in: reopenedContext,
+            prepareExact: { _, _ in
+                XCTFail("Explicit removal must not start catalogue repair.")
+                throw ScannerMockError.failed
+            }
+        )
+        XCTAssertFalse(repaired)
+        XCTAssertNil(reopened.avatarImageRef)
+    }
+
+    @MainActor
+    func testRemovingAvatarDuringDelayedRepairRejectsLateResult() async throws {
+        let fixture = try makeFixture()
+        let directory = try makeTemporaryAvatarDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let idolID = UUID()
+        let missingRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
+        let idol = Idol(
+            id: idolID,
+            sourceId: "catalogue-delayed-remove",
+            name: "Delayed Remove",
+            avatarImageRef: missingRef
+        )
+        fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idolID,
+            source: .catalogue,
+            intent: .automatic
+        ))
+        try fixture.context.save()
+        let prepareStarted = ChekinanaAtomicCounter()
+        let stageCount = ChekinanaAtomicCounter()
+        let releasePrepare = ScannerReleaseGate()
+        let candidate = ChekinanaEnrichedIdol(
+            sourceId: "catalogue-delayed-remove",
+            idolName: "Delayed Remove",
+            groupName: nil,
+            color: nil,
+            birthday: nil,
+            verification: nil,
+            bio: nil,
+            avatarUrl: "https://catalogue.test/delayed-remove.jpg"
+        )
+        let identity = try XCTUnwrap(ChekinanaIdolAvatarIdentity.make(
+            sourceID: candidate.sourceId,
+            avatarURL: candidate.avatarUrl
+        ))
+        let repair = Task { @MainActor in
+            try await ChekinanaIdolAvatarRepairCoordinator.repairIfNeeded(
+                idol,
+                in: fixture.context,
+                directory: directory,
+                prepareExact: { _, _ in
+                    prepareStarted.increment()
+                    await releasePrepare.wait()
+                    return ChekinanaPreparedIdolCandidate(
+                        candidate: candidate,
+                        avatarThumbnailData: self.scannerPNGData(color: .purple),
+                        avatarIdentity: identity
+                    )
+                },
+                stage: { prepared, stagedIdolID, stagedDirectory in
+                    stageCount.increment()
+                    return try await ChekinanaCatalogueIdolAvatarLocalizer.stage(
+                        prepared,
+                        idolID: stagedIdolID,
+                        directory: stagedDirectory
+                    )
+                }
+            )
+        }
+        for _ in 0..<200 where prepareStarted.value() == 0 { await Task.yield() }
+        XCTAssertEqual(prepareStarted.value(), 1)
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            idol.avatarImageRef = nil
+            _ = try ChekinanaIdolAvatarStatePersistence.record(
+                idolID: idolID,
+                source: .none,
+                intent: .explicitlyRemoved,
+                in: fixture.context
+            )
+            try fixture.context.save()
+        }
+        await releasePrepare.release()
+
+        do {
+            _ = try await repair.value
+            XCTFail("The late repair result must be rejected.")
+        } catch {
+            XCTAssertEqual(stageCount.value(), 0)
+        }
+        XCTAssertNil(idol.avatarImageRef)
+        XCTAssertEqual(
+            try ChekinanaIdolAvatarStatePersistence.snapshot(
+                for: idolID,
+                in: fixture.context
+            ).intent,
+            .explicitlyRemoved
+        )
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
+    @MainActor
+    func testCustomAndLegacyUnknownAvatarStatesNeverUseCatalogueRepair() async throws {
+        let fixture = try makeFixture()
+        let customID = UUID()
+        let customRef = ChekinanaIdolReferenceStore.managedFilename(idolID: customID)
+        let custom = Idol(
+            id: customID,
+            sourceId: "catalogue-custom",
+            name: "Custom Idol",
+            avatarImageRef: customRef
+        )
+        let legacyID = UUID()
+        let legacyRef = ChekinanaIdolReferenceStore.managedFilename(idolID: legacyID)
+        let legacy = Idol(
+            id: legacyID,
+            sourceId: "catalogue-legacy",
+            name: "Legacy Idol",
+            avatarImageRef: legacyRef
+        )
+        fixture.context.insert(custom)
+        fixture.context.insert(legacy)
+        fixture.context.insert(IdolAvatarState(
+            idolID: customID,
+            source: .custom,
+            intent: .userSelected
+        ))
+        try fixture.context.save()
+        var prepareCount = 0
+        let prepare: ChekinanaIdolAvatarRepairCoordinator.PrepareExact = { _, _ in
+            prepareCount += 1
+            throw ScannerMockError.failed
+        }
+
+        let customRepaired = try await ChekinanaIdolAvatarRepairCoordinator.repairIfNeeded(
+            custom,
+            in: fixture.context,
+            prepareExact: prepare
+        )
+        XCTAssertFalse(customRepaired)
+        let legacyRepaired = try await ChekinanaIdolAvatarRepairCoordinator.repairIfNeeded(
+            legacy,
+            in: fixture.context,
+            prepareExact: prepare
+        )
+        XCTAssertFalse(legacyRepaired)
+        XCTAssertEqual(prepareCount, 0)
+        XCTAssertEqual(custom.avatarImageRef, customRef)
+        XCTAssertEqual(legacy.avatarImageRef, legacyRef)
+        XCTAssertEqual(
+            try ChekinanaIdolAvatarStatePersistence.snapshot(
+                for: legacyID,
+                in: fixture.context
+            ),
+            .compatibilityDefault
+        )
+    }
+
+    @MainActor
     func testMissingAvatarRepairIsSingleFlightAndLeavesOneManagedFile() async throws {
         let fixture = try makeFixture()
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("catalogue-avatar-single-flight-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let idol = Idol(sourceId: "catalogue-single-flight", name: "One Idol")
+        let idolID = UUID()
+        let idol = Idol(
+            id: idolID,
+            sourceId: "catalogue-single-flight",
+            name: "One Idol",
+            avatarImageRef: ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
+        )
         fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idol.id,
+            source: .catalogue,
+            intent: .automatic
+        ))
         try fixture.context.save()
         let candidate = ChekinanaEnrichedIdol(
             sourceId: "catalogue-single-flight",
@@ -20121,14 +36617,26 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
     }
 
     @MainActor
-    func testMissingAvatarRepairStopsWhenIdolIsDeletedDuringPrepare() async throws {
+    func testMissingAvatarRepairRejectsSameUUIDReplacementDuringPrepare() async throws {
         let fixture = try makeFixture()
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("catalogue-avatar-deleted-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let idol = Idol(sourceId: "catalogue-deleted", name: "Deleted Idol")
+        let idolID = UUID()
+        let missingRef = ChekinanaIdolReferenceStore.managedFilename(idolID: idolID)
+        let idol = Idol(
+            id: idolID,
+            sourceId: "catalogue-deleted",
+            name: "Deleted Idol",
+            avatarImageRef: missingRef
+        )
         fixture.context.insert(idol)
+        fixture.context.insert(IdolAvatarState(
+            idolID: idol.id,
+            source: .catalogue,
+            intent: .automatic
+        ))
         try fixture.context.save()
         let candidate = ChekinanaEnrichedIdol(
             sourceId: "catalogue-deleted",
@@ -20176,17 +36684,36 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(prepareStarted.value(), 1)
+        try ChekinanaIdolAvatarStatePersistence.delete(
+            for: idol.id,
+            in: fixture.context
+        )
         fixture.context.delete(idol)
+        try fixture.context.save()
+        let replacement = Idol(
+            id: idolID,
+            sourceId: "catalogue-deleted",
+            name: "Replacement Idol",
+            avatarImageRef: missingRef
+        )
+        fixture.context.insert(replacement)
+        fixture.context.insert(IdolAvatarState(
+            idolID: replacement.id,
+            source: .catalogue,
+            intent: .userSelected
+        ))
+        try fixture.context.save()
         await releasePrepare.release()
 
         do {
             _ = try await repair.value
-            XCTFail("A deleted Idol must not be staged or saved by an in-flight repair.")
+            XCTFail("A same-UUID replacement must reject the stale repair task.")
         } catch {
             XCTAssertEqual(stageCount.value(), 0)
         }
         XCTAssertEqual(stageCount.value(), 0)
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        XCTAssertEqual(replacement.avatarImageRef, missingRef)
     }
 
     func testCatalogueResultAvatarAcceptsOnlyItsVerifiedPreparedThumbnail() async throws {
@@ -20519,17 +37046,176 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         return false
     }
 
-    private func waitForExistingTargetReservation(
+    private func waitForConfirmationReservation(
         _ ledger: ChekinanaConfirmationLedger,
-        targetID: UUID
+        code: String
     ) async -> Bool {
         for _ in 0..<200 {
-            if ledger.isTemporaryExistingChekiTargetReserved(targetID) {
+            if ledger.isTemporaryChekiBatchReserved(code) {
                 return true
             }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
         return false
+    }
+
+    func testSettingsLibraryRowsAndAlgorithmSectionStayScoped() throws {
+        let productSourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Chekinana")
+            .appendingPathComponent("ChekinanaProductShell.swift")
+        let source = try String(contentsOf: productSourceURL, encoding: .utf8)
+        let settingsStart = try XCTUnwrap(
+            source.range(of: "private struct ChekinanaSettingsView")?.lowerBound
+        )
+        let settingsEnd = try XCTUnwrap(source.range(
+            of: "struct ChekinanaCalendarCell",
+            range: settingsStart..<source.endIndex
+        )?.lowerBound)
+        let settings = String(source[settingsStart..<settingsEnd])
+
+        let libraryStart = try XCTUnwrap(
+            settings.range(of: "settings.library")?.lowerBound
+        )
+        let algorithmStart = try XCTUnwrap(settings.range(
+            of: "isScannerAlgorithmNoticePresented = true",
+            range: libraryStart..<settings.endIndex
+        )?.lowerBound)
+        let library = String(settings[libraryStart..<algorithmStart])
+        XCTAssertTrue(library.contains(
+            ".environment(\\.defaultMinListRowHeight, 36)"
+        ))
+        XCTAssertEqual(
+            settings.components(
+                separatedBy: ".environment(\\.defaultMinListRowHeight, 36)"
+            ).count - 1,
+            1
+        )
+        let settingsRowStart = try XCTUnwrap(
+            settings.range(of: "private func settingsRow")?.lowerBound
+        )
+        let settingsRowEnd = try XCTUnwrap(settings.range(
+            of: "private func clearAllData()",
+            range: settingsRowStart..<settings.endIndex
+        )?.lowerBound)
+        let settingsRow = String(settings[settingsRowStart..<settingsRowEnd])
+        XCTAssertTrue(settingsRow.contains(
+            "EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20)"
+        ))
+        XCTAssertEqual(
+            settings.components(
+                separatedBy: "EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20)"
+            ).count - 1,
+            1
+        )
+        XCTAssertFalse(settingsRow.contains(".frame(minHeight: 36)"))
+        XCTAssertFalse(settingsRow.contains(".frame(minHeight: 44)"))
+
+        XCTAssertTrue(settings.contains("settings.algorithms"))
+        XCTAssertTrue(settings.contains("settings.algorithm.cheki_scan"))
+        XCTAssertTrue(settings.contains("settings.algorithm.idol_recognition"))
+        XCTAssertTrue(settings.contains(
+            "settings.algorithm.cheki_scan.notice.message"
+        ))
+        XCTAssertTrue(settings.contains("Text(verbatim: \"ChekiEdgeFit-RT v2\")"))
+        XCTAssertTrue(settings.contains("value: \"DINOv2 ViT-S/14\""))
+        XCTAssertTrue(settings.contains(
+            "chekinana.settings.algorithm.cheki-scan"
+        ))
+        XCTAssertTrue(settings.contains(
+            "chekinana.settings.algorithm.idol-recognition"
+        ))
+        XCTAssertTrue(settings.contains("chekinana.settings.algorithms"))
+        XCTAssertTrue(settings.contains(
+            "chekinana.settings.algorithm.cheki-scan.notice.dismiss"
+        ))
+
+        let clearStart = try XCTUnwrap(
+            settings.range(of: "Button(role: .destructive) {")?.lowerBound
+        )
+        let clearEnd = try XCTUnwrap(settings.range(
+            of: ".accessibilityIdentifier(\"chekinana.settings.clear-data\")",
+            range: clearStart..<settings.endIndex
+        )?.upperBound)
+        let clearButton = String(settings[clearStart..<clearEnd])
+        XCTAssertFalse(clearButton.contains("Label("))
+        XCTAssertFalse(clearButton.contains("systemImage: \"trash\""))
+        XCTAssertTrue(clearButton.contains(".foregroundStyle(.red)"))
+        XCTAssertTrue(clearButton.contains(
+            ".frame(maxWidth: .infinity, alignment: .leading)"
+        ))
+        XCTAssertTrue(clearButton.contains(".contentShape(Rectangle())"))
+        XCTAssertTrue(clearButton.contains(".listRowBackground(Color.clear)"))
+    }
+
+    func testSettingsRuntimeLocalizationUsesProductKeyspace() throws {
+        let expected: [String: [String: String]] = [
+            "en": [
+                "settings.algorithms": "Algorithms",
+                "settings.algorithm.cheki_scan": "Cheki scanning",
+                "settings.algorithm.idol_recognition": "Idol recognition",
+                "settings.algorithm.cheki_scan.notice.message": "The current algorithm still lacks precision around edges and may get complex cases such as overlaps or incomplete images wrong. It'll do for now, though. Maybe one day the author will be in a good mood and upgrade it again.",
+                "settings.export": "Export data",
+                "settings.export.preparing": "Preparing export…",
+                "settings.import": "Import data",
+                "settings.import.confirm.title": "Import will replace all local data",
+                "settings.import.error.media": "A media file in the backup is missing or damaged.",
+                "settings.import.success": "Backup imported successfully.",
+            ],
+            "ja": [
+                "settings.algorithms": "アルゴリズム",
+                "settings.algorithm.cheki_scan": "チェキスキャン",
+                "settings.algorithm.idol_recognition": "アイドル認識",
+                "settings.algorithm.cheki_scan.notice.message": "現在のアルゴリズムはまだ輪郭の精度が十分ではなく、重なりや一部が欠けたものなど、複雑なケースではうまく処理できないことがあります。とりあえずこれでしのげますが、作者の気が向けば、いつかまたアップデートするかもしれません。",
+                "settings.export": "データを書き出す",
+                "settings.export.preparing": "書き出しを準備中…",
+                "settings.import": "データを読み込む",
+                "settings.import.confirm.title": "読み込むとローカルデータがすべて上書きされます",
+                "settings.import.error.media": "バックアップ内のメディアファイルが見つからないか破損しています。",
+                "settings.import.success": "バックアップを読み込みました。",
+            ],
+            "zh-Hans": [
+                "settings.algorithms": "算法",
+                "settings.algorithm.cheki_scan": "拍立得扫描",
+                "settings.algorithm.idol_recognition": "偶像识别",
+                "settings.algorithm.cheki_scan.notice.message": "当前算法的边缘精度尚有欠缺，处理重叠或不完整等复杂情形可能出错，但可以先凑合着用，也许哪天作者心情好还会再次升级",
+                "settings.export": "导出数据",
+                "settings.export.preparing": "正在准备导出…",
+                "settings.import": "导入数据",
+                "settings.import.confirm.title": "导入将覆盖现有全部本地数据",
+                "settings.import.error.media": "备份中的媒体文件缺失或损坏。",
+                "settings.import.success": "备份导入成功。",
+            ],
+            "zh-Hant": [
+                "settings.algorithms": "演算法",
+                "settings.algorithm.cheki_scan": "拍立得掃描",
+                "settings.algorithm.idol_recognition": "偶像識別",
+                "settings.algorithm.cheki_scan.notice.message": "目前演算法的邊緣精準度還不夠，處理重疊或不完整等複雜情況時可能會出錯，不過可以先將就著用，說不定哪天作者心情好，還會再升級一次。",
+                "settings.export": "匯出資料",
+                "settings.export.preparing": "正在準備匯出…",
+                "settings.import": "匯入資料",
+                "settings.import.confirm.title": "匯入將覆蓋現有全部本機資料",
+                "settings.import.error.media": "備份中的媒體檔案遺失或損壞。",
+                "settings.import.success": "備份匯入成功。",
+            ],
+        ]
+        for (language, values) in expected {
+            let bundle = try localizedAppBundle(language: language)
+            for (key, expectedValue) in values {
+                let value = ChekinanaProductCopy.text(
+                    key,
+                    "__unexpected_english_fallback__",
+                    bundle: bundle
+                )
+                XCTAssertEqual(value, expectedValue, "\(language): \(key)")
+                XCTAssertNotEqual(
+                    value,
+                    "__unexpected_english_fallback__",
+                    "\(language): \(key)"
+                )
+            }
+        }
     }
 
     private func localizedAppBundle(language: String) throws -> Bundle {
@@ -20544,11 +37230,123 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         throw XCTSkip("The built app does not contain the \(language) localization bundle.")
     }
 
+    private func retainedChekiEditIntent(
+        in modelContext: ModelContext,
+        directory: URL,
+        idolIDs: [UUID] = [],
+        eventID: UUID? = nil,
+        date: Date? = nil
+    ) throws -> RetainedChekiEditIntentFixture {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        guard try ChekinanaChekiEditPublicationHandle.discover(
+            in: directory
+        ).isEmpty else {
+            throw ChekinanaChekiEditCommitError.fileRecoveryFailed
+        }
+        let id = UUID()
+        let filename = "\(id.uuidString).jpg"
+        let targetURL = directory.appendingPathComponent(filename)
+        let oldData = Data("retained-old-\(id.uuidString)".utf8)
+        let preparedData = Data("retained-new-\(id.uuidString)".utf8)
+        try oldData.write(to: targetURL, options: [.atomic])
+        let item = MediaItem(
+            id: id,
+            mediaOwnerID: id,
+            kind: .cheki,
+            date: date,
+            idx: nil,
+            userAppears: false,
+            size: .mini,
+            mediaRef: filename,
+            isFavorite: false,
+            hasPostedToSNS: false,
+            note: "retained",
+            createdAt: Date(timeIntervalSinceReferenceDate: 401),
+            updatedAt: Date(timeIntervalSinceReferenceDate: 402)
+        )
+        item.idolIDs = idolIDs
+        item.eventID = eventID
+        modelContext.insert(item)
+        try modelContext.save()
+        let generation = try ChekinanaLibraryGenerationStore.ensureCurrent(
+            in: modelContext
+        )
+        let databaseBefore = ChekinanaChekiEditRecordSnapshot(item)
+        item.size = .wide
+        item.updatedAt = Date(timeIntervalSinceReferenceDate: 403)
+        let databaseAfter = ChekinanaChekiEditRecordSnapshot(item)
+        try modelContext.save()
+
+        let transactionID = UUID()
+        let stagedFilename =
+            "\(ChekinanaChekiImageReplacementTransaction.stagingFilenamePrefix)\(UUID().uuidString.lowercased()).jpg"
+        let backupFilename =
+            "\(ChekinanaChekiImageReplacementTransaction.backupFilenamePrefix)\(transactionID.uuidString.lowercased())"
+        try preparedData.write(
+            to: directory.appendingPathComponent(stagedFilename),
+            options: [.atomic]
+        )
+        try oldData.write(
+            to: directory.appendingPathComponent(backupFilename),
+            options: [.atomic]
+        )
+        try preparedData.write(to: targetURL, options: [.atomic])
+        let journal = ChekinanaChekiEditPublicationJournal(
+            formatVersion: 1,
+            transactionID: transactionID,
+            libraryGeneration: generation,
+            mediaItemID: item.id,
+            mediaOwnerID: item.mediaOwnerID,
+            sourceImageRef: filename,
+            sourceFilename: filename,
+            targetImageRef: filename,
+            targetFilename: filename,
+            stagedFilename: stagedFilename,
+            backupFilename: backupFilename,
+            sourceIdentity: ChekinanaImportFileIdentity(oldData),
+            targetIdentityBefore: ChekinanaImportFileIdentity(oldData),
+            preparedIdentity: ChekinanaImportFileIdentity(preparedData),
+            databaseBefore: databaseBefore,
+            databaseAfter: databaseAfter,
+            phase: .filePublished
+        )
+        let handle = try ChekinanaChekiEditPublicationHandle.create(
+            journal: journal,
+            in: directory
+        )
+        return RetainedChekiEditIntentFixture(
+            item: item,
+            handle: handle,
+            generation: generation,
+            targetURL: targetURL,
+            preparedData: preparedData
+        )
+    }
+
+    private func emptyPreparedImport() async throws -> ChekinanaPreparedDataImport {
+        let schema = Schema(ChekinanaSchemaV17.models)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+        _ = try ChekinanaLibraryGenerationStore.ensureCurrent(in: context)
+        let snapshot = try ChekinanaDataExportSnapshot.capture(in: context)
+        let archive = try await ChekinanaDataExporter.archiveURL(for: snapshot)
+        defer { ChekinanaExportTemporaryFiles.cleanupArchive(at: archive) }
+        return try await ChekinanaDataImporter.prepare(from: archive)
+    }
+
     private func makeFixture(
+        container suppliedContainer: ModelContainer? = nil,
         scannerProcess: ChekinanaCommandExecutor.ScannerProcess? = nil,
         patternEncode: ChekinanaCommandExecutor.PatternEncode? = nil,
         patternResolve: ChekinanaCommandExecutor.PatternResolve? = nil,
         userAppearsDetect: @escaping ChekinanaCommandExecutor.UserAppearsDetect = { _ in false },
+        dateAnnotate: ChekinanaCommandExecutor.DateAnnotate? = nil,
         idolSearch: ChekinanaCommandExecutor.IdolSearch? = nil,
         idolAvatarPrepare: ChekinanaCommandExecutor.IdolAvatarPrepare? = nil,
         idolAvatarBatchTimeoutNanoseconds: UInt64 = 15_000_000_000,
@@ -20560,8 +37358,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         simulateBatchFinalizeInvariantFailure: Bool = false,
         batchBeforeLiveIndexValidation: ChekinanaCommandExecutor.BatchBeforeLiveIndexValidation? = nil
     ) throws -> Fixture {
-        let schema = Schema(versionedSchema: ChekinanaSchemaV9.self)
-        let container = try ModelContainer(
+        let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+        let container = try suppliedContainer ?? ModelContainer(
             for: schema,
             configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
         )
@@ -20577,6 +37375,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             patternEncode: patternEncode,
             patternResolve: patternResolve,
             userAppearsDetect: userAppearsDetect,
+            dateAnnotate: dateAnnotate,
             idolSearch: resolvedIdolSearch,
             idolAvatarPrepare: idolAvatarPrepare,
             idolAvatarBatchTimeoutNanoseconds: idolAvatarBatchTimeoutNanoseconds,
@@ -20593,10 +37392,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     private func attachConfirmation(
         in fixture: Fixture,
-        target: Cheki,
+        target: ChekiRecord,
         date: Date,
         imageData: Data,
         payloadUserAppears: Bool? = nil,
+        payloadEventID: UUID? = nil,
         explicitlyEditedFields: Set<ChekinanaConfirmationLedger.TemporaryChekiField> = []
     ) throws -> String {
         let temporary = try fixture.ledger.insertTemporaryChekis(
@@ -20610,21 +37410,22 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             dates: [date]
         ).inserted[0]
         let payload = ChekinanaConfirmationLedger.AddChekiPayload(
-            id: target.id,
+            id: UUID(),
             temporaryChekiID: temporary.id,
             image: temporary.image,
             thumbnailImageData: temporary.thumbnailImageData,
             idolIDs: target.idols.map(\.id),
-            eventID: target.event?.id,
+            eventID: payloadEventID ?? target.event?.id,
             date: date,
-            userAppears: payloadUserAppears ?? target.userAppears,
+            userAppears: payloadUserAppears ?? false,
             size: target.size,
-            isFavorite: target.isFavorite,
-            hasPostedToSNS: target.hasPostedToSNS,
+            isFavorite: false,
+            hasPostedToSNS: false,
             note: target.note,
             createdAt: temporary.createdAt,
-            requestedIdx: target.idx,
+            requestedIdx: nil,
             existingChekiID: target.id,
+            existingChekiRecordSnapshot: .init(target),
             explicitlyEditedFields: explicitlyEditedFields
         )
         return fixture.ledger.insert(.addCheki(payload))
@@ -20632,12 +37433,12 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
     private func prepareSingleAttachConfirmation(
         in fixture: Fixture,
-        target: Cheki,
+        target: ChekiRecord,
         imageData: Data,
         detectedUserAppears: Bool,
         inheritsExistingUserAppears: Bool = true,
         togglesUserAppears: Bool = false
-    ) async throws -> (code: String, temporaryID: UUID) {
+    ) async throws -> (code: String, temporaryID: UUID, chekiID: UUID) {
         let date = try XCTUnwrap(target.date)
         let temporary = try fixture.ledger.insertTemporaryChekis(
             [ChekinanaPendingChekiImage(
@@ -20655,9 +37456,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             id: temporary.id,
             existingChekiID: target.id,
             selectionIsManual: true,
-            inheritedIdx: target.idx,
-            inheritedUserAppears: inheritsExistingUserAppears
-                ? target.userAppears : nil
+            inheritedIdx: nil,
+            inheritedUserAppears: nil
         ))
         if togglesUserAppears {
             XCTAssertNotNil(fixture.ledger.toggleTemporaryChekiUserAppears(
@@ -20669,11 +37469,10 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
         guard case .pendingChekiCards(_, let cards, _) = prepared,
               cards.count == 1,
-              cards[0].id == target.id,
               let code = cards[0].confirmationCode else {
             throw ScannerMockError.failed
         }
-        return (code, temporary.id)
+        return (code, temporary.id, cards[0].id)
     }
 
     private func managedChekiFilenames() throws -> Set<String> {
@@ -20806,6 +37605,35 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         )
     }
 
+    private func scannerRouterImage(_ marker: UInt8) -> ChekinanaScannerResultImage {
+        ChekinanaScannerResultImage(data: Data([marker]))
+    }
+
+    private func scannerRouterResult(_ marker: UInt8) -> ChekinanaScannerProcessResult {
+        ChekinanaScannerProcessResult(
+            images: [scannerRouterImage(marker)],
+            warningCount: 0
+        )
+    }
+
+    private func scannerRouterProcesses(
+        direct: @escaping ChekinanaScannerRouter.DirectProcess = { _, _ in
+            ChekinanaScannerProcessResult(images: [Data([0xD0])], warningCount: 0)
+        },
+        remote: @escaping ChekinanaScannerRouter.RemoteProcess = { _, _, _, _, _ in
+            ChekinanaScannerProcessResult(images: [Data([0xE0])], warningCount: 0)
+        },
+        local: @escaping ChekinanaScannerRouter.LocalProcess = { _, _, _, _ in
+            ChekinanaScannerProcessResult(images: [Data([0xF0])], warningCount: 0)
+        }
+    ) -> ChekinanaScannerRouter.Processes {
+        ChekinanaScannerRouter.Processes(
+            direct: direct,
+            remote: remote,
+            local: local
+        )
+    }
+
     private func scannerDateMockSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ChekinanaScannerDateMockURLProtocol.self]
@@ -20881,6 +37709,59 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             context.fill(CGRect(origin: .zero, size: size))
         }
         return image.jpegData(compressionQuality: 0.9)!
+    }
+
+    private func scannerEdgeMarkerJPEGData(size: CGSize) -> Data {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor(white: 0.5, alpha: 1).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let bandWidth = max(8, size.width * 0.2)
+            let bandHeight = max(8, size.height * 0.2)
+
+            UIColor.red.setFill()
+            context.fill(CGRect(x: bandWidth, y: 0, width: size.width - 2 * bandWidth, height: bandHeight))
+            UIColor.green.setFill()
+            context.fill(CGRect(x: size.width - bandWidth, y: bandHeight, width: bandWidth, height: size.height - 2 * bandHeight))
+            UIColor.blue.setFill()
+            context.fill(CGRect(x: bandWidth, y: size.height - bandHeight, width: size.width - 2 * bandWidth, height: bandHeight))
+            UIColor.yellow.setFill()
+            context.fill(CGRect(x: 0, y: bandHeight, width: bandWidth, height: size.height - 2 * bandHeight))
+        }
+        return image.jpegData(compressionQuality: 1)!
+    }
+
+    private func edgeColorLabels(_ data: Data) throws -> [Int] {
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let width = image.width
+        let height = image.height
+        let points = [
+            (width / 2, max(1, height / 20)),
+            (max(1, width * 19 / 20), height / 2),
+            (width / 2, max(1, height * 19 / 20)),
+            (max(1, width / 20), height / 2),
+        ]
+        let palette: [(red: Int, green: Int, blue: Int)] = [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+        ]
+        return try points.map { point in
+            let pixel = try rgbaPixel(data, x: point.0, y: point.1)
+            return palette.indices.min { lhs, rhs in
+                func distance(_ candidate: (red: Int, green: Int, blue: Int)) -> Int {
+                    let red = candidate.red - Int(pixel.red)
+                    let green = candidate.green - Int(pixel.green)
+                    let blue = candidate.blue - Int(pixel.blue)
+                    return red * red + green * green + blue * blue
+                }
+                return distance(palette[lhs]) < distance(palette[rhs])
+            } ?? -1
+        }
     }
 
     private func scannerJPEGDataWithOrientation(
@@ -21003,8 +37884,36 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         }
     }
 
+    private func rgbaPixel(
+        _ data: Data,
+        x: Int,
+        y: Int
+    ) throws -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let clampedX = min(max(0, x), image.width - 1)
+        let clampedY = min(max(0, y), image.height - 1)
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let context = try XCTUnwrap(CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.byteOrder32Big.rawValue
+        ))
+        context.translateBy(x: -CGFloat(clampedX), y: -CGFloat(clampedY))
+        context.draw(
+            image,
+            in: CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        )
+        return (pixel[0], pixel[1], pixel[2], pixel[3])
+    }
+
     private func cleanupManagedImages(in context: ModelContext) {
-        guard let chekis = try? context.fetch(FetchDescriptor<Cheki>()) else { return }
+        guard let chekis = try? context.fetch(FetchDescriptor<MediaItem>()) else { return }
         for cheki in chekis {
             guard let url = ChekiImageRefResolver.managedChekiFileURL(
                 for: cheki.imageRef,
@@ -21194,7 +38103,7 @@ private final class ChekinanaBatchIndexRaceInjector {
 
     func insertIfNeeded() throws {
         guard !didInsert, let context, let idol else { return }
-        let cheki = Cheki(id: insertedID, date: date, idx: idx)
+        let cheki = MediaItem(id: insertedID, date: date, idx: idx, imageRef: "race-\(insertedID.uuidString).jpg")
         context.insert(cheki)
         cheki.idols = [idol]
         try context.save()
@@ -21244,6 +38153,40 @@ private final class ChekinanaPatternResourceMockURLProtocol: URLProtocol, @unche
     override func stopLoading() {}
 }
 
+private actor ChekinanaPatternSnapshotGate {
+    private let snapshot: ChekinanaPatternResourceSnapshot
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(snapshot: ChekinanaPatternResourceSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func load() async -> ChekinanaPatternResourceSnapshot {
+        didStart = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+        return snapshot
+    }
+
+    func waitUntilStarted() async {
+        guard !didStart else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 private actor ChekinanaEventImageFetchProbe {
     private let data: Data
     private let delayNanoseconds: UInt64
@@ -21271,6 +38214,7 @@ private actor ChekinanaEventImageFetchProbe {
 
 private final class ChekinanaEventCandidateMockURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest) throws -> Data)?
+    nonisolated(unsafe) static var responseHeaders: [String: String] = [:]
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -21282,11 +38226,13 @@ private final class ChekinanaEventCandidateMockURLProtocol: URLProtocol, @unchec
         }
         do {
             let data = try handler(request)
+            var headers = Self.responseHeaders
+            headers["Content-Type"] = "application/json"
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
                 httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
+                headerFields: headers
             )!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
@@ -21959,6 +38905,84 @@ private actor LocalImportDateInputProbe {
 
     func snapshot() -> ChekinanaPendingChekiImage? {
         image
+    }
+}
+
+private actor StaticEdgeDetector: ChekinanaOnDeviceEdgeDetector {
+    private let output: ChekinanaEdgeDetectorOutput
+    private var calls = 0
+
+    init(output: ChekinanaEdgeDetectorOutput) {
+        self.output = output
+    }
+
+    func detect(
+        _ image: ChekinanaPendingChekiImage
+    ) async throws -> ChekinanaEdgeDetectorOutput {
+        calls += 1
+        return output
+    }
+
+    func detectCount() -> Int {
+        calls
+    }
+}
+
+private actor DateAnnotationInputProbe {
+    private var image: ChekinanaPendingChekiImage?
+
+    func record(_ image: ChekinanaPendingChekiImage) {
+        self.image = image
+    }
+
+    func snapshot() -> ChekinanaPendingChekiImage? {
+        image
+    }
+}
+
+private actor StreamingScanOverlapProbe {
+    struct Snapshot {
+        let processingInFlight: Int
+        let recognitionInFlight: Int
+        let maximumProcessingInFlight: Int
+        let laterSourceStartedDuringRecognition: Bool
+    }
+
+    private var processingInFlight = 0
+    private var recognitionInFlight = 0
+    private var maximumProcessingInFlight = 0
+    private var laterSourceStartedDuringRecognition = false
+
+    func processingStarted(sourceIndex: Int) {
+        processingInFlight += 1
+        maximumProcessingInFlight = max(
+            maximumProcessingInFlight,
+            processingInFlight
+        )
+        if sourceIndex >= 2, recognitionInFlight > 0 {
+            laterSourceStartedDuringRecognition = true
+        }
+    }
+
+    func processingFinished() {
+        processingInFlight -= 1
+    }
+
+    func recognitionStarted() {
+        recognitionInFlight += 1
+    }
+
+    func recognitionFinished() {
+        recognitionInFlight -= 1
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            processingInFlight: processingInFlight,
+            recognitionInFlight: recognitionInFlight,
+            maximumProcessingInFlight: maximumProcessingInFlight,
+            laterSourceStartedDuringRecognition: laterSourceStartedDuringRecognition
+        )
     }
 }
 

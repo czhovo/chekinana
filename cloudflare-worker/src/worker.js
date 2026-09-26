@@ -1,14 +1,24 @@
 import { interpretNaturalLanguage } from "./nl-interpreter.js";
 import {
+  classifyReplyLanguage,
+  REPLY_LANGUAGE_ENDPOINT,
+} from "./reply-language.js";
+import {
+  EVENT_CONTENT_METADATA_HEADERS,
   EVENT_ENDPOINT,
   extractWeiboCandidateRequest,
 } from "./event-weibo-extractor.js";
+import { X_MEDIA_ENDPOINT, proxyXMediaRequest } from "./event-x-media.js";
 import {
   annotateChekiDateImageRequest,
   annotateChekiDateResponse,
   chekiDateRateLimitDecision,
 } from "./cheki-date-annotator.js";
 import { ScannerRuntime } from "./scanner-runtime.js";
+import {
+  TRAVEL_SCHEDULE_ENDPOINT,
+  handleTravelScheduleRequest,
+} from "./travel-schedule.js";
 
 export { ScannerRuntime };
 
@@ -799,14 +809,16 @@ async function productionRuntimeRequest(request, env) {
   }
 }
 
-export async function handleRequest(request, env = {}, fetchImpl = fetch) {
+export async function handleRequest(request, env = {}, fetchImpl = fetch, options = {}) {
   const url = new URL(request.url);
   const dateAnnotationRequested = requestsDateAnnotation(request, url);
 
   if (request.method === "OPTIONS") {
     const headers = (url.pathname === "/api/nl/interpret"
+      || url.pathname === REPLY_LANGUAGE_ENDPOINT
       || url.pathname === EVENT_ENDPOINT
-      || url.pathname === DATE_ANNOTATION_ENDPOINT)
+      || url.pathname === DATE_ANNOTATION_ENDPOINT
+      || url.pathname === TRAVEL_SCHEDULE_ENDPOINT)
       ? { "cache-control": "no-store" }
       : {};
     if (isCurrentResultPartPath(url.pathname)
@@ -817,14 +829,38 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
     return json({ ok: true }, 200, headers);
   }
 
+  if (url.pathname === TRAVEL_SCHEDULE_ENDPOINT) {
+    const result = await handleTravelScheduleRequest(request, env, {
+      fetchImpl,
+    });
+    return json(result.body, result.status, { "cache-control": "no-store" });
+  }
+
   if (url.pathname === "/api/nl/interpret") {
     const result = await interpretNaturalLanguage(request, env, { fetchImpl });
     return json(result.body, result.status, { "cache-control": "no-store" });
   }
 
+  if (url.pathname === REPLY_LANGUAGE_ENDPOINT) {
+    const result = await classifyReplyLanguage(request, env, { fetchImpl });
+    return json(result.body, result.status, { "cache-control": "no-store" });
+  }
+
   if (url.pathname === EVENT_ENDPOINT) {
     const result = await extractWeiboCandidateRequest(request, env, { fetchImpl });
-    return json(result.body, result.status, { "cache-control": "no-store" });
+    return json(result.body, result.status, {
+      "cache-control": "no-store",
+      "access-control-expose-headers": EVENT_CONTENT_METADATA_HEADERS.join(","),
+      ...(result.headers ?? {}),
+    });
+  }
+
+  if (url.pathname === X_MEDIA_ENDPOINT) {
+    return proxyXMediaRequest(request, {
+      fetchImpl,
+      cache: options.xMediaCache,
+      waitUntil: options.waitUntil,
+    });
   }
 
   if (url.pathname === DATE_ANNOTATION_ENDPOINT) {
@@ -927,7 +963,12 @@ export async function handleRequest(request, env = {}, fetchImpl = fetch) {
 }
 
 export default {
-  async fetch(request, env = {}) {
-    return handleRequest(request, env);
+  async fetch(request, env = {}, context = {}) {
+    return handleRequest(request, env, fetch, {
+      xMediaCache: globalThis.caches?.default,
+      waitUntil: typeof context.waitUntil === "function"
+        ? (operation) => context.waitUntil(operation)
+        : null,
+    });
   },
 };

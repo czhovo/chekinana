@@ -14,24 +14,31 @@ final class StatusBarHostingController<Content: View>: UIHostingController<Conte
 
 private struct ChekinanaLocalizedRootView: View {
     @StateObject private var languageStore = ChekinanaLanguageStore.shared
+    @StateObject private var themeStore = ChekinanaThemeStore.shared
     let content: AnyView
 
     var body: some View {
+        let _ = themeStore.revision
         content
+            .monospacedDigit()
             .environment(\.locale, languageStore.displayLocale)
             .environment(\.chekinanaLanguageRevision, languageStore.revision)
+            .environment(\.chekinanaThemeRevision, themeStore.revision)
             .environmentObject(languageStore)
+            .environmentObject(themeStore)
+            .tint(themeStore.accent)
     }
 }
 
 private struct ChekinanaDataStoreRecoveryView: View {
     let onRetry: () -> Void
+    var message: String?
 
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "externaldrive.badge.exclamationmark")
                 .font(.system(size: 42, weight: .semibold))
-                .foregroundStyle(.purple)
+                .foregroundStyle(ChekinanaDesignSystem.accent)
                 .accessibilityHidden(true)
 
             Text(ChekinanaL10n.text(
@@ -41,7 +48,7 @@ private struct ChekinanaDataStoreRecoveryView: View {
             .font(.title3.weight(.semibold))
             .multilineTextAlignment(.center)
 
-            Text(ChekinanaL10n.text(
+            Text(message ?? ChekinanaL10n.text(
                 "datastore.recovery.message",
                 fallback: "Your saved data was not cleared or replaced. Retry opening the same library."
             ))
@@ -55,7 +62,7 @@ private struct ChekinanaDataStoreRecoveryView: View {
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.purple)
+            .tint(ChekinanaDesignSystem.accent)
             .accessibilityIdentifier("datastore.retry")
         }
         .padding(28)
@@ -92,11 +99,14 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
-    private func installRecoveryRoot(in window: UIWindow) {
-        let recovery = ChekinanaDataStoreRecoveryView { [weak self, weak window] in
-            guard let self, let window else { return }
-            self.installRoot(in: window)
-        }
+    private func installRecoveryRoot(in window: UIWindow, message: String? = nil) {
+        let recovery = ChekinanaDataStoreRecoveryView(
+            onRetry: { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.installRoot(in: window)
+            },
+            message: message
+        )
         window.rootViewController = StatusBarHostingController(
             rootView: ChekinanaLocalizedRootView(content: AnyView(recovery))
         )
@@ -106,6 +116,31 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         in window: UIWindow,
         container: ModelContainer
     ) {
+        let launchContext = ModelContext(container)
+        do {
+            try ChekinanaDataImporter.recoverUnfinishedImport(in: launchContext)
+            // A Cheki edit intent is durable before its formal UUID file can
+            // change. Resolve its generation/record witness before any launch
+            // cleanup can classify that file as current or orphaned.
+            try ChekinanaChekiEditRecovery.recoverUnfinishedEdit(
+                in: launchContext
+            )
+            _ = try ChekinanaChekiDeletionRecovery.recoverUnfinishedDeletion(
+                in: launchContext
+            )
+            if try ChekinanaChekiIndexing.repairPersistedMediaItems(
+                in: launchContext
+            ) > 0 {
+                try launchContext.save()
+            }
+#if DEBUG
+            try ChekinanaDebugMediaItemNoteClearer.clearRecordNotesIfRequested(in: container)
+            try ChekinanaDebugMediaItemNoteClearer.clearIfRequested(in: launchContext)
+#endif
+        } catch {
+            installRecoveryRoot(in: window, message: error.localizedDescription)
+            return
+        }
 #if DEBUG
         do {
             try ChekinanaDataStore.resetForUITestingIfRequested(in: container)
@@ -114,11 +149,28 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
 #endif
-        let launchContext = ModelContext(container)
-        try? ChekinanaEventMediaJournal.recover(modelContext: launchContext)
-        ChekinanaGalleryMediaStore.cleanupRestoreRecoveries()
-        ChekinanaGalleryMediaStore.cleanupCommittedDeletions()
-        ChekinanaGalleryMediaStore.cleanupOrphanedImports()
+        // Import recovery must finish before any ordinary media cleanup. Those
+        // queues cannot safely classify files while two library generations
+        // are still present.
+        Task { @MainActor in
+            let clearRecovery = await ChekinanaLocalDataClearer
+                .recoverUnfinishedClear(modelContext: launchContext)
+            guard !clearRecovery.needsRetry else { return }
+            // Pending Event/Travel files are only eligible for orphan
+            // recovery at this process boundary, before any editor session
+            // can become active. Runtime cleanup handles committed deletion
+            // intents only, so a Travel mutation cannot collect an Event
+            // editor's unsaved images.
+            ChekinanaEventTravelMediaOwnership.reconcileAfterProcessRestart(
+                currentGeneration: try? ChekinanaLibraryGenerationStore.current(
+                    in: launchContext
+                )
+            )
+            _ = await ChekinanaLibraryQueueReconciler.cleanupOrdinaryQueues(
+                in: launchContext,
+                recoverEventPending: true
+            )
+        }
         ChekinanaGalleryMediaStore.cleanupStagedImports()
         ChekinanaCapturedPhotoStore.cleanupStaleFiles()
         do {
@@ -132,6 +184,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         ChekinanaProductUITestFixture.seedIfRequested(in: container)
 #endif
         Task { @MainActor in
+            // Cache-only: keep unresolved states pending when no local bank exists.
             try? await ChekinanaIdolPatternPersistence
                 .refreshPendingCataloguePatterns(in: launchContext)
         }

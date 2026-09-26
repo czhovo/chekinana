@@ -142,16 +142,16 @@ enum ChekinanaNaturalLanguageTranslator {
     static func translate(_ input: String) -> ChekinanaNaturalLanguageTranslation {
         let normalized = normalize(input)
         guard !normalized.isEmpty else {
-            return clarification("请输入一个需求")
+            return clarification(ChekinanaParserCopy.message("请输入一个需求"))
         }
 
         let first = normalized.split(maxSplits: 1, whereSeparator: \Character.isWhitespace).first.map(String.init)?.lowercased()
         let isDirectAddEvent = first == "addevent"
         if containsControlSyntax(normalized, allowingAmpersand: isDirectAddEvent) {
             if normalized.contains(";") && detectsMultipleIntents(normalized) {
-                return clarification("一次只能转换一个操作，请拆开描述")
+                return clarification(ChekinanaParserCopy.message("一次只能转换一个操作，请拆开描述"))
             }
-            return clarification("输入包含换行或命令控制字符，已拒绝转换")
+            return clarification(ChekinanaParserCopy.message("输入包含换行或命令控制字符，已拒绝转换"))
         }
 
         if first.map(commandNames.contains) == true || isCode(normalized) {
@@ -175,7 +175,7 @@ enum ChekinanaNaturalLanguageTranslator {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         if cleaned.contains("\\") {
-            return clarification("输入参数无法由 App parser 无损表示")
+            return clarification(ChekinanaParserCopy.message("输入参数无法由 App parser 无损表示"))
         }
         // An explicitly introduced Idol list is deterministic and stays on
         // device. Parse it before the generic quote guard so a quoted name
@@ -188,22 +188,22 @@ enum ChekinanaNaturalLanguageTranslator {
                 source: .rule,
                 confidence: 0.97,
                 needsClarification: false,
-                message: "识别为批量添加 Idol",
+                message: ChekinanaParserCopy.message("识别为批量添加 Idol"),
                 candidates: []
             )
         }
         if hasExplicitBulkIdolPrefix(cleaned) {
             return clarification(
-                "批量添加 Idol 需要至少两个非空名称；请用空格、顿号、逗号或“和”分隔。",
+                ChekinanaParserCopy.message("批量添加 Idol 需要至少两个非空名称；请用空格、顿号、逗号或“和”分隔。"),
                 intent: "addidol"
             )
         }
         let withoutAssignmentQuotes = replacing(#"\b[A-Za-z_][A-Za-z0-9_]*=\"[^\"]*\""#, in: cleaned, with: "")
         if withoutAssignmentQuotes.contains("\"") {
-            return clarification("输入参数无法由 App parser 无损表示")
+            return clarification(ChekinanaParserCopy.message("输入参数无法由 App parser 无损表示"))
         }
         if detectsMultipleIntents(cleaned) {
-            return clarification("一次只能转换一个操作，请拆开描述")
+            return clarification(ChekinanaParserCopy.message("一次只能转换一个操作，请拆开描述"))
         }
 
         let ruleResults = [
@@ -222,7 +222,7 @@ enum ChekinanaNaturalLanguageTranslator {
         ]
         for match in ruleResults.compactMap({ $0 }) {
             guard let command = match.command else {
-                return clarification(match.message.isEmpty ? "缺少必要参数" : match.message, intent: match.intent)
+                return clarification(match.message.isEmpty ? ChekinanaParserCopy.message("缺少必要参数") : match.message, intent: match.intent)
             }
             return .init(
                 command: command,
@@ -237,7 +237,7 @@ enum ChekinanaNaturalLanguageTranslator {
 
         let candidates = scoredCandidates(cleaned).map(\.intent)
         return clarification(
-            "离线规则无法确定唯一命令，请补充或改写需求",
+            ChekinanaParserCopy.message("离线规则无法确定唯一命令，请补充或改写需求"),
             intent: candidates.count == 1 ? candidates[0] : nil,
             candidates: candidates,
             // Candidate scoring is diagnostic only. A product keyword is not
@@ -408,10 +408,10 @@ private extension ChekinanaNaturalLanguageTranslator {
             .lowercased()
             .hasPrefix("addevent ")
         if containsControlSyntax(input, allowingAmpersand: isDirectAddEvent) {
-            throw TranslationError.invalidCommand("输入包含换行或命令控制字符")
+            throw TranslationError.invalidCommand(ChekinanaParserCopy.message("输入包含换行或命令控制字符"))
         }
         if input.contains("\\") {
-            throw TranslationError.invalidCommand("反斜杠无法由 App parser 无损处理")
+            throw TranslationError.invalidCommand(ChekinanaParserCopy.message("反斜杠无法由 App parser 无损处理"))
         }
 
         var tokens: [String] = []
@@ -422,10 +422,10 @@ private extension ChekinanaNaturalLanguageTranslator {
             if character == "\"" {
                 if !isQuoted {
                     if !current.isEmpty && !current.hasSuffix("=") {
-                        throw TranslationError.invalidCommand("双引号只能包围完整参数值")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("双引号只能包围完整参数值"))
                     }
                     if justClosedQuote {
-                        throw TranslationError.invalidCommand("参数包含无法表示的双引号")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("参数包含无法表示的双引号"))
                     }
                     isQuoted = true
                 } else {
@@ -443,15 +443,15 @@ private extension ChekinanaNaturalLanguageTranslator {
                 continue
             }
             if justClosedQuote && !character.isWhitespace {
-                throw TranslationError.invalidCommand("结束引号后必须是参数分隔空白")
+                throw TranslationError.invalidCommand(ChekinanaParserCopy.message("结束引号后必须是参数分隔空白"))
             }
             current.append(character)
         }
         if isQuoted {
-            throw TranslationError.invalidCommand("命令引号不完整")
+            throw TranslationError.invalidCommand(ChekinanaParserCopy.message("命令引号不完整"))
         }
         if !current.isEmpty { tokens.append(current) }
-        if tokens.isEmpty { throw TranslationError.invalidCommand("输入为空") }
+        if tokens.isEmpty { throw TranslationError.invalidCommand(ChekinanaParserCopy.message("输入为空")) }
         return tokens
     }
 
@@ -473,10 +473,10 @@ private extension ChekinanaNaturalLanguageTranslator {
             let key = String(token[..<index]).lowercased()
             let value = String(token[token.index(after: index)...])
             guard fullMatch(#"[a-zA-Z_][a-zA-Z0-9_]*"#, key) != nil, !value.isEmpty else {
-                throw TranslationError.invalidCommand("字段必须使用 field=value，且 value 不能为空")
+                throw TranslationError.invalidCommand(ChekinanaParserCopy.message("字段必须使用 field=value，且 value 不能为空"))
             }
             guard keys.insert(key).inserted else {
-                throw TranslationError.invalidCommand("字段重复：\(key)")
+                throw TranslationError.invalidCommand(ChekinanaParserCopy.message("字段重复：\(key)"))
             }
             values.append((key, value))
         }
@@ -487,11 +487,11 @@ private extension ChekinanaNaturalLanguageTranslator {
         do {
             let tokens = try tokenize(raw.trimmingCharacters(in: .whitespacesAndNewlines))
             if tokens.count == 1, isCode(tokens[0]) {
-                return .init(command: "confirm \(tokens[0].lowercased())", intent: "confirm", message: "八位确认码已规范化")
+                return .init(command: "confirm \(tokens[0].lowercased())", intent: "confirm", message: ChekinanaParserCopy.message("八位确认码已规范化"))
             }
             let name = tokens[0].lowercased()
             guard commandNames.contains(name) else {
-                return .init(command: nil, intent: nil, message: "未注册命令：\(name)")
+                return .init(command: nil, intent: nil, message: ChekinanaParserCopy.message("未注册命令：\(name)"))
             }
             var split = try splitTokens(tokens.dropFirst(), commandName: name)
             let keys = Set(split.values.map(\.key))
@@ -499,102 +499,102 @@ private extension ChekinanaNaturalLanguageTranslator {
             switch name {
             case "help", "clear", "listidol", "listevent":
                 guard split.positional.isEmpty, split.values.isEmpty else {
-                    throw TranslationError.invalidCommand("\(name) 不接受参数")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("\(name) 不接受参数"))
                 }
             case "scancheki":
                 let allowed: Set<String> = [
-                    "expected", "scanner_size", "postprocess", "wb",
+                    "expected", "scanner_size", "wb",
                     "date_recognition", "idol_recognition", "candidates",
                 ]
                 guard split.positional.isEmpty,
                       keys.isSubset(of: allowed) else {
-                    throw TranslationError.invalidCommand("scancheki 不接受后端凭据或位置参数")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("scancheki 不接受后端凭据或位置参数"))
                 }
             case "confirm":
                 guard split.values.isEmpty, split.positional.count <= 1 else {
-                    throw TranslationError.invalidCommand("confirm 只接受一个可选的八位确认码")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("confirm 只接受一个可选的八位确认码"))
                 }
                 if let code = split.positional.first {
-                    guard isCode(code) else { throw TranslationError.invalidCommand("确认码必须是八位十六进制字符") }
+                    guard isCode(code) else { throw TranslationError.invalidCommand(ChekinanaParserCopy.message("确认码必须是八位十六进制字符")) }
                     split = .init(positional: [code.lowercased()], values: split.values)
                 }
             case "cancel":
                 guard split.values.isEmpty, split.positional.count == 1 else {
-                    throw TranslationError.invalidCommand("cancel 需要八位确认码或 all")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("cancel 需要八位确认码或 all"))
                 }
                 let value = split.positional[0]
                 guard value.lowercased() == "all" || isCode(value) else {
-                    throw TranslationError.invalidCommand("cancel 需要八位确认码或 all")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("cancel 需要八位确认码或 all"))
                 }
                 split = .init(positional: [value.lowercased()], values: split.values)
             case "addidol", "showidol", "deleteidol", "showevent", "deleteevent", "discardcheki", "showcheki", "downloadcheki", "deletecheki":
                 guard split.values.isEmpty, split.positional.count == 1 else {
-                    throw TranslationError.invalidCommand("\(name) 需要且只接受一个目标")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("\(name) 需要且只接受一个目标"))
                 }
             case "editidol":
                 let allowed: Set<String> = ["name", "group", "birthday", "color", "verification", "bio", "avatar", "avatar_url"]
                 guard split.positional.count == 1, !split.values.isEmpty else {
-                    throw TranslationError.invalidCommand("editidol 需要目标和至少一个 field=value")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("editidol 需要目标和至少一个 field=value"))
                 }
                 guard keys.isSubset(of: allowed) else {
-                    throw TranslationError.invalidCommand("editidol 不支持字段")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("editidol 不支持字段"))
                 }
             case "addevent":
                 guard split.positional.count == 1,
                       keys.isSubset(of: ["name", "date"]) else {
-                    throw TranslationError.invalidCommand("addevent 需要名称和 date=YYYY-MM-DD；URL 可选")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("addevent 需要名称和 date=YYYY-MM-DD；URL 可选"))
                 }
                 if split.positional[0].range(of: #"^https?://"#, options: [.regularExpression, .caseInsensitive]) != nil {
                     guard ChekinanaNLSchemaValidator.isSafeHTTPURL(split.positional[0]) else {
-                        throw TranslationError.invalidCommand("Event URL 不能包含用户名或密码")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("Event URL 不能包含用户名或密码"))
                     }
                     guard keys == Set(["name", "date"]) else {
-                        throw TranslationError.invalidCommand("通过 URL 添加 Event 时必须同时提供 name 和 date")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("通过 URL 添加 Event 时必须同时提供 name 和 date"))
                     }
                 } else {
                     guard keys == Set(["date"]) else {
-                        throw TranslationError.invalidCommand("通过名称添加 Event 时必须提供 date")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("通过名称添加 Event 时必须提供 date"))
                     }
                 }
             case "editevent":
                 guard split.positional.count == 1,
                       !split.values.isEmpty,
                       keys.isSubset(of: ["name", "date", "url"]) else {
-                    throw TranslationError.invalidCommand("editevent 需要目标和 name/date/url 字段")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("editevent 需要目标和 name/date/url 字段"))
                 }
                 if let url = split.values.first(where: { $0.key == "url" })?.value,
                    url != "-",
                    !ChekinanaNLSchemaValidator.isSafeHTTPURL(url) {
-                    throw TranslationError.invalidCommand("Event URL 不能包含用户名或密码")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("Event URL 不能包含用户名或密码"))
                 }
             case "addcheki":
                 let allowed: Set<String> = ["idol", "idols", "event", "date", "user", "userappears", "size", "note"]
                 guard split.positional.count <= 1, keys.isSubset(of: allowed) else {
-                    throw TranslationError.invalidCommand("addcheki 参数不符合注册表")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("addcheki 参数不符合注册表"))
                 }
                 guard !(split.positional.count == 1 && !keys.intersection(["idol", "idols"]).isEmpty),
                       !keys.isSuperset(of: ["idol", "idols"]) else {
-                    throw TranslationError.invalidCommand("addcheki Idol 参数重复")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("addcheki Idol 参数重复"))
                 }
                 let values = Dictionary(uniqueKeysWithValues: split.values)
                 for key in ["user", "userappears"] {
                     if let value = values[key], !["true", "false", "?", "-"].contains(value.lowercased()) {
-                        throw TranslationError.invalidCommand("user 必须是 true、false、? 或 -")
+                        throw TranslationError.invalidCommand(ChekinanaParserCopy.message("user 必须是 true、false、? 或 -"))
                     }
                 }
-                if let size = values["size"], !["mini", "wide", "else", "?", "-"].contains(size.lowercased()) {
-                    throw TranslationError.invalidCommand("size 必须是 mini、wide、else、? 或 -")
+                if let size = values["size"], !["mini", "wide", "?", "-"].contains(size.lowercased()) {
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("size 必须是 mini、wide、? 或 -"))
                 }
             case "addscancheki":
                 let allowed: Set<String> = ["idol", "idols", "event", "date", "user", "userappears", "size", "note"]
                 guard split.positional.count <= 1,
                       keys.isSubset(of: allowed),
                       !keys.isSuperset(of: ["idol", "idols"]) else {
-                    throw TranslationError.invalidCommand("addscancheki 参数不符合注册表")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("addscancheki 参数不符合注册表"))
                 }
             case "listcheki":
                 guard split.positional.isEmpty, keys.isSubset(of: ["idol", "event", "date"]) else {
-                    throw TranslationError.invalidCommand("listcheki 只接受 idol/event/date 字段")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("listcheki 只接受 idol/event/date 字段"))
                 }
             case "editcheki":
                 let allowed: Set<String> = ["idol", "idols", "event", "date", "user", "userappears", "size", "note"]
@@ -603,10 +603,10 @@ private extension ChekinanaNaturalLanguageTranslator {
                       keys.isSubset(of: allowed),
                       !keys.isSuperset(of: ["idol", "idols"]),
                       !keys.isSuperset(of: ["user", "userappears"]) else {
-                    throw TranslationError.invalidCommand("editcheki 需要目标和有效字段")
+                    throw TranslationError.invalidCommand(ChekinanaParserCopy.message("editcheki 需要目标和有效字段"))
                 }
             default:
-                throw TranslationError.invalidCommand("未注册命令：\(name)")
+                throw TranslationError.invalidCommand(ChekinanaParserCopy.message("未注册命令：\(name)"))
             }
 
             var parts = [name]
@@ -617,11 +617,11 @@ private extension ChekinanaNaturalLanguageTranslator {
                 return try quoteValue($0, positional: true)
             }
             parts += try split.values.map { "\($0.key)=\(try quoteValue($0.value))" }
-            return .init(command: parts.joined(separator: " "), intent: name, message: "命令有效")
+            return .init(command: parts.joined(separator: " "), intent: name, message: ChekinanaParserCopy.message("命令有效"))
         } catch TranslationError.invalidCommand(let message) {
             return .init(command: nil, intent: nil, message: message)
         } catch {
-            return .init(command: nil, intent: nil, message: "输入参数无法由 App parser 无损表示")
+            return .init(command: nil, intent: nil, message: ChekinanaParserCopy.message("输入参数无法由 App parser 无损表示"))
         }
     }
 
@@ -632,30 +632,30 @@ private extension ChekinanaNaturalLanguageTranslator {
 
     static func ruleHelp(_ text: String) -> RuleMatch? {
         guard fullMatch(#"(?:帮助|显示帮助|打开帮助|使用说明|命令说明|有哪些命令|都有哪些命令|怎么用|如何使用)"#, text) != nil else { return nil }
-        return resultFromCommand("help", intent: "help", confidence: 0.99, message: "识别为查看帮助")
+        return resultFromCommand("help", intent: "help", confidence: 0.99, message: ChekinanaParserCopy.message("识别为查看帮助"))
     }
 
     static func ruleConfirmCancelClear(_ text: String) -> RuleMatch? {
         let compact = replacing(#"\s+"#, in: text, with: "")
         let code = firstCapture(#"(?<![0-9a-fA-F])([0-9a-fA-F]{8})(?![0-9a-fA-F])"#, in: text)
         if fullMatch(#"(?:确认|确认上一步|确认上一条|确认刚才的操作|执行刚才的操作|同意刚才的操作)"#, compact) != nil {
-            return resultFromCommand("confirm", intent: "confirm", confidence: 0.99, message: "识别为确认最近操作")
+            return resultFromCommand("confirm", intent: "confirm", confidence: 0.99, message: ChekinanaParserCopy.message("识别为确认最近操作"))
         }
         if fullMatch(#"(?:(?:上一笔|上一步|上一条).*(?:落锤|执行)(?:了)?|(?:就按|按).*(?:刚才|上一笔|上一步|上一条).*(?:执行|操作))"#, compact) != nil {
-            return resultFromCommand("confirm", intent: "confirm", confidence: 0.96, message: "识别为确认最近操作")
+            return resultFromCommand("confirm", intent: "confirm", confidence: 0.96, message: ChekinanaParserCopy.message("识别为确认最近操作"))
         }
         if fullMatch(#"(?:取消|撤销)(?:全部|所有)(?:待确认)?(?:操作)?"#, compact) != nil {
-            return resultFromCommand("cancel all", intent: "cancel", confidence: 0.99, message: "识别为取消全部待确认操作")
+            return resultFromCommand("cancel all", intent: "cancel", confidence: 0.99, message: ChekinanaParserCopy.message("识别为取消全部待确认操作"))
         }
         if regexContains(#"(?:取消|撤销)"#, in: compact), let code {
-            return resultFromCommand("cancel \(code)", intent: "cancel", confidence: 0.98, message: "识别为取消指定操作")
+            return resultFromCommand("cancel \(code)", intent: "cancel", confidence: 0.98, message: ChekinanaParserCopy.message("识别为取消指定操作"))
         }
         if regexContains(#"(?:确认|执行|同意).*(?:确认码|编号|操作)?"#, in: compact), let code {
-            return resultFromCommand("confirm \(code)", intent: "confirm", confidence: 0.98, message: "识别为指定确认码")
+            return resultFromCommand("confirm \(code)", intent: "confirm", confidence: 0.98, message: ChekinanaParserCopy.message("识别为指定确认码"))
         }
         if fullMatch(#"(?:清屏|清空屏幕|清空界面|清空输出|清空聊天|清空聊天记录|清除屏幕|清除显示记录)"#, compact) != nil ||
             fullMatch(#"(?:擦掉|清掉|清除)屏幕上的(?:对话|内容|记录)"#, compact) != nil {
-            return resultFromCommand("clear", intent: "clear", confidence: 0.99, message: "识别为清空可见记录")
+            return resultFromCommand("clear", intent: "clear", confidence: 0.99, message: ChekinanaParserCopy.message("识别为清空可见记录"))
         }
         return nil
     }
@@ -665,7 +665,7 @@ private extension ChekinanaNaturalLanguageTranslator {
         if fullMatch(#"列出(?:全部|所有|我的|已添加的|本地的)?(?:idol|偶像|爱豆)(?:列表|清单|名册)?"#, compact) != nil ||
             fullMatch(#"(?:显示|查看|打开)(?:(?:全部|所有|我的|已添加的|本地的)(?:idol|偶像|爱豆)(?:列表|清单|名册)?|(?:idol|偶像|爱豆)(?:列表|清单|名册))"#, compact) != nil ||
             fullMatch(#"(?:把)?(?:idol|偶像|爱豆)(?:花名册|清单|名册)(?:摊开|展示|打开)(?:给我看|看看|出来)?"#, compact) != nil {
-            return resultFromCommand("listidol", intent: "listidol", confidence: 0.98, message: "识别为列出本地 Idol")
+            return resultFromCommand("listidol", intent: "listidol", confidence: 0.98, message: ChekinanaParserCopy.message("识别为列出本地 Idol"))
         }
         let patterns = [
             #"^(?:查看|显示|打开|查询|查一下)(?:idol|偶像|爱豆)(?:详情)?\s+(.+)$"#,
@@ -677,7 +677,7 @@ private extension ChekinanaNaturalLanguageTranslator {
             if let value = firstCapture(pattern, in: text) {
                 let target = cleanPhrase(value)
                 if !target.isEmpty, let quoted = try? quoteValue(target) {
-                    return resultFromCommand("showidol \(quoted)", intent: "showidol", confidence: 0.94, message: "识别为查看 Idol")
+                    return resultFromCommand("showidol \(quoted)", intent: "showidol", confidence: 0.94, message: ChekinanaParserCopy.message("识别为查看 Idol"))
                 }
             }
         }
@@ -687,7 +687,7 @@ private extension ChekinanaNaturalLanguageTranslator {
     static func ruleAddIdol(_ text: String) -> RuleMatch? {
         let compact = replacing(#"\s+"#, in: text, with: "")
         if fullMatch(#"(?:添加|新增|加入|录入)(?:一个|一位)?(?:idol|偶像|爱豆)"#, compact) != nil {
-            return .init(command: nil, intent: "addidol", confidence: 0, message: "请补充要添加的 Idol 名称。")
+            return .init(command: nil, intent: "addidol", confidence: 0, message: ChekinanaParserCopy.message("请补充要添加的 Idol 名称。"))
         }
         let patterns = [
             #"^(?:添加|新增|加入|录入)(?:一个|一位)?(?:名为|叫做?|名称(?:为|是))(.+?)(?:的)?(?:idol|偶像|爱豆)$"#,
@@ -696,7 +696,7 @@ private extension ChekinanaNaturalLanguageTranslator {
             #"^(?:把)?(?:新来的)?(.+?)(?:登记|收录)(?:进|到)(?:idol|偶像|爱豆)(?:册|名册|列表)$"#,
             #"^(?:登记|收录)(?:idol|偶像|爱豆)\s*(.+)$"#,
         ]
-        return targetRule(text, patterns: patterns, command: "addidol", confidence: 0.97, message: "识别为搜索并添加 Idol")
+        return targetRule(text, patterns: patterns, command: "addidol", confidence: 0.97, message: ChekinanaParserCopy.message("识别为搜索并添加 Idol"))
     }
 
     static func ruleAddMultipleIdols(_ text: String) -> [String]? {
@@ -840,7 +840,7 @@ private extension ChekinanaNaturalLanguageTranslator {
             #"^(?:删除|移除)(?:idol|偶像|爱豆)\s+(.+)$"#,
             #"^(?:删除|移除)\s*(.+?)(?:这个|这位)?(?:idol|偶像|爱豆)$"#,
             #"^(?:把|将)\s*(.+?)(?:这个|这位)?(?:idol|偶像|爱豆)(?:删除|移除)(?:掉)?$"#,
-        ], command: "deleteidol", confidence: 0.97, message: "识别为删除 Idol；执行仍需确认")
+        ], command: "deleteidol", confidence: 0.97, message: ChekinanaParserCopy.message("识别为删除 Idol；执行仍需确认"))
     }
 
     static func targetRule(_ text: String, patterns: [String], command: String, confidence: Double, message: String) -> RuleMatch? {
@@ -878,7 +878,7 @@ private extension ChekinanaNaturalLanguageTranslator {
                         "editidol \(quotedTarget) \(field)=-",
                         intent: "editidol",
                         confidence: 0.96,
-                        message: "识别为清空 Idol 字段；执行仍需确认"
+                        message: ChekinanaParserCopy.message("识别为清空 Idol 字段；执行仍需确认")
                     )
                 }
             }
@@ -889,19 +889,19 @@ private extension ChekinanaNaturalLanguageTranslator {
             let value = cleanPhrase(groups[2])
             if let field = aliases[groups[1].lowercased()], !target.isEmpty, !value.isEmpty,
                let quotedTarget = try? quoteValue(target), let quotedValue = try? quoteValue(value) {
-                return resultFromCommand("editidol \(quotedTarget) \(field)=\(quotedValue)", intent: "editidol", confidence: 0.95, message: "识别为修改 Idol 字段；执行仍需确认")
+                return resultFromCommand("editidol \(quotedTarget) \(field)=\(quotedValue)", intent: "editidol", confidence: 0.95, message: ChekinanaParserCopy.message("识别为修改 Idol 字段；执行仍需确认"))
             }
         }
         if let groups = captures(#"^(?:把|将)?(.+?)的(?:应援色|代表色)(?:修改|改|换|设置)?(?:成|为)\s*(.+)$"#, in: text), groups.count >= 2 {
             let target = cleanPhrase(groups[0])
             let value = cleanPhrase(groups[1])
             if let quotedTarget = try? quoteValue(target), let quotedValue = try? quoteValue(value) {
-                return resultFromCommand("editidol \(quotedTarget) color=\(quotedValue)", intent: "editidol", confidence: 0.95, message: "识别为修改 Idol 颜色；执行仍需确认")
+                return resultFromCommand("editidol \(quotedTarget) color=\(quotedValue)", intent: "editidol", confidence: 0.95, message: ChekinanaParserCopy.message("识别为修改 Idol 颜色；执行仍需确认"))
             }
         }
         if let groups = captures(#"^(?:修改|编辑|更新)(?:idol|偶像|爱豆)\s+([^ ]+)\s+(.+)$"#, in: text), groups.count >= 2,
            let target = try? quoteValue(cleanPhrase(groups[0])) {
-            return resultFromCommand("editidol \(target) \(groups[1])", intent: "editidol", confidence: 0.93, message: "识别为修改 Idol 字段；执行仍需确认")
+            return resultFromCommand("editidol \(target) \(groups[1])", intent: "editidol", confidence: 0.93, message: ChekinanaParserCopy.message("识别为修改 Idol 字段；执行仍需确认"))
         }
         return nil
     }
@@ -913,7 +913,7 @@ private extension ChekinanaNaturalLanguageTranslator {
                 "scancheki",
                 intent: "scancheki",
                 confidence: 0.96,
-                message: "识别为扫描已选照片；后端会在需要时自动启动"
+                message: ChekinanaParserCopy.message("识别为扫描已选照片；后端会在需要时自动启动")
             )
         }
         let patterns = [
@@ -925,7 +925,7 @@ private extension ChekinanaNaturalLanguageTranslator {
                 var target = cleanPhrase(value)
                 if ["全部", "所有", "全都"].contains(target) { target = "all" }
                 if let quoted = try? quoteValue(target) {
-                    return resultFromCommand("discardcheki \(quoted)", intent: "discardcheki", confidence: 0.96, message: "识别为丢弃临时 Cheki")
+                    return resultFromCommand("discardcheki \(quoted)", intent: "discardcheki", confidence: 0.96, message: ChekinanaParserCopy.message("识别为丢弃临时 Cheki"))
                 }
             }
         }
@@ -943,7 +943,7 @@ private extension ChekinanaNaturalLanguageTranslator {
                     "addscancheki all idol=\(quotedIdol) date=\(groups[1])",
                     intent: "addscancheki",
                     confidence: 0.97,
-                    message: "识别为保存全部扫描结果；执行仍需确认"
+                    message: ChekinanaParserCopy.message("识别为保存全部扫描结果；执行仍需确认")
                 )
             }
         }
@@ -964,7 +964,7 @@ private extension ChekinanaNaturalLanguageTranslator {
             idol = replacing(#"[，、]"#, in: idol, with: ",")
             if ["全部", "所有", "全都"].contains(temporary) { temporary = "all" }
             if let qTemporary = try? quoteValue(temporary), let qIdol = try? quoteValue(idol) {
-                return resultFromCommand("addscancheki \(qTemporary) idol=\(qIdol)", intent: "addscancheki", confidence: 0.96, message: "识别为把扫描临时对象添加给 Idol；执行仍需确认")
+                return resultFromCommand("addscancheki \(qTemporary) idol=\(qIdol)", intent: "addscancheki", confidence: 0.96, message: ChekinanaParserCopy.message("识别为把扫描临时对象添加给 Idol；执行仍需确认"))
             }
         }
         return nil
@@ -999,8 +999,8 @@ private extension ChekinanaNaturalLanguageTranslator {
                 intent: "addcheki",
                 confidence: 0,
                 message: !values.contains(where: { $0.0 == "idol" || $0.0 == "idols" })
-                    ? "还需要一个或多个 Idol，并填写日期；Event 可选。"
-                    : "还需要填写日期；Event 可选。"
+                    ? ChekinanaParserCopy.message("还需要一个或多个 Idol，并填写日期；Event 可选。")
+                    : ChekinanaParserCopy.message("还需要填写日期；Event 可选。")
             )
         }
         let patterns = [
@@ -1018,7 +1018,7 @@ private extension ChekinanaNaturalLanguageTranslator {
                 guard let quoted = try? quoteValue(value) else { return nil }
                 parts.append("\(key)=\(quoted)")
             }
-            return resultFromCommand(parts.joined(separator: " "), intent: "addcheki", confidence: 0.96, message: "识别为从相册为 Idol 添加 Cheki；执行仍需确认")
+            return resultFromCommand(parts.joined(separator: " "), intent: "addcheki", confidence: 0.96, message: ChekinanaParserCopy.message("识别为从相册为 Idol 添加 Cheki；执行仍需确认"))
         }
         return nil
     }
@@ -1026,11 +1026,11 @@ private extension ChekinanaNaturalLanguageTranslator {
     static func ruleEventCRUD(_ text: String) -> RuleMatch? {
         let compact = replacing(#"\s+"#, in: text, with: "")
         if fullMatch(#"(?:列出|显示|查看|打开)(?:全部|所有|我的|已添加的)?(?:event|活动|场次)(?:列表|清单)?"#, compact) != nil {
-            return resultFromCommand("listevent", intent: "listevent", confidence: 0.98, message: "识别为列出 Event")
+            return resultFromCommand("listevent", intent: "listevent", confidence: 0.98, message: ChekinanaParserCopy.message("识别为列出 Event"))
         }
 
         if fullMatch(#"(?:添加|新增|创建|录入)(?:一个)?(?:event|活动|场次)"#, compact) != nil {
-            return .init(command: nil, intent: "addevent", confidence: 0, message: "还需要 Event 名称和日期；URL 可以稍后附加。")
+            return .init(command: nil, intent: "addevent", confidence: 0, message: ChekinanaParserCopy.message("还需要 Event 名称和日期；URL 可以稍后附加。"))
         }
 
         if let eventDraft = ChekinanaLocalEventLanguage.draft(from: text) {
@@ -1044,39 +1044,39 @@ private extension ChekinanaNaturalLanguageTranslator {
                     "addevent \(url) name=\(quotedName) date=\(date)",
                     intent: "addevent",
                     confidence: 0.99,
-                    message: "识别为添加带 URL 的 Event；执行仍需确认"
+                    message: ChekinanaParserCopy.message("识别为添加带 URL 的 Event；执行仍需确认")
                 )
             }
-            let missingText = eventDraft.missing.map {
+            let missingText = ChekinanaParserCopy.list(eventDraft.missing.map {
                 switch $0 {
-                case .eventName: return "名称"
-                case .date: return "日期"
+                case .eventName: return ChekinanaParserCopy.message("Name")
+                case .date: return ChekinanaParserCopy.message("Date")
                 default: return $0.rawValue
                 }
-            }.joined(separator: "和")
+            })
             return .init(
                 command: nil,
                 intent: "addevent",
                 confidence: 0,
-                message: "还需要 Event \(missingText)，已保留 URL。"
+                message: ChekinanaParserCopy.message("还需要 Event \(missingText)，已保留 URL。")
             )
         }
 
         if let value = firstCapture(#"^(?:添加|新增|创建|录入)(?:一个)?\s*(?:event|活动|场次)\s+(.+)$"#, in: text) {
             let target = cleanPhrase(value)
             if target.range(of: #"^https?://"#, options: [.regularExpression, .caseInsensitive]) != nil {
-                return .init(command: nil, intent: "addevent", confidence: 0, message: "还需要 Event 名称和日期，已保留 URL。")
+                return .init(command: nil, intent: "addevent", confidence: 0, message: ChekinanaParserCopy.message("还需要 Event 名称和日期，已保留 URL。"))
             }
             if let groups = captures(#"^(.+?)(?:\s+|，|,)\s*(\d{4}-\d{2}-\d{2})$"#, in: target), groups.count >= 2,
                let name = try? quoteValue(cleanPhrase(groups[0])) {
-                return resultFromCommand("addevent \(name) date=\(groups[1])", intent: "addevent", confidence: 0.97, message: "识别为通过名称和日期添加 Event；执行仍需确认")
+                return resultFromCommand("addevent \(name) date=\(groups[1])", intent: "addevent", confidence: 0.97, message: ChekinanaParserCopy.message("识别为通过名称和日期添加 Event；执行仍需确认"))
             }
-            return .init(command: nil, intent: "addevent", confidence: 0, message: "通过名称添加 Event 时还需要 YYYY-MM-DD 日期。")
+            return .init(command: nil, intent: "addevent", confidence: 0, message: ChekinanaParserCopy.message("通过名称添加 Event 时还需要 YYYY-MM-DD 日期。"))
         }
 
         for (intent, pattern, message) in [
-            ("showevent", #"^(?:查看|显示|打开|查询)\s*(?:event|活动|场次)\s+(.+)$"#, "识别为查看 Event"),
-            ("deleteevent", #"^(?:删除|移除)\s*(?:event|活动|场次)\s+(.+)$"#, "识别为删除 Event；执行仍需确认"),
+            ("showevent", #"^(?:查看|显示|打开|查询)\s*(?:event|活动|场次)\s+(.+)$"#, ChekinanaParserCopy.message("识别为查看 Event")),
+            ("deleteevent", #"^(?:删除|移除)\s*(?:event|活动|场次)\s+(.+)$"#, ChekinanaParserCopy.message("识别为删除 Event；执行仍需确认")),
         ] {
             if let value = firstCapture(pattern, in: text), let target = try? quoteValue(cleanPhrase(value)) {
                 return resultFromCommand("\(intent) \(target)", intent: intent, confidence: 0.97, message: message)
@@ -1090,12 +1090,12 @@ private extension ChekinanaNaturalLanguageTranslator {
             if let field = aliases[groups[1].lowercased()],
                let quotedTarget = try? quoteValue(target),
                let quotedValue = try? quoteValue(value, allowingAmpersand: field == "url") {
-                return resultFromCommand("editevent \(quotedTarget) \(field)=\(quotedValue)", intent: "editevent", confidence: 0.95, message: "识别为修改 Event；执行仍需确认")
+                return resultFromCommand("editevent \(quotedTarget) \(field)=\(quotedValue)", intent: "editevent", confidence: 0.95, message: ChekinanaParserCopy.message("识别为修改 Event；执行仍需确认"))
             }
         }
         if let groups = captures(#"^(?:修改|编辑|更新)\s*(?:event|活动|场次)\s+([^ ]+)\s+(.+)$"#, in: text), groups.count >= 2,
            let target = try? quoteValue(cleanPhrase(groups[0])) {
-            return resultFromCommand("editevent \(target) \(groups[1])", intent: "editevent", confidence: 0.93, message: "识别为修改 Event；执行仍需确认")
+            return resultFromCommand("editevent \(target) \(groups[1])", intent: "editevent", confidence: 0.93, message: ChekinanaParserCopy.message("识别为修改 Event；执行仍需确认"))
         }
         return nil
     }
@@ -1103,13 +1103,13 @@ private extension ChekinanaNaturalLanguageTranslator {
     static func ruleChekiShowEdit(_ text: String) -> RuleMatch? {
         if let value = firstCapture(#"^(?:查看|显示|打开|查询)\s*(?:cheki|切己|切)\s+(.+)$"#, in: text),
            let target = try? quoteValue(cleanPhrase(value)) {
-            return resultFromCommand("showcheki \(target)", intent: "showcheki", confidence: 0.97, message: "识别为查看 Cheki")
+            return resultFromCommand("showcheki \(target)", intent: "showcheki", confidence: 0.97, message: ChekinanaParserCopy.message("识别为查看 Cheki"))
         }
         if let groups = captures(#"^(?:把|将)?\s*(?:cheki|切己|切)\s*(.+?)\s*的\s*(idol|偶像|爱豆|event|活动|场次|日期|date)\s*(?:清空|移除|删除)(?:掉)?$"#, in: text), groups.count >= 2 {
             let aliases = ["idol": "idols", "偶像": "idols", "爱豆": "idols", "event": "event", "活动": "event", "场次": "event", "日期": "date", "date": "date"]
             if let field = aliases[groups[1].lowercased()],
                let quotedTarget = try? quoteValue(cleanPhrase(groups[0])) {
-                return resultFromCommand("editcheki \(quotedTarget) \(field)=-", intent: "editcheki", confidence: 0.97, message: "识别为清空 Cheki 关联；执行仍需确认")
+                return resultFromCommand("editcheki \(quotedTarget) \(field)=-", intent: "editcheki", confidence: 0.97, message: ChekinanaParserCopy.message("识别为清空 Cheki 关联；执行仍需确认"))
             }
         }
         if let groups = captures(#"^(?:把|将)?\s*(?:cheki|切己|切)\s*(.+?)\s*的\s*(idol|偶像|爱豆|event|活动|场次|日期|date|备注|note|用户|user|尺寸|size)\s*(?:修改|改|更新|设置|设)?(?:成|为|到)?\s*(.+)$"#, in: text), groups.count >= 3 {
@@ -1125,12 +1125,12 @@ private extension ChekinanaNaturalLanguageTranslator {
             if let field = aliases[groups[1].lowercased()],
                let quotedTarget = try? quoteValue(target),
                let quotedValue = try? quoteValue(value) {
-                return resultFromCommand("editcheki \(quotedTarget) \(field)=\(quotedValue)", intent: "editcheki", confidence: 0.95, message: "识别为修改 Cheki；执行仍需确认")
+                return resultFromCommand("editcheki \(quotedTarget) \(field)=\(quotedValue)", intent: "editcheki", confidence: 0.95, message: ChekinanaParserCopy.message("识别为修改 Cheki；执行仍需确认"))
             }
         }
         if let groups = captures(#"^(?:修改|编辑|更新)\s*(?:cheki|切己|切)\s+([^ ]+)\s+(.+)$"#, in: text), groups.count >= 2,
            let target = try? quoteValue(cleanPhrase(groups[0])) {
-            return resultFromCommand("editcheki \(target) \(groups[1])", intent: "editcheki", confidence: 0.93, message: "识别为修改 Cheki；执行仍需确认")
+            return resultFromCommand("editcheki \(target) \(groups[1])", intent: "editcheki", confidence: 0.93, message: ChekinanaParserCopy.message("识别为修改 Cheki；执行仍需确认"))
         }
         return nil
     }
@@ -1143,25 +1143,25 @@ private extension ChekinanaNaturalLanguageTranslator {
         ]
         for (intent, pattern) in rules {
             if let value = firstCapture(pattern, in: text), let target = try? quoteValue(cleanPhrase(value)) {
-                return resultFromCommand("\(intent) \(target)", intent: intent, confidence: 0.97, message: intent == "downloadcheki" ? "识别为下载 Cheki；执行仍需确认" : "识别为删除 Cheki；执行仍需确认")
+                return resultFromCommand("\(intent) \(target)", intent: intent, confidence: 0.97, message: intent == "downloadcheki" ? ChekinanaParserCopy.message("识别为下载 Cheki；执行仍需确认") : ChekinanaParserCopy.message("识别为删除 Cheki；执行仍需确认"))
             }
         }
         if let value = firstCapture(#"^(?:把)?(?:cheki|切己)?\s*(.+?)(?:这张)?(?:cheki|切己)?(?:保存|存)(?:进|到)(?:系统)?相册$"#, in: text), let target = try? quoteValue(cleanPhrase(value)) {
-            return resultFromCommand("downloadcheki \(target)", intent: "downloadcheki", confidence: 0.96, message: "识别为下载 Cheki；执行仍需确认")
+            return resultFromCommand("downloadcheki \(target)", intent: "downloadcheki", confidence: 0.96, message: ChekinanaParserCopy.message("识别为下载 Cheki；执行仍需确认"))
         }
         if let value = firstCapture(#"^(?:把)?(.+?)(?:这张)(?:cheki|切己)(?:不要了|删除掉|移除掉)$"#, in: text), let target = try? quoteValue(cleanPhrase(value)) {
-            return resultFromCommand("deletecheki \(target)", intent: "deletecheki", confidence: 0.96, message: "识别为删除 Cheki；执行仍需确认")
+            return resultFromCommand("deletecheki \(target)", intent: "deletecheki", confidence: 0.96, message: ChekinanaParserCopy.message("识别为删除 Cheki；执行仍需确认"))
         }
         let compact = replacing(#"\s+"#, in: text, with: "")
         if fullMatch(#"(?:列出|显示|查看|打开)(?:全部|所有|我的|已添加的)?(?:cheki|切己)(?:列表|清单)?"#, compact) != nil {
-            return resultFromCommand("listcheki", intent: "listcheki", confidence: 0.98, message: "识别为列出 Cheki")
+            return resultFromCommand("listcheki", intent: "listcheki", confidence: 0.98, message: ChekinanaParserCopy.message("识别为列出 Cheki"))
         }
         for pattern in [
             #"^(?:列出|显示|查看)\s*(?:(?:idol|偶像|爱豆)\s+)?(.+?)\s*的(?:全部|所有)?(?:cheki|切己)$"#,
             #"^(?:让我)?看看\s*(.+?)(?:拍过的|相关的)(?:cheki|切己)$"#,
         ] {
             if let value = firstCapture(pattern, in: text), let idol = try? quoteValue(cleanPhrase(value)) {
-                return resultFromCommand("listcheki idol=\(idol)", intent: "listcheki", confidence: 0.95, message: "识别为按 Idol 筛选 Cheki")
+                return resultFromCommand("listcheki idol=\(idol)", intent: "listcheki", confidence: 0.95, message: ChekinanaParserCopy.message("识别为按 Idol 筛选 Cheki"))
             }
         }
         return nil

@@ -1,0 +1,22 @@
+name = "chekinana-weibo-lottery-gate"
+main = "src/worker.js"
+compatibility_date = "2026-08-28"
+workers_dev = false
+
+routes = [
+  { pattern = "chekinana.top/tools/weibo-lottery/admin*", zone_name = "chekinana.top" },
+  { pattern = "chekinana.top/tools/weibo-lottery/api/*", zone_name = "chekinana.top" }
+]
+
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+run_worker_first = true
+
+[[durable_objects.bindings]]
+name = "TOKEN_STORE"
+class_name = "TokenStore"
+
+[[migrations]]
+tag = "weibo-lottery-token-store-v1"
+new_sqlite_classes = ["TokenStore"]

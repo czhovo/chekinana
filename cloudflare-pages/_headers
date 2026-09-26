@@ -11,3 +11,9 @@
   Content-Type: audio/mp4
   Cache-Control: public, max-age=31536000, immutable
   Access-Control-Allow-Origin: *
+
+/tools/weibo-lottery/
+  Cache-Control: public, max-age=300, must-revalidate
+
+/tools/weibo-lottery/index.html
+  Cache-Control: public, max-age=300, must-revalidate

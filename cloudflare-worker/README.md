@@ -6,13 +6,13 @@ This Worker provides a fixed API domain:
 https://api.chekinana.top
 ```
 
-This source tree does **not** implement `GET /api/v1/schedule`. Production
-Travel schedule queries are owned by a separately deployed Worker on the more
-specific Cloudflare route `api.chekinana.top/api/v1/schedule*`. Before deploying
-this Worker's wildcard `api.chekinana.top/*` route, verify that the more
-specific Schedule route still points to that Worker. Without it, the iOS Travel
-client cannot query schedules; this Scanner/Assistant Worker must not be treated
-as a fallback Schedule implementation.
+This source tree implements the public Travel endpoint
+`GET /api/v1/schedule` alongside the Scanner and Assistant routes. The Schedule
+implementation is kept in `src/travel-schedule.js` so every deployment of this
+Worker's `api.chekinana.top/*` route includes it; it must not exist only as an
+untracked production edit. Schedule requests do not accept the Scanner token
+and do not call RunPod. Flight lookups use the Worker secret binding
+`RAPIDAPI_KEY`, while China Railway and JR lookups use their public upstreams.
 
 Production Scanner requests never contain a RunPod Pod ID or Scanner/backend
 token. The Worker routes them through one `ScannerRuntime` Durable Object,
@@ -244,6 +244,7 @@ RUNPOD_POD_ID
 RUNPOD_TEMPLATE_ID
 RUNPOD_NETWORK_VOLUME_ID
 CHEKI_BACKEND_API_TOKEN
+RAPIDAPI_KEY
 ```
 
 `RUNPOD_TEMPORARY_GPU_TYPE_IDS` is an optional secret/configuration value. None
@@ -521,7 +522,7 @@ make the existing single Qwen call. Production must continue to provide the two
 Qwen secrets above; their values remain untracked. The independent
 `NL_RATE_LIMITER` binding and policy are unchanged.
 
-## Event candidate from a public Weibo URL or pasted text
+## Event candidate from a public Weibo/X URL or pasted text
 
 `POST /api/event/weibo-candidate` is an independent, non-scanner route. It
 does not accept a Pod ID and never proxies to RunPod. It accepts exactly one of
@@ -547,6 +548,16 @@ no Weibo request. URL input validates and fetches the public status, optional
 long text, publication time, author-avatar metadata, post-image metadata, and
 structured ticket URLs before calling the same model.
 
+For compatibility, the request and response field remains named `weiboURL`, but
+it may also contain one strict public X status URL:
+
+```json
+{
+  "version": 1,
+  "weiboURL": "https://x.com/example/status/1234567890123456789?s=46"
+}
+```
+
 Only one exact public `https://weibo.com/<user>/<ASCII-status-id>` or
 `https://www.weibo.com/<user>/<ASCII-status-id>` URL is accepted. Userinfo,
 ports, repeated or trailing slashes, query strings, and fragments are rejected.
@@ -557,8 +568,78 @@ points and the decoded status must be ASCII alphanumeric. The Worker does not
 fetch the supplied URL. It extracts the status reference and calls only fixed
 Weibo visitor, status, and optional long-text endpoints.
 
+X input accepts only
+`https://x.com/<screen-name>/status/<numeric-id>` or the `www.x.com` equivalent,
+optionally followed by the single numeric share query `?s=<value>`. Credentials,
+ports, fragments, additional query fields, non-status paths, non-numeric status
+IDs, and other X hosts are rejected before any fetch. The Worker sends only the
+validated public screen name and status ID to the fixed
+`https://api.fxtwitter.com` public-status endpoint; it sends no client headers,
+cookies, scanner tokens, credentials, or X secrets. Redirects remain manual and
+must stay on that exact HTTPS host. Response size, field types, facet/media
+counts, and text length are bounded. Author avatars and post photos are accepted
+only from `https://pbs.twimg.com`; the model cannot supply or replace them.
+If the fixed FxTwitter request fails before returning a response, or FxTwitter
+returns an explicit unavailable response, the Worker makes one constrained
+fallback request to `https://api.vxtwitter.com/status/<numeric-id>`. This sends
+only the already validated public status ID and fixed Worker headers—never
+client headers, cookies, tokens, credentials, or secrets. The fallback keeps
+redirects manual and restricted to the same exact HTTPS host and status path,
+requires bounded JSON with a matching status ID and screen name, and applies the
+same `pbs.twimg.com` avatar/photo rules. Invalid FxTwitter JSON, mismatched
+identifiers, unsafe redirects, or unsafe media never trigger the fallback.
+VxTwitter does not supply a trusted structured ticket URL in this contract, so
+`ticketURL` may remain empty rather than being inferred locally from post text.
+If both fixed community endpoints fail by transport or an explicitly retryable
+unavailable response, the Worker makes one final public X syndication request
+to the exact fixed endpoint
+`https://cdn.syndication.twimg.com/tweet-result`. Its query contains only the
+validated numeric status ID, fixed `lang=ja`, and the public embed token derived
+from that ID; no X credential, secret, or client header is used. Redirects must
+retain the exact HTTPS host, path, and generated query. The response is bounded
+to 1 MiB and must match the requested status ID and screen name. Avatar and
+photo metadata remain restricted to `pbs.twimg.com`; only structured
+`entities.urls[].expanded_url` values enter the existing trusted ticket-provider
+validation. An invalid identity, schema, redirect, or media URL fails closed and
+never causes another fallback.
+X post text has an independent 128 KiB UTF-8 limit. Text within that limit is
+sent to DeepSeek in full with `textTruncated: false`; text above it is rejected
+before any model call and is never silently truncated. Existing Weibo and pasted
+text keep their prior 30,720-byte bounded/truncating behavior.
+
+Official syndication can expose only the shortened display text for a Note
+Tweet. When `note_tweet`, an upstream truncation flag, or an explicit trailing
+ellipsis identifies that condition, the Worker sends the entire text returned
+by syndication without further truncation but sets `textTruncated: true` for
+DeepSeek. Ordinary syndication text is sent with `textTruncated: false`. The
+128 KiB UTF-8 ceiling still applies in both cases; oversized text is rejected.
+
+Source-body normalization follows the semantics of the selected field rather
+than the HTTP response MIME type. Pasted input, Weibo `text_raw`, and X `text`
+are plain text, so literal values such as `<NEON LIVE>`, `A < B > C`, and
+`&amp;` are preserved. Weibo `text` and `longTextContent` are HTML fields; only
+those fields pass through HTML-to-text conversion before the shared NFC,
+control-character, whitespace, and UTF-8 byte limits are applied.
+
+Successful candidate responses keep the version 1 JSON object unchanged and
+carry content completeness in response headers:
+
+```text
+X-Chekinana-Content-Metadata-Version: 1
+X-Chekinana-Content-Incomplete-Reasons: weibo-summary-fallback,local-truncation
+```
+
+The reasons header is omitted for complete version 1 content. Canonical reasons
+are `weibo-summary-fallback`, `local-truncation`, and
+`x-upstream-truncation`, and multiple reasons are comma-separated. Clients must
+treat a missing metadata-version header as unknown, version 1 with a missing or
+empty reasons header as complete, and version 1 with any known or unknown
+non-empty reason as incomplete. These values are response metadata only: they
+are not added to the JSON candidate, are not written to Event `note`, and do not
+cause another model call.
+
 The Event extractor reuses `NL_LLM_API_KEY`, `NL_LLM_ENDPOINT`, and
-`NL_LLM_MODEL` (default `deepseek-v4-flash`). Its dedicated system prompt treats
+`NL_LLM_MODEL` (default `deepseek-flash`). Its dedicated system prompt treats
 the source body as untrusted data, requests one exact JSON object, and forbids
 embedded instructions from changing the task. The model receives the bounded
 body, source kind, current Asia/Shanghai date, and, for URL input, the validated
@@ -571,6 +652,38 @@ merchandise and benefit prices are excluded. DeepSeek extracts `name`, `date`,
 `weiboURL`, and `ticketURL`. It never receives client authorization, cookies,
 scanner tokens, an avatar field, an image URL field, or a note field. `note`
 remains entirely user-authored and is not part of this API response.
+
+For X posts, `sourceKind` is `x` and the complete expanded post body is sent to
+DeepSeek. The prompt gives actual performance dates/times priority over Japanese
+ticket-sale and application language. In particular, dates/times associated
+with `チケット発売`, `販売`, `先行`, `先着`, `抽選`, `受付`, `応募`, `申込`,
+`締切`, or `〜まで` must not become the Event date or OPEN/START time. With
+multiple dates, DeepSeek must select the performance date and the time/place for
+that same performance. `OPEN`/`開場` map to `openTime`; `START`/`開演` map to
+`startTime`. This semantic selection remains model-owned rather than local date
+or time parsing. Structured HTTPS ticket URLs on `t-dv.com` and
+`ticketdive.com` are included in the fixed trusted-provider allowlist.
+
+X author avatars and post photos are returned through the fixed public Worker
+media endpoint rather than as direct `pbs.twimg.com` URLs. The candidate wire
+field names do not change: `candidate.avatar_url` and every X entry in
+`candidate.imageUrls` are complete URLs with this exact shape:
+
+```text
+https://api.chekinana.top/api/event/x-media?url=<percent-encoded canonical https://pbs.twimg.com/... URL>
+```
+
+The iOS client should download the returned URL as-is and must not add an
+authorization header, scanner token, cookie, or reconstruct the source URL.
+`GET /api/event/x-media` is intentionally not a general proxy: it accepts
+exactly one `url` query value, requires HTTPS on the exact `pbs.twimg.com` host
+without credentials, fragments, or a non-default port, sends no client headers
+upstream, follows at most two manual redirects that remain on the same exact
+host, and accepts only JPEG, PNG, GIF, WebP, or AVIF image responses. Upstream
+reads have an 8-second deadline and a 12 MiB maximum. Valid images are stored in
+Cloudflare Cache API with a 24-hour public cache lifetime; Cache API
+unavailability fails open only to the same restricted upstream fetch. Weibo
+avatar and image URLs are unchanged and never use this endpoint.
 
 A successful response contains exactly nine candidate strings, the two nullable
 time fields `openTime` and `startTime`, plus the stable `imageUrls: string[]`
@@ -710,6 +823,70 @@ one fixed allowlisted stage class: `event_weibo_timeout:visitor_generate`,
 never emit this diagnostic. It never contains a URL, host, query, user/status
 identifier, cookie, body, credential, or upstream/model content.
 
+## Assistant reply-language API
+
+`POST /api/nl/reply-language` asks the configured `deepseek-flash` model for
+the Assistant's reply language before typed-plan interpretation. It accepts
+text JSON only and returns `Cache-Control: no-store`.
+
+The first message omits `current_language`:
+
+```json
+{
+  "version": 1,
+  "utterance": "列出所有偶像",
+  "phase": "initial"
+}
+```
+
+A later message supplies the current reply language:
+
+```json
+{
+  "version": 1,
+  "utterance": "Please use Japanese and list all events",
+  "phase": "continuation",
+  "current_language": "en"
+}
+```
+
+Successful output is strict JSON:
+
+```json
+{
+  "version": 1,
+  "language": "ja",
+  "switch_requested": true,
+  "directive_only": false,
+  "business_utterance": "list all events"
+}
+```
+
+`language` is `zh-Hans`, `zh-Hant`, `ja`, `en`, or `undetermined`.
+On the first message, the model classifies the message language unless it
+contains an explicit target-language request. On later messages, merely using
+another language never changes the current reply language; only an explicit
+target-language request sets `switch_requested` to `true`. Repeating the
+already-current target language is still an explicit request.
+
+`directive_only` is `true` only for a pure language instruction. A combined
+language instruction must include `business_utterance`, which the Worker
+accepts only when it is a nonempty, trimmed, verbatim contiguous substring of
+the submitted `utterance`. The model cannot translate or rewrite that text.
+Without an explicit language request, both `directive_only` and
+`switch_requested` are `false`, and `business_utterance` is absent.
+
+The route rejects unknown request or response fields, images and binary input,
+control characters, over-limit bodies/text, and the concrete credential forms
+already blocked by the iOS NL privacy guard. Ordinary discussion of security
+terms is accepted. Client authorization, cookies, Scanner tokens, and unknown
+fields are never forwarded to the model. Request/body/model deadlines, HTTPS
+endpoint validation, the `NL_RATE_LIMITER` binding, fixed typed failure bodies,
+and the `NL_LLM_API_KEY`, `NL_LLM_ENDPOINT`, and `NL_LLM_MODEL` settings follow
+the typed-plan route below. The rate-limit key is namespaced for this route.
+There is one model request and no automatic retry. Any failure remains a typed
+non-200 response so the client can use its local fallback.
+
 ## Natural-language typed-plan API
 
 `POST /api/nl/interpret` is an independent, non-scanner route. It is handled
@@ -745,7 +922,7 @@ the user already supplied:
 }
 ```
 
-When `draft` is present, the model may return a fixed reject or exactly one
+When a partial `draft` with nonempty `missing` is present, the model may return a fixed reject or exactly one
 operation/draft with the same intent. Existing draft slots must be preserved
 unchanged, and only slots corresponding to the current `missing` values may be
 added. Switching intent, returning multiple operations, dropping or rewriting
@@ -784,7 +961,8 @@ JSON/schema/provenance output and is independent of utterance content.
 The strict registry includes the existing Idol, Event, and Cheki operations plus
 `navigate`, `open_scan`, `deleteidol`, `favoriteidol`, `editevent`,
 `deleteevent`, `editcheki`, `deletecheki`, and the generic record operations
-`listrecord`, `showrecord`, `addrecord`, `editrecord`, and `deleterecord`.
+`listrecord`, `showrecord`, `addrecord`, `editrecord`, `deleterecord`, and
+read-only `statscheki`.
 Targets, Idol/Event references, scan candidate references, and temporary-result
 references are human-readable user text for App-side resolution. Model-created
 UUIDs, object/model/file/media identifiers, URIs, and paths are rejected. The
@@ -815,6 +993,54 @@ positive-integer `idx`, Boolean `favorite`, and `size: mini|wide`.
 `listrecord` may omit `record_type`, but must then omit those three Cheki-only
 fields. Shame and Douga reject `idx`, `favorite`, and `size`.
 
+Cheki `addrecord` additionally accepts `count: 1..100` as an increment;
+Cheki `editrecord` accepts `count: 0..100` as the simple record's replacement
+total, with zero deleting it. These must be JSON integers, never strings or
+Booleans. Count is forbidden on other types, list/show/delete, and
+`clear_fields`. “切了小A3张” means an `addrecord` increment, never replacing
+an existing total. The current utterance must supply the quantity. Partial
+undo/remove-N requests are rejected rather than converted to whole-record
+deletions or assumed remaining totals; explicit ordinal targets such as
+“第3张” and “3枚目” remain normal target references.
+
+Statistics uses `statscheki {idol?,event?,date_from?,date_to?}`. Range endpoints
+must be valid, paired, and ordered, and include both endpoint days according to
+the Cheki record date. Without a range, all records are in scope. A partial
+range can use the existing `missing: ["date"]` clarification. The Worker emits
+filters only. The App counts real local Cheki media and simple count records;
+the model never receives the library or invents its quantities.
+
+The optional bounded request `context` has only `last_target: {kind,name?}`
+and/or `last_statistics: {idol?,event?,date_from?,date_to?}`. Target kind is
+`idol`, `event`, `cheki` (media), or `cheki_record` (simple count record); name
+is an optional human-readable label. No local ID or full history is accepted.
+The response may use `slots.context_ref: last_target|last_statistics`:
+
+- `last_target` requires a matching kind for show/edit/delete (and Idol
+  favorite/unfavorite) and excludes an
+  explicit `target`. It also allows Idol statistics or a Cheki `addrecord`
+  increment bound to the previous Idol/simple record. Bound Idol additions omit
+  `idols`. Additions bound to a simple record accept exactly `record_type`,
+  explicit `count`, and `context_ref`; its existing local identity is preserved.
+  Other metadata cannot change through that increment.
+- `last_statistics` is read-only and only available on `statscheki`. The model
+  must return the complete final filter set, keeping unchanged filters,
+  replacing requested filters, and omitting explicitly cleared ones. New date
+  wording replaces both old endpoints; the client does not merge omissions.
+
+The App validates and resolves the actual local target identity. Context is
+never a quantity source or permission to reuse a value as a new write field.
+
+For an explicit correction to an unconfirmed preview, the App may send one
+complete operation as `draft` with `missing: []`. The response is a full
+replacement with the same intent. Existing unchanged slots may be retained;
+changed/new values require evidence in the current utterance. An unchanged
+count may be retained from this draft; changed count must be explicit now.
+Prior fields cannot silently disappear (normal edit `clear_fields` still
+apply). The App validates the replacement, invalidates the old confirmation,
+and prepares one new preview. New operations/queries omit that correction
+draft. Confirmation codes and local IDs never cross this endpoint.
+
 Patch operations use omission for no change and an exact unique `clear_fields`
 array for explicit clearing. Sentinel strings, `null`, empty strings, unknown
 clear names, duplicate clears, and assigning and clearing the same field are
@@ -831,6 +1057,15 @@ editrecord shame/douga: idols,event,date,note
 `favorite` is assigned as a JSON Boolean and is never cleared. Destructive
 intents remain typed plans; the Worker never claims execution, and the App must
 perform confirmation before mutation.
+
+Event creation accepts `addevent {name?,date?,url?,city?,livehouse?,price?,
+ticket_url?,note?}`. Optional metadata uses the same types, length bounds, and
+current-user provenance checks as Event editing: city 200 characters, livehouse
+and price 300, note 500, and a valid HTTP(S) ticket URL up to 1,000 characters.
+The model preserves explicitly provided values and never invents city/venue
+from a name or URL. Its required-field clarification remains name/date only;
+the App handles any additional candidate-completion questions locally. Complete
+pending-draft corrections preserve unchanged creation metadata.
 
 Successful responses have exactly one of these shapes:
 
@@ -881,9 +1116,12 @@ timeout, and upstream failures. It never forwards the model's prose or upstream
 error body. The request schema has no image, local-database, confirmation
 history, cookie, or secret field, and unknown fields are rejected.
 
-Model-produced dates must be backed by an explicit numeric date in the current
-utterance/validated draft or must exactly match deterministic Chinese
-today/tomorrow/day-after calculations from `localDate`. `user` and `size` enum
+Model-produced dates must be backed by an explicit numeric/calendar date in the
+current utterance, the permitted draft/filter, or deterministic relative dates
+from `localDate`. Simplified/Traditional Chinese, Japanese, and English support
+today/yesterday, this/last month and year, and Monday–Sunday weeks. English
+month names are accepted; omitted years use the client's current local year,
+and an uncertain cross-year range is not guessed. `user` and `size` enum
 values require a narrow canonical or Chinese phrase mapping, and
 `temporary: "all"` requires an explicit all-selection/anaphora phrase. Values
 without that evidence are rejected instead of being treated as model defaults.
@@ -896,7 +1134,7 @@ npx wrangler secret put NL_LLM_API_KEY
 
 Configured non-secret Worker variables:
 
-- `NL_LLM_MODEL` (default: `deepseek-v4-flash`)
+- `NL_LLM_MODEL` (default: `deepseek-flash`)
 - `NL_LLM_ENDPOINT` (default: the DeepSeek OpenAI-compatible chat-completions
   endpoint; custom endpoints must use HTTPS)
 

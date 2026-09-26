@@ -1,14 +1,223 @@
 import Foundation
 import CoreData
 import SwiftData
+import SQLite3
+import CryptoKit
 
-enum ChekiSize: String, Codable, CaseIterable, Identifiable, Sendable {
-    case mini
-    case wide
-    case other = "else"
+struct ChekiSize: RawRepresentable, Codable, Hashable, Identifiable, Sendable {
+    static let mini = ChekiSize(uncheckedRawValue: "mini")
+    static let wide = ChekiSize(uncheckedRawValue: "wide")
+    static let builtInCases: [ChekiSize] = [.mini, .wide]
 
-    var id: String {
-        rawValue
+    let rawValue: String
+
+    var id: String { rawValue }
+
+    init?(rawValue: String) {
+        if rawValue == Self.mini.rawValue || rawValue == Self.wide.rawValue {
+            self.rawValue = rawValue
+            return
+        }
+        guard Self.parseCustomRawValue(rawValue) != nil else { return nil }
+        self.rawValue = rawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        guard let size = ChekiSize(rawValue: value) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unsupported Cheki size: \(value)"
+            )
+        }
+        self = size
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    static func custom(
+        id: UUID,
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) -> ChekiSize {
+        precondition(
+            ChekinanaCustomChekiSizePolicy.isValidPixelDimensions(
+                width: pixelWidth,
+                height: pixelHeight
+            )
+        )
+        return ChekiSize(uncheckedRawValue:
+            "custom:\(id.uuidString.lowercased()):\(pixelWidth)x\(pixelHeight)"
+        )
+    }
+
+    var customID: UUID? { Self.parseCustomRawValue(rawValue)?.id }
+
+    var customPixelDimensions: (width: Int, height: Int)? {
+        guard let parsed = Self.parseCustomRawValue(rawValue) else { return nil }
+        return (parsed.width, parsed.height)
+    }
+
+    private init(uncheckedRawValue: String) {
+        rawValue = uncheckedRawValue
+    }
+
+    private static func parseCustomRawValue(
+        _ value: String
+    ) -> (id: UUID, width: Int, height: Int)? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0] == "custom",
+              let id = UUID(uuidString: String(parts[1])) else { return nil }
+        let dimensions = parts[2].split(separator: "x", omittingEmptySubsequences: false)
+        guard dimensions.count == 2,
+              let width = Int(dimensions[0]), width > 0,
+              let height = Int(dimensions[1]), height > 0,
+              ChekinanaCustomChekiSizePolicy.isValidPixelDimensions(
+                width: width,
+                height: height
+              ) else { return nil }
+        return (id, width, height)
+    }
+}
+
+enum ChekinanaCustomChekiSizePolicy {
+    static let shortEdge = 1_200
+    static let maximumLongEdge = 8_192
+    static let maximumPixelCount = shortEdge * maximumLongEdge
+
+    static func isValidPixelDimensions(width: Int, height: Int) -> Bool {
+        guard min(width, height) == shortEdge,
+              max(width, height) <= maximumLongEdge else { return false }
+        let pixelCount = width.multipliedReportingOverflow(by: height)
+        return !pixelCount.overflow && pixelCount.partialValue <= maximumPixelCount
+    }
+
+    static func pixelDimensions(
+        widthRatio: Double,
+        heightRatio: Double
+    ) -> (width: Int, height: Int)? {
+        guard widthRatio.isFinite, heightRatio.isFinite,
+              widthRatio > 0, heightRatio > 0 else { return nil }
+        let scale = Double(shortEdge) / min(widthRatio, heightRatio)
+        let width = (widthRatio * scale).rounded()
+        let height = (heightRatio * scale).rounded()
+        guard width.isFinite, height.isFinite,
+              width >= 1, height >= 1,
+              width <= Double(maximumLongEdge),
+              height <= Double(maximumLongEdge) else { return nil }
+        let dimensions = (width: Int(width), height: Int(height))
+        guard isValidPixelDimensions(
+            width: dimensions.width,
+            height: dimensions.height
+        ) else { return nil }
+        return dimensions
+    }
+}
+
+@Model
+final class CustomChekiSize {
+    @Attribute(.unique) var id: UUID
+    var name: String
+    var widthRatio: Double
+    var heightRatio: Double
+    var pixelWidth: Int
+    var pixelHeight: Int
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        widthRatio: Double,
+        heightRatio: Double,
+        createdAt: Date = Date()
+    ) {
+        guard let dimensions = ChekinanaCustomChekiSizePolicy.pixelDimensions(
+            widthRatio: widthRatio,
+            heightRatio: heightRatio
+        ) else {
+            preconditionFailure("Custom Cheki size ratios must be positive finite values")
+        }
+        self.id = id
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.widthRatio = widthRatio
+        self.heightRatio = heightRatio
+        pixelWidth = dimensions.width
+        pixelHeight = dimensions.height
+        self.createdAt = createdAt
+    }
+
+    var size: ChekiSize {
+        .custom(id: id, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+    }
+}
+
+struct ChekinanaChekiSizeOption: Identifiable, Hashable {
+    let size: ChekiSize
+    let title: String
+
+    var id: String { size.rawValue }
+}
+
+enum ChekinanaChekiSizeCatalog {
+    static func options(customSizes: [CustomChekiSize]) -> [ChekinanaChekiSizeOption] {
+        let builtIns = ChekiSize.builtInCases.map {
+            ChekinanaChekiSizeOption(size: $0, title: $0.rawValue)
+        }
+        let custom = customSizes
+            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .map { ChekinanaChekiSizeOption(size: $0.size, title: $0.name) }
+        return builtIns + custom
+    }
+
+    static func title(for size: ChekiSize, customSizes: [CustomChekiSize]) -> String {
+        customSizes.first { $0.id == size.customID }?.name ?? size.rawValue
+    }
+}
+
+enum ChekinanaEventSource: String, Codable, Sendable {
+    case weibo
+    case x
+
+    static func infer(from url: URL?) -> ChekinanaEventSource? {
+        guard let url,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.user == nil, url.password == nil,
+              let host = url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        else { return nil }
+        if host == "weibo.com" || host.hasSuffix(".weibo.com")
+            || host == "weibo.cn" || host.hasSuffix(".weibo.cn") {
+            return .weibo
+        }
+        if host == "x.com" || host == "www.x.com" { return .x }
+        return nil
+    }
+
+    static func validatedURL(
+        from rawValue: String
+    ) -> (url: URL, source: ChekinanaEventSource)? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value == rawValue,
+              value.utf8.count <= 2_048,
+              let url = URL(string: value) else { return nil }
+        let source: ChekinanaEventSource
+        if ChekinanaEventCandidateValidator.isPublicWeiboStatusURL(value) {
+            source = .weibo
+        } else if ChekinanaEventCandidateValidator.isPublicXStatusURL(value) {
+            source = .x
+        } else {
+            return nil
+        }
+        return (url, source)
     }
 }
 
@@ -228,6 +437,27 @@ enum ChekinanaChekiEventSelectionPolicy {
             return ChekinanaEventOrdering.comesBefore(
                 lhs,
                 rhs,
+                startByEventID: startByEventID,
+                dateAscending: true
+            )
+        }
+    }
+
+    static func eventsOnExactDate(
+        _ events: [Event],
+        schedules: [EventSchedule] = [],
+        for recordDate: Date?
+    ) -> [Event] {
+        guard let recordDay = recordDate.flatMap(ChekinanaDateOnly.canonicalized) else {
+            return []
+        }
+        let startByEventID = ChekinanaEventOrdering.scheduleStartTimes(schedules)
+        return events.filter {
+            $0.date.flatMap(ChekinanaDateOnly.canonicalized) == recordDay
+        }.sorted {
+            ChekinanaEventOrdering.comesBefore(
+                $0,
+                $1,
                 startByEventID: startByEventID,
                 dateAscending: true
             )
@@ -567,12 +797,34 @@ enum ChekinanaTravelSegmentPersistence {
         operatorIconRef: String?,
         previousIconRef: String?,
         in modelContext: ModelContext,
-        saveContext: (ModelContext) throws -> Void = { try $0.save() }
+        saveContext: (ModelContext) throws -> Void = { try $0.save() },
+        validateManagedFiles: Bool = false,
+        expectedGeneration: UUID? = nil,
+        mediaOwnerID: UUID? = nil,
+        mediaOwnerReferences: [String] = []
     ) throws -> TravelSegment {
         try ChekinanaTravelSegmentValidator.validate(fields)
         var deletionRefs: [String] = []
-        return try ChekinanaPersistenceMutationCoordinator.withLock {
+        return try ChekinanaLibraryMutationProtocol.withExclusiveOperationSync {
+            try ChekinanaLibraryMutationPreflight.requireImportConvergedExclusively(in: modelContext)
+            return try ChekinanaPersistenceMutationCoordinator.withLock {
             do {
+                if let mediaOwnerID, let expectedGeneration {
+                    try ChekinanaEventTravelMediaOwnership.validateSaveAuthorization(
+                        ownerID: mediaOwnerID,
+                        expectedGeneration: expectedGeneration,
+                        ownedReferences: mediaOwnerReferences,
+                        in: modelContext
+                    )
+                } else if validateManagedFiles {
+                    throw ChekinanaEventTravelMediaOwnership
+                        .SaveAuthorizationError.ownerUnavailable
+                }
+                if validateManagedFiles {
+                    try ChekinanaEventMediaJournal.validateManagedFiles(
+                        [operatorIconRef].compactMap { $0 }
+                    )
+                }
                 let live: TravelSegment
                 if inserting {
                     let existing = try modelContext.fetch(
@@ -628,15 +880,30 @@ enum ChekinanaTravelSegmentPersistence {
                     deletionRefs = [previousIconRef]
                     ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
                 }
+                if let mediaOwnerID, let expectedGeneration {
+                    try ChekinanaEventTravelMediaOwnership.validateSaveAuthorization(
+                        ownerID: mediaOwnerID,
+                        expectedGeneration: expectedGeneration,
+                        ownedReferences: mediaOwnerReferences,
+                        in: modelContext
+                    )
+                } else if validateManagedFiles {
+                    throw ChekinanaEventTravelMediaOwnership
+                        .SaveAuthorizationError.ownerUnavailable
+                }
                 try saveContext(modelContext)
                 ChekinanaEventMediaJournal.clearPending(
                     [operatorIconRef].compactMap { $0 }
                 )
+                if let mediaOwnerID {
+                    ChekinanaEventTravelMediaOwnership.release(ownerID: mediaOwnerID)
+                }
                 return live
             } catch {
                 modelContext.rollback()
                 ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
                 throw error
+            }
             }
         }
     }
@@ -647,27 +914,30 @@ enum ChekinanaTravelSegmentPersistence {
         saveContext: (ModelContext) throws -> Void = { try $0.save() }
     ) throws {
         var deletionRefs: [String] = []
-        try ChekinanaPersistenceMutationCoordinator.withLock {
-            do {
-                let matches = try modelContext.fetch(FetchDescriptor<TravelSegment>())
-                    .filter { $0.id == segment.id }
-                guard matches.count == 1 else {
-                    throw PersistenceError.changedOrMissing
+        try ChekinanaLibraryMutationProtocol.withExclusiveOperationSync {
+            try ChekinanaLibraryMutationPreflight.requireImportConvergedExclusively(in: modelContext)
+            try ChekinanaPersistenceMutationCoordinator.withLock {
+                do {
+                    let matches = try modelContext.fetch(FetchDescriptor<TravelSegment>())
+                        .filter { $0.id == segment.id }
+                    guard matches.count == 1 else {
+                        throw PersistenceError.changedOrMissing
+                    }
+                    let live = matches[0]
+                    deletionRefs = live.operatorIconRef.flatMap { reference in
+                        ChekinanaEventAvatarStore.isManaged(reference) ? reference : nil
+                    }.map { [$0] } ?? []
+                    ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
+                    modelContext.delete(live)
+                    try saveContext(modelContext)
+                } catch {
+                    modelContext.rollback()
+                    ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
+                    throw error
                 }
-                let live = matches[0]
-                deletionRefs = live.operatorIconRef.flatMap { reference in
-                    ChekinanaEventAvatarStore.isManaged(reference) ? reference : nil
-                }.map { [$0] } ?? []
-                ChekinanaEventMediaJournal.queueDeletion(deletionRefs)
-                modelContext.delete(live)
-                try saveContext(modelContext)
-            } catch {
-                modelContext.rollback()
-                ChekinanaEventMediaJournal.cancelDeletion(deletionRefs)
-                throw error
             }
         }
-        try? ChekinanaEventMediaJournal.recover(modelContext: modelContext)
+        ChekinanaEventMediaJournal.scheduleSafeCleanup(in: modelContext)
     }
 }
 
@@ -712,7 +982,153 @@ enum ChekinanaEventDateState {
         calendar: Calendar = .current
     ) -> Date? {
         guard hasDate else { return nil }
-        return ChekinanaDateOnly.canonicalDate(from: selection, displayedIn: calendar)
+        return ChekinanaPersistedContentDatePolicy.canonicalDate(
+            from: selection,
+            displayedIn: calendar
+        )
+    }
+}
+
+/// Frozen V4-V12 media graph. Historical schemas must reference these carrier
+/// types so the active Idol/Event models can drop their old SwiftData
+/// relationships without changing a shipped model checksum.
+enum ChekinanaLegacyMediaSchema {
+    @Model final class Idol {
+        @Attribute(.unique) var id: UUID
+        var sourceId: String?
+        var name: String
+        var group: String?
+        var color: String?
+        var birthday: String?
+        var avatarImageRef: String?
+        var isFavorite: Bool = false
+        var sortOrder: Double?
+        var note: String
+        @Relationship(deleteRule: .nullify, inverse: \Cheki.idols) var chekis: [Cheki]
+        @Relationship(deleteRule: .nullify, inverse: \Shame.idols) var shames: [Shame]
+        @Relationship(deleteRule: .nullify, inverse: \Douga.idols) var dougas: [Douga]
+        var createdAt: Date
+        var updatedAt: Date
+        var verification: String?
+        var bio: String?
+        var pattern: [Float]?
+        var patterns: [[Float]] = []
+
+        init(id: UUID = UUID(), name: String) {
+            self.id = id
+            sourceId = nil
+            self.name = name
+            group = nil
+            color = nil
+            birthday = nil
+            avatarImageRef = nil
+            sortOrder = nil
+            note = ""
+            chekis = []
+            shames = []
+            dougas = []
+            createdAt = Date()
+            updatedAt = Date()
+            verification = nil
+            bio = nil
+            pattern = nil
+        }
+    }
+
+    @Model final class Event {
+        @Attribute(.unique) var id: UUID
+        var name: String
+        var date: Date?
+        var city: String?
+        var livehouse: String?
+        @Attribute(originalName: "venue") var legacyVenue: String?
+        var avatarImageRef: String?
+        var price: String?
+        var weiboURL: URL?
+        var ticketURL: URL?
+        var note: String
+        @Relationship(deleteRule: .nullify, inverse: \Cheki.event) var chekis: [Cheki]
+        var createdAt: Date
+        var updatedAt: Date
+
+        init(id: UUID = UUID(), name: String) {
+            self.id = id
+            self.name = name
+            date = nil
+            city = nil
+            livehouse = nil
+            legacyVenue = nil
+            avatarImageRef = nil
+            price = nil
+            weiboURL = nil
+            ticketURL = nil
+            note = ""
+            chekis = []
+            createdAt = Date()
+            updatedAt = Date()
+        }
+    }
+
+    @Model final class Cheki {
+        @Attribute(.unique) var id: UUID
+        var idols: [Idol]
+        var event: Event?
+        @Attribute(originalName: "eventDate") var date: Date?
+        var idx: Int?
+        var userAppears: Bool?
+        var sizeRawValue: String?
+        var imageRef: String?
+        var isFavorite: Bool = false
+        var hasPostedToSNS: Bool = false
+        var note: String
+        var createdAt: Date
+        var updatedAt: Date
+
+        init(id: UUID = UUID()) {
+            self.id = id
+            idols = []
+            event = nil
+            date = nil
+            idx = nil
+            userAppears = nil
+            sizeRawValue = nil
+            imageRef = nil
+            note = ""
+            createdAt = Date()
+            updatedAt = Date()
+        }
+    }
+
+    @Model final class Shame {
+        @Attribute(.unique) var id: UUID
+        var imageRef: String?
+        var idols: [Idol]
+        var date: Date?
+        var note: String
+
+        init(id: UUID = UUID()) {
+            self.id = id
+            imageRef = nil
+            idols = []
+            date = nil
+            note = ""
+        }
+    }
+
+    @Model final class Douga {
+        @Attribute(.unique) var id: UUID
+        var videoRef: String?
+        var idols: [Idol]
+        var date: Date?
+        var note: String
+
+        init(id: UUID = UUID()) {
+            self.id = id
+            videoRef = nil
+            idols = []
+            date = nil
+            note = ""
+        }
     }
 }
 
@@ -732,9 +1148,6 @@ final class Idol {
     // reorders Idols, legacy rows retain deterministic creation order.
     var sortOrder: Double?
     var note: String
-    @Relationship(deleteRule: .nullify, inverse: \Cheki.idols) var chekis: [Cheki]
-    @Relationship(deleteRule: .nullify, inverse: \Shame.idols) var shames: [Shame]
-    @Relationship(deleteRule: .nullify, inverse: \Douga.idols) var dougas: [Douga]
     var createdAt: Date
     var updatedAt: Date
     var verification: String?
@@ -756,9 +1169,6 @@ final class Idol {
         isFavorite: Bool = false,
         sortOrder: Double? = nil,
         note: String = "",
-        chekis: [Cheki] = [],
-        shames: [Shame] = [],
-        dougas: [Douga] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         verification: String? = nil,
@@ -775,9 +1185,6 @@ final class Idol {
         self.isFavorite = isFavorite
         self.sortOrder = sortOrder
         self.note = note
-        self.chekis = chekis
-        self.shames = shames
-        self.dougas = dougas
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.verification = verification
@@ -796,6 +1203,142 @@ final class Idol {
         !recognitionPatterns.isEmpty
     }
 
+}
+
+/// Durable provenance for the current Idol avatar. Absence of this sidecar is
+/// the compatibility state for rows created before avatar intent was stored;
+/// it must never be interpreted as an explicit removal or as permission to
+/// fetch a catalogue replacement.
+enum ChekinanaIdolAvatarSource: String, Codable, CaseIterable, Sendable {
+    case legacyUnknown
+    case none
+    case catalogue
+    case custom
+}
+
+enum ChekinanaIdolAvatarIntent: String, Codable, CaseIterable, Sendable {
+    case unspecified
+    case automatic
+    case userSelected
+    case explicitlyRemoved
+}
+
+struct ChekinanaIdolAvatarStateSnapshot: Equatable, Sendable {
+    static let compatibilityDefault = Self(
+        source: .legacyUnknown,
+        intent: .unspecified,
+        revision: nil
+    )
+
+    let source: ChekinanaIdolAvatarSource
+    let intent: ChekinanaIdolAvatarIntent
+    let revision: UUID?
+
+    var allowsCatalogueRepair: Bool {
+        source == .catalogue
+            && (intent == .automatic || intent == .userSelected)
+    }
+
+    func isValid(avatarImageRef: String?) -> Bool {
+        let hasReference = avatarImageRef?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty == false
+        switch (source, intent) {
+        case (.legacyUnknown, .unspecified):
+            return true
+        case (.none, .explicitlyRemoved):
+            return !hasReference
+        case (.catalogue, .automatic), (.catalogue, .userSelected),
+                (.custom, .userSelected):
+            return hasReference
+        default:
+            return false
+        }
+    }
+}
+
+@Model
+final class IdolAvatarState {
+    @Attribute(.unique) var idolID: UUID
+    var sourceRawValue: String
+    var intentRawValue: String
+    /// Changes on every avatar transition and import replacement so an async
+    /// repair cannot publish against a logically replaced same-UUID row.
+    var revision: UUID
+
+    init(
+        idolID: UUID,
+        source: ChekinanaIdolAvatarSource,
+        intent: ChekinanaIdolAvatarIntent,
+        revision: UUID = UUID()
+    ) {
+        self.idolID = idolID
+        sourceRawValue = source.rawValue
+        intentRawValue = intent.rawValue
+        self.revision = revision
+    }
+
+    var snapshot: ChekinanaIdolAvatarStateSnapshot {
+        guard let source = ChekinanaIdolAvatarSource(rawValue: sourceRawValue),
+              let intent = ChekinanaIdolAvatarIntent(rawValue: intentRawValue) else {
+            return .compatibilityDefault
+        }
+        return .init(source: source, intent: intent, revision: revision)
+    }
+}
+
+enum ChekinanaIdolAvatarStatePersistence {
+    static func state(
+        for idolID: UUID,
+        in modelContext: ModelContext
+    ) throws -> IdolAvatarState? {
+        var descriptor = FetchDescriptor<IdolAvatarState>(
+            predicate: #Predicate { $0.idolID == idolID }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    static func snapshot(
+        for idolID: UUID,
+        in modelContext: ModelContext
+    ) throws -> ChekinanaIdolAvatarStateSnapshot {
+        try state(for: idolID, in: modelContext)?.snapshot
+            ?? .compatibilityDefault
+    }
+
+    @discardableResult
+    static func record(
+        idolID: UUID,
+        source: ChekinanaIdolAvatarSource,
+        intent: ChekinanaIdolAvatarIntent,
+        in modelContext: ModelContext
+    ) throws -> IdolAvatarState {
+        let value: IdolAvatarState
+        if let existing = try state(for: idolID, in: modelContext) {
+            value = existing
+            value.sourceRawValue = source.rawValue
+            value.intentRawValue = intent.rawValue
+            value.revision = UUID()
+        } else {
+            value = IdolAvatarState(
+                idolID: idolID,
+                source: source,
+                intent: intent
+            )
+            modelContext.insert(value)
+        }
+        return value
+    }
+
+    static func delete(
+        for idolID: UUID,
+        in modelContext: ModelContext
+    ) throws {
+        if let value = try state(for: idolID, in: modelContext) {
+            modelContext.delete(value)
+        }
+    }
 }
 
 /// Versioned metadata that distinguishes catalogue prototypes from custom
@@ -823,6 +1366,58 @@ final class IdolPatternState {
 }
 
 enum ChekinanaIdolOrdering {
+    struct Context: Equatable, Sendable {
+        let chekiCountsByIdolID: [UUID: Int]
+
+        init(chekiCountsByIdolID: [UUID: Int] = [:]) {
+            self.chekiCountsByIdolID = chekiCountsByIdolID
+        }
+
+        func ordered(_ idols: [Idol]) -> [Idol] {
+            ChekinanaIdolOrdering.orderedForList(
+                idols,
+                chekiCountsByIdolID: chekiCountsByIdolID
+            )
+        }
+
+        func orderedUnique(_ idols: [Idol]) -> [Idol] {
+            var uniqueByID: [UUID: Idol] = [:]
+            for idol in idols where uniqueByID[idol.id] == nil {
+                uniqueByID[idol.id] = idol
+            }
+            return ordered(Array(uniqueByID.values))
+        }
+
+        /// Orders exact Idol combinations without depending on relationship
+        /// storage order. `nil` means both values describe the same set.
+        func combinationPrecedes(_ lhs: [Idol], _ rhs: [Idol]) -> Bool? {
+            let left = orderedUnique(lhs)
+            let right = orderedUnique(rhs)
+            switch (left.first, right.first) {
+            case (nil, nil):
+                return nil
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (.some, .some):
+                break
+            }
+
+            let all = orderedUnique(left + right)
+            let rankByID = Dictionary(
+                uniqueKeysWithValues: all.enumerated().map { ($0.element.id, $0.offset) }
+            )
+            for (leftIdol, rightIdol) in zip(left, right) {
+                guard leftIdol.id != rightIdol.id else { continue }
+                return rankByID[leftIdol.id, default: .max]
+                    < rankByID[rightIdol.id, default: .max]
+            }
+            if left.count != right.count { return left.count < right.count }
+            return nil
+        }
+    }
+
     static func ordered(_ idols: [Idol]) -> [Idol] {
         idols.sorted { lhs, rhs in
             if lhs.isFavorite != rhs.isFavorite { return lhs.isFavorite }
@@ -1011,9 +1606,9 @@ final class Event {
     var avatarImageRef: String?
     var price: String?
     var weiboURL: URL?
+    var sourceRawValue: String?
     var ticketURL: URL?
     var note: String
-    @Relationship(deleteRule: .nullify, inverse: \Cheki.event) var chekis: [Cheki]
     var createdAt: Date
     var updatedAt: Date
 
@@ -1026,9 +1621,9 @@ final class Event {
         avatarImageRef: String? = nil,
         price: String? = nil,
         weiboURL: URL? = nil,
+        source: ChekinanaEventSource? = nil,
         ticketURL: URL? = nil,
         note: String = "",
-        chekis: [Cheki] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -1041,9 +1636,9 @@ final class Event {
         self.avatarImageRef = avatarImageRef
         self.price = price
         self.weiboURL = weiboURL
+        self.sourceRawValue = source?.rawValue
         self.ticketURL = ticketURL
         self.note = note
-        self.chekis = chekis
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -1053,6 +1648,11 @@ final class Event {
         if let current, !current.isEmpty { return current }
         let legacy = legacyVenue?.trimmingCharacters(in: .whitespacesAndNewlines)
         return (legacy?.isEmpty == false) ? legacy : nil
+    }
+
+    var source: ChekinanaEventSource? {
+        get { sourceRawValue.flatMap(ChekinanaEventSource.init(rawValue:)) }
+        set { sourceRawValue = newValue?.rawValue }
     }
 }
 
@@ -1437,13 +2037,13 @@ enum ChekinanaMediaEventLinkStore {
     ) throws {
         switch kind {
         case .shame:
-            guard try modelContext.fetch(FetchDescriptor<Shame>())
-                .contains(where: { $0.id == mediaID }) else {
+            guard try modelContext.fetch(FetchDescriptor<MediaItem>())
+                .contains(where: { $0.id == mediaID && $0.kind == .shame }) else {
                 throw ChekinanaModelContextResolver.ResolutionError.missingShame
             }
         case .douga:
-            guard try modelContext.fetch(FetchDescriptor<Douga>())
-                .contains(where: { $0.id == mediaID }) else {
+            guard try modelContext.fetch(FetchDescriptor<MediaItem>())
+                .contains(where: { $0.id == mediaID && $0.kind == .douga }) else {
                 throw ChekinanaModelContextResolver.ResolutionError.missingDouga
             }
         }
@@ -1542,13 +2142,13 @@ enum ChekinanaMediaShotTypeStore {
     ) throws {
         switch kind {
         case .shame:
-            guard try modelContext.fetch(FetchDescriptor<Shame>())
-                .contains(where: { $0.id == mediaID }) else {
+            guard try modelContext.fetch(FetchDescriptor<MediaItem>())
+                .contains(where: { $0.id == mediaID && $0.kind == .shame }) else {
                 throw ChekinanaModelContextResolver.ResolutionError.missingShame
             }
         case .douga:
-            guard try modelContext.fetch(FetchDescriptor<Douga>())
-                .contains(where: { $0.id == mediaID }) else {
+            guard try modelContext.fetch(FetchDescriptor<MediaItem>())
+                .contains(where: { $0.id == mediaID && $0.kind == .douga }) else {
                 throw ChekinanaModelContextResolver.ResolutionError.missingDouga
             }
         }
@@ -1647,64 +2247,771 @@ enum ChekinanaCalendarGroupOrderStore {
     }
 }
 
+enum MediaItemKind: String, Codable, CaseIterable, Sendable {
+    case cheki
+    case shame
+    case douga
+}
+
+enum MemoryAttachmentKind: String, Codable, CaseIterable, Sendable {
+    case image
+    case video
+}
+
+enum ChekinanaMemoryValidationError: LocalizedError, Equatable {
+    case empty
+    case invalidDate
+    case invalidAttachment
+
+    var errorDescription: String? {
+        switch self {
+        case .empty: ChekinanaL10n.text("product.memory.validation.empty", fallback: "Memory must contain at least one value.")
+        case .invalidDate: ChekinanaL10n.text("product.memory.validation.invalid_date", fallback: "The Memory date is outside the supported range.")
+        case .invalidAttachment: ChekinanaL10n.text("product.memory.validation.invalid_attachment", fallback: "A Memory attachment is invalid.")
+        }
+    }
+}
+
+enum ChekinanaMemoryPolicy {
+    static func meaningfulText(_ value: String?) -> String? {
+        guard let value,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    static func normalizedTitle(_ value: String?) -> String? {
+        guard let value,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    static func isValid(
+        title: String?,
+        bodyText: String?,
+        date: Date?,
+        eventID: UUID?,
+        idolIDs: [UUID],
+        attachmentCount: Int
+    ) -> Bool {
+        normalizedTitle(title) != nil
+            || meaningfulText(bodyText) != nil
+            || date != nil
+            || eventID != nil
+            || !idolIDs.isEmpty
+            || attachmentCount > 0
+    }
+
+    static func validatedDate(_ value: Date?) throws -> Date? {
+        try ChekinanaPersistedContentDatePolicy.validatedCanonical(value)
+    }
+
+    static func validateContent(
+        title: String?,
+        bodyText: String?,
+        date: Date?,
+        eventID: UUID?,
+        idolIDs: [UUID],
+        attachmentCount: Int
+    ) throws -> Date? {
+        guard isValid(
+            title: title,
+            bodyText: bodyText,
+            date: date,
+            eventID: eventID,
+            idolIDs: idolIDs,
+            attachmentCount: attachmentCount
+        ) else { throw ChekinanaMemoryValidationError.empty }
+        return try validatedDate(date)
+    }
+}
+
+struct ChekinanaMemoryIdolRelationshipDraft: Equatable {
+    /// The complete relationship snapshot at editor initialization, including hidden Idols.
+    let initialIDs: Set<UUID>
+    private(set) var explicitlyAddedIDs = Set<UUID>()
+    private(set) var explicitlyRemovedIDs = Set<UUID>()
+
+    init(initialIDs: some Sequence<UUID>) {
+        self.initialIDs = Set(initialIDs)
+    }
+
+    func selectedIDs(
+        currentPersistedIDs: some Sequence<UUID>
+    ) -> Set<UUID> {
+        var result = maintenanceAdjustedInitialIDs(
+            currentPersistedIDs: currentPersistedIDs
+        )
+        result.formUnion(explicitlyAddedIDs)
+        result.subtract(explicitlyRemovedIDs)
+        return result
+    }
+
+    func selectedVisibleIDs(
+        currentPersistedIDs: some Sequence<UUID>,
+        visibleIDs: Set<UUID>
+    ) -> Set<UUID> {
+        selectedIDs(currentPersistedIDs: currentPersistedIDs)
+            .intersection(visibleIDs)
+    }
+
+    mutating func recordVisibleSelection(
+        _ selectedVisibleIDs: Set<UUID>,
+        visibleIDs: Set<UUID>,
+        currentPersistedIDs: some Sequence<UUID>
+    ) {
+        let previousVisibleIDs = self.selectedVisibleIDs(
+            currentPersistedIDs: currentPersistedIDs,
+            visibleIDs: visibleIDs
+        )
+        let selectedVisibleIDs = selectedVisibleIDs.intersection(visibleIDs)
+        let addedIDs = selectedVisibleIDs.subtracting(previousVisibleIDs)
+        let removedIDs = previousVisibleIDs.subtracting(selectedVisibleIDs)
+
+        explicitlyRemovedIDs.subtract(addedIDs)
+        explicitlyAddedIDs.formUnion(addedIDs)
+        explicitlyAddedIDs.subtract(removedIDs)
+        explicitlyRemovedIDs.formUnion(removedIDs)
+    }
+
+    func resolvedIDs(
+        currentPersistedIDs: some Sequence<UUID>,
+        validIDs: Set<UUID>
+    ) -> Set<UUID> {
+        selectedIDs(currentPersistedIDs: currentPersistedIDs)
+            .intersection(validIDs)
+    }
+
+    private func maintenanceAdjustedInitialIDs(
+        currentPersistedIDs: some Sequence<UUID>
+    ) -> Set<UUID> {
+        let currentPersistedIDs = Set(currentPersistedIDs)
+        // Replay relationship maintenance that happened while the editor was open.
+        // Deletions remove stale IDs and merges contribute their surviving target IDs.
+        let removedByMaintenance = initialIDs.subtracting(currentPersistedIDs)
+        let addedByMaintenance = currentPersistedIDs.subtracting(initialIDs)
+        var result = initialIDs
+        result.subtract(removedByMaintenance)
+        result.formUnion(addedByMaintenance)
+        return result
+    }
+}
+
+enum ChekinanaMemoryAttachmentLifecyclePolicy {
+    static func removesStagedFileImmediately(
+        existingReference: String?,
+        stagedURL: URL?
+    ) -> Bool {
+        existingReference == nil && stagedURL != nil
+    }
+
+    static func removesManagedFileBeforeSuccessfulSave(existingReference: String?) -> Bool {
+        false
+    }
+}
+
+struct ChekinanaMemoryAttachmentImportGate: Equatable {
+    private(set) var activeTokens = Set<UUID>()
+    private(set) var isClosing = false
+    private(set) var saveOwnerID: UUID?
+
+    var isImporting: Bool { !activeTokens.isEmpty }
+    var allowsSave: Bool {
+        !isClosing && saveOwnerID == nil && activeTokens.isEmpty
+    }
+
+    mutating func begin() -> UUID? {
+        guard !isClosing, saveOwnerID == nil else { return nil }
+        let token = UUID()
+        activeTokens.insert(token)
+        return token
+    }
+
+    func acceptsCompletion(_ token: UUID) -> Bool {
+        !isClosing && activeTokens.contains(token)
+    }
+
+    mutating func finish(_ token: UUID) {
+        activeTokens.remove(token)
+    }
+
+    mutating func beginSave(ownerID: UUID) -> Bool {
+        guard !isClosing, saveOwnerID == nil, activeTokens.isEmpty else {
+            return false
+        }
+        saveOwnerID = ownerID
+        return true
+    }
+
+    mutating func finishSave(ownerID: UUID) {
+        guard saveOwnerID == ownerID else { return }
+        saveOwnerID = nil
+    }
+
+    mutating func close() {
+        isClosing = true
+        saveOwnerID = nil
+    }
+}
+
 @Model
-final class Cheki {
+final class Memory {
     @Attribute(.unique) var id: UUID
-    var idols: [Idol]
-    var event: Event?
-    // `date` is the calendar-day component of the Cheki business identity.
-    // The original storage name preserves existing eventDate values without
-    // fabricating a date for historical Event-only records.
-    @Attribute(originalName: "eventDate") var date: Date?
-    var idx: Int?
-    // Historical stores may contain nil. All current writes normalize it to
-    // false so an omitted shot type is consistently treated as solo.
-    var userAppears: Bool?
-    var sizeRawValue: String?
-    var imageRef: String?
-    var isFavorite: Bool = false
-    var hasPostedToSNS: Bool = false
-    var note: String
+    var title: String?
+    var bodyText: String?
+    var date: Date?
+    var eventID: UUID?
+    var idolIDs: [UUID]
     var createdAt: Date
     var updatedAt: Date
 
-    var size: ChekiSize? {
+    init(
+        id: UUID = UUID(),
+        title: String? = nil,
+        bodyText: String? = nil,
+        date: Date? = nil,
+        eventID: UUID? = nil,
+        idolIDs: [UUID] = [],
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.title = ChekinanaMemoryPolicy.normalizedTitle(title)
+        self.bodyText = ChekinanaMemoryPolicy.meaningfulText(bodyText)
+        self.date = date
+        self.eventID = eventID
+        var seen = Set<UUID>()
+        self.idolIDs = idolIDs.filter { seen.insert($0).inserted }
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+@Model
+final class MemoryAttachment {
+    @Attribute(.unique) var id: UUID
+    var memoryID: UUID
+    private(set) var kindRawValue: String
+    private(set) var managedRef: String
+    var sortOrder: Int
+    var createdAt: Date
+    var updatedAt: Date
+
+    var kind: MemoryAttachmentKind {
+        MemoryAttachmentKind(rawValue: kindRawValue) ?? .image
+    }
+
+    init(
+        id: UUID = UUID(),
+        memoryID: UUID,
+        kind: MemoryAttachmentKind,
+        managedRef: String,
+        sortOrder: Int,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        guard let normalized = managedRef.nonEmpty else {
+            preconditionFailure("MemoryAttachment requires managed media")
+        }
+        self.id = id
+        self.memoryID = memoryID
+        kindRawValue = kind.rawValue
+        self.managedRef = normalized
+        self.sortOrder = max(0, sortOrder)
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    func replaceFromBackup(
+        memoryID: UUID,
+        kind: MemoryAttachmentKind,
+        managedRef: String,
+        sortOrder: Int,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        guard let normalized = managedRef.nonEmpty else {
+            preconditionFailure("MemoryAttachment requires managed media")
+        }
+        self.memoryID = memoryID
+        kindRawValue = kind.rawValue
+        self.managedRef = normalized
+        self.sortOrder = max(0, sortOrder)
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+struct ChekinanaMemoryRecordSnapshot: Equatable, Sendable {
+    let id: UUID
+    let title: String?
+    let bodyText: String?
+    let date: Date?
+    let eventID: UUID?
+    let idolIDs: [UUID]
+    let createdAt: Date
+    let updatedAt: Date
+
+    init(_ memory: Memory) {
+        id = memory.id
+        title = memory.title
+        bodyText = memory.bodyText
+        date = memory.date
+        eventID = memory.eventID
+        idolIDs = memory.idolIDs
+        createdAt = memory.createdAt
+        updatedAt = memory.updatedAt
+    }
+}
+
+struct ChekinanaMemoryAttachmentRecordSnapshot: Equatable, Sendable {
+    let id: UUID
+    let memoryID: UUID
+    let kind: MemoryAttachmentKind
+    let managedRef: String
+    let sortOrder: Int
+    let createdAt: Date
+    let updatedAt: Date
+
+    init(_ attachment: MemoryAttachment) {
+        id = attachment.id
+        memoryID = attachment.memoryID
+        kind = attachment.kind
+        managedRef = attachment.managedRef
+        sortOrder = attachment.sortOrder
+        createdAt = attachment.createdAt
+        updatedAt = attachment.updatedAt
+    }
+}
+
+struct ChekinanaMemoryTargetSnapshot: Equatable, Sendable {
+    let record: ChekinanaMemoryRecordSnapshot
+    let attachments: [ChekinanaMemoryAttachmentRecordSnapshot]
+
+    init(
+        record: ChekinanaMemoryRecordSnapshot,
+        attachments: [ChekinanaMemoryAttachmentRecordSnapshot]
+    ) {
+        self.record = record
+        self.attachments = attachments.sorted {
+            $0.id.uuidString < $1.id.uuidString
+        }
+    }
+}
+
+struct ChekinanaMemorySaveAttachmentDraft: Equatable, Sendable {
+    let id: UUID
+    let kind: MemoryAttachmentKind
+    let existingReference: String?
+    let stagedURL: URL?
+    let sortOrder: Int
+}
+
+struct ChekinanaMemorySaveDraft: Equatable, Sendable {
+    let title: String
+    let bodyText: String
+    let date: Date?
+    let eventID: UUID?
+    let idolIDs: [UUID]
+    let attachments: [ChekinanaMemorySaveAttachmentDraft]
+}
+
+struct ChekinanaMemorySaveAuthorization: Equatable, Sendable {
+    let ownerID: UUID
+    let libraryGeneration: UUID
+    let targetID: UUID
+    let expectedTarget: ChekinanaMemoryTargetSnapshot?
+}
+
+struct ChekinanaMemoryMaterializedAttachment: Equatable, Sendable {
+    let ownerID: UUID
+    let libraryGeneration: UUID
+    let id: UUID
+    let kind: MemoryAttachmentKind
+    let managedRef: String
+}
+
+enum ChekinanaMemorySaveMutationError: LocalizedError, Equatable {
+    case changedLibrary
+    case changedMemory
+    case changedRelationships
+    case invalidDraft
+
+    var errorDescription: String? {
+        switch self {
+        case .changedLibrary:
+            ChekinanaL10n.message("The library changed while this Memory was saving. Retry in the current library.")
+        case .changedMemory:
+            ChekinanaL10n.message("This Memory changed or was deleted. Reopen it before saving.")
+        case .changedRelationships:
+            ChekinanaL10n.message("A selected relationship changed. Review the Memory and try again.")
+        case .invalidDraft:
+            ChekinanaL10n.message("The Memory draft changed while it was saving. Try again.")
+        }
+    }
+}
+
+enum ChekinanaNewMediaDefaults {
+    /// New Photo/写メ items are 2-shot by default. Existing persisted values
+    /// remain authoritative and migration call sites pass their stored value.
+    static func userAppears(for kind: MediaItemKind) -> Bool {
+        kind == .shame
+    }
+}
+
+enum ChekinanaMediaItemInvariantError: Error, Equatable {
+    case invalidKind
+    case missingMedia
+    case nonChekiMetadata
+}
+
+/// The only active persisted media entity. ChekiRecord deliberately remains a
+/// separate no-media business record.
+@Model
+final class MediaItem {
+    @Attribute(.unique) var id: UUID
+    /// Stable owner of the existing managed media files. This deliberately
+    /// remains the legacy UUID when a cross-kind database ID collision forces
+    /// `id` to be remapped during migration.
+    var mediaOwnerID: UUID
+    private(set) var kindRawValue: String
+    var idolIDs: [UUID] {
+        didSet {
+            if detachedIdols.map(\.id) != idolIDs {
+                detachedIdols = []
+            }
+        }
+    }
+    var eventID: UUID? {
+        didSet {
+            if detachedEvent?.id != eventID {
+                detachedEvent = nil
+            }
+        }
+    }
+    var date: Date?
+    var userAppears: Bool
+    var isFavorite: Bool = false
+    var hasPostedToSNS: Bool = false
+    var note: String
+    private(set) var mediaRef: String
+    var sizeRawValue: String? {
+        didSet {
+            precondition(kind == .cheki || sizeRawValue == nil, "Only Cheki can store a size")
+        }
+    }
+    var idx: Int? {
+        didSet {
+            precondition(kind == .cheki || idx == nil, "Only Cheki can store an index")
+        }
+    }
+    var createdAt: Date
+    var updatedAt: Date
+    @Transient private var detachedIdols: [Idol] = []
+    @Transient private var detachedEvent: Event?
+
+    var kind: MediaItemKind {
+        MediaItemKind(rawValue: kindRawValue) ?? .cheki
+    }
+
+    var idols: [Idol] {
         get {
-            sizeRawValue.flatMap(ChekiSize.init(rawValue:))
+            guard let modelContext else { return detachedIdols }
+            if detachedIdols.map(\.id) == idolIDs,
+               detachedIdols.allSatisfy({ $0.modelContext === modelContext }) {
+                return detachedIdols
+            }
+            let wanted = Set(idolIDs)
+            let resolved = ((try? modelContext.fetch(FetchDescriptor<Idol>())) ?? [])
+                .filter { wanted.contains($0.id) }
+                .sorted { lhs, rhs in
+                    let left = idolIDs.firstIndex(of: lhs.id) ?? .max
+                    let right = idolIDs.firstIndex(of: rhs.id) ?? .max
+                    return left < right
+                }
+            detachedIdols = resolved
+            return resolved
         }
         set {
-            sizeRawValue = newValue?.rawValue
+            detachedIdols = newValue
+            var seen = Set<UUID>()
+            idolIDs = newValue.map(\.id).filter { seen.insert($0).inserted }
+        }
+    }
+
+    var event: Event? {
+        get {
+            guard let modelContext, let eventID else { return detachedEvent }
+            if let detachedEvent,
+               detachedEvent.id == eventID,
+               detachedEvent.modelContext === modelContext {
+                return detachedEvent
+            }
+            let resolved = ((try? modelContext.fetch(FetchDescriptor<Event>())) ?? [])
+                .first { $0.id == eventID }
+            detachedEvent = resolved
+            return resolved
+        }
+        set {
+            detachedEvent = newValue
+            eventID = newValue?.id
+        }
+    }
+
+    var imageRef: String? {
+        get { kind == .douga ? nil : mediaRef }
+        set {
+            precondition(kind != .douga, "Video media cannot store an image reference")
+            guard let newValue, let normalized = newValue.nonEmpty else {
+                preconditionFailure("MediaItem requires media")
+            }
+            mediaRef = normalized
+        }
+    }
+
+    var videoRef: String? {
+        get { kind == .douga ? mediaRef : nil }
+        set {
+            precondition(kind == .douga, "Image media cannot store a video reference")
+            guard let newValue, let normalized = newValue.nonEmpty else {
+                preconditionFailure("MediaItem requires media")
+            }
+            mediaRef = normalized
+        }
+    }
+
+    var size: ChekiSize? {
+        get {
+            kind == .cheki
+                ? (sizeRawValue.flatMap(ChekiSize.init(rawValue:)) ?? .mini) : nil
+        }
+        set {
+            precondition(kind == .cheki, "Only Cheki can store a size")
+            sizeRawValue = (newValue ?? .mini).rawValue
         }
     }
 
     init(
         id: UUID = UUID(),
+        mediaOwnerID: UUID? = nil,
+        kind: MediaItemKind,
         idols: [Idol] = [],
         event: Event? = nil,
         date: Date? = nil,
         idx: Int? = nil,
-        userAppears: Bool? = false,
+        userAppears: Bool? = nil,
         size: ChekiSize? = nil,
-        imageRef: String? = nil,
+        mediaRef: String,
         isFavorite: Bool = false,
         hasPostedToSNS: Bool = false,
         note: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
+        let normalizedRef = mediaRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        precondition(!normalizedRef.isEmpty, "MediaItem requires media")
         self.id = id
-        self.idols = idols
-        self.event = event
+        self.mediaOwnerID = mediaOwnerID ?? id
+        kindRawValue = kind.rawValue
+        var seen = Set<UUID>()
+        idolIDs = idols.map(\.id).filter { seen.insert($0).inserted }
+        eventID = event?.id
+        detachedIdols = idols
+        detachedEvent = event
         self.date = date
-        self.idx = idx
-        self.userAppears = userAppears ?? false
-        self.sizeRawValue = size?.rawValue
-        self.imageRef = imageRef
+        self.userAppears = userAppears ?? ChekinanaNewMediaDefaults.userAppears(for: kind)
         self.isFavorite = isFavorite
         self.hasPostedToSNS = hasPostedToSNS
         self.note = note
+        self.mediaRef = normalizedRef
+        sizeRawValue = kind == .cheki ? (size ?? .mini).rawValue : nil
+        self.idx = kind == .cheki ? idx : nil
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    /// Source-compatible Cheki constructor used by existing creation paths
+    /// while all persisted media is backed by MediaItem.
+    convenience init(
+        id: UUID = UUID(),
+        mediaOwnerID: UUID? = nil,
+        idols: [Idol] = [],
+        event: Event? = nil,
+        date: Date? = nil,
+        idx: Int? = nil,
+        userAppears: Bool? = nil,
+        size: ChekiSize? = nil,
+        imageRef: String,
+        isFavorite: Bool = false,
+        hasPostedToSNS: Bool = false,
+        note: String = "",
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.init(
+            id: id,
+            mediaOwnerID: mediaOwnerID,
+            kind: .cheki,
+            idols: idols,
+            event: event,
+            date: date,
+            idx: idx,
+            userAppears: userAppears ?? false,
+            size: size,
+            mediaRef: imageRef,
+            isFavorite: isFavorite,
+            hasPostedToSNS: hasPostedToSNS,
+            note: note,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    /// Source-compatible Shame constructor. Cheki-only carriers are always nil.
+    convenience init(
+        id: UUID = UUID(),
+        mediaOwnerID: UUID? = nil,
+        imageRef: String,
+        idols: [Idol] = [],
+        date: Date? = nil,
+        note: String = ""
+    ) {
+        self.init(
+            id: id,
+            mediaOwnerID: mediaOwnerID,
+            kind: .shame,
+            idols: idols,
+            date: date,
+            mediaRef: imageRef,
+            note: note
+        )
+    }
+
+    /// Source-compatible Douga constructor. Cheki-only carriers are always nil.
+    convenience init(
+        id: UUID = UUID(),
+        mediaOwnerID: UUID? = nil,
+        videoRef: String,
+        idols: [Idol] = [],
+        date: Date? = nil,
+        note: String = ""
+    ) {
+        self.init(
+            id: id,
+            mediaOwnerID: mediaOwnerID,
+            kind: .douga,
+            idols: idols,
+            date: date,
+            mediaRef: videoRef,
+            note: note
+        )
+    }
+
+    init(
+        id: UUID,
+        mediaOwnerID: UUID? = nil,
+        kind: MediaItemKind,
+        idolIDs: [UUID],
+        eventID: UUID?,
+        date: Date?,
+        userAppears: Bool,
+        isFavorite: Bool,
+        hasPostedToSNS: Bool,
+        note: String,
+        mediaRef: String,
+        sizeRawValue: String?,
+        idx: Int?,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        let normalizedRef = mediaRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        precondition(!normalizedRef.isEmpty, "MediaItem requires media")
+        self.id = id
+        self.mediaOwnerID = mediaOwnerID ?? id
+        kindRawValue = kind.rawValue
+        var seen = Set<UUID>()
+        self.idolIDs = idolIDs.filter { seen.insert($0).inserted }
+        self.eventID = eventID
+        self.date = date
+        self.userAppears = userAppears
+        self.isFavorite = isFavorite
+        self.hasPostedToSNS = hasPostedToSNS
+        self.note = note
+        self.mediaRef = normalizedRef
+        self.sizeRawValue = kind == .cheki
+            ? (sizeRawValue.flatMap(ChekiSize.init(rawValue:)) ?? .mini).rawValue
+            : nil
+        self.idx = kind == .cheki ? idx : nil
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    func setChekiMetadata(size: ChekiSize?, idx: Int?) throws {
+        guard kind == .cheki else {
+            throw ChekinanaMediaItemInvariantError.nonChekiMetadata
+        }
+        sizeRawValue = (size ?? .mini).rawValue
+        self.idx = idx
+    }
+
+    func replaceMediaRef(_ value: String) throws {
+        guard let normalized = value.nonEmpty else {
+            throw ChekinanaMediaItemInvariantError.missingMedia
+        }
+        mediaRef = normalized
+    }
+
+    func replaceFromBackup(
+        mediaOwnerID: UUID,
+        kind: MediaItemKind,
+        idolIDs: [UUID],
+        eventID: UUID?,
+        date: Date?,
+        userAppears: Bool,
+        isFavorite: Bool,
+        hasPostedToSNS: Bool,
+        note: String,
+        mediaRef: String,
+        sizeRawValue: String?,
+        idx: Int?,
+        createdAt: Date,
+        updatedAt: Date
+    ) throws {
+        guard let normalizedRef = mediaRef.nonEmpty else {
+            throw ChekinanaMediaItemInvariantError.missingMedia
+        }
+        self.mediaOwnerID = mediaOwnerID
+        kindRawValue = kind.rawValue
+        var seen = Set<UUID>()
+        self.idolIDs = idolIDs.filter { seen.insert($0).inserted }
+        self.eventID = eventID
+        self.date = date
+        self.userAppears = userAppears
+        self.isFavorite = isFavorite
+        self.hasPostedToSNS = hasPostedToSNS
+        self.note = note
+        self.mediaRef = normalizedRef
+        self.sizeRawValue = kind == .cheki
+            ? (sizeRawValue.flatMap(ChekiSize.init(rawValue:)) ?? .mini).rawValue
+            : nil
+        self.idx = kind == .cheki ? idx : nil
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    func validateInvariant() throws {
+        guard MediaItemKind(rawValue: kindRawValue) != nil else {
+            throw ChekinanaMediaItemInvariantError.invalidKind
+        }
+        guard mediaRef.nonEmpty != nil else {
+            throw ChekinanaMediaItemInvariantError.missingMedia
+        }
+        guard kind == .cheki || (sizeRawValue == nil && idx == nil) else {
+            throw ChekinanaMediaItemInvariantError.nonChekiMetadata
+        }
     }
 }
 
@@ -1765,8 +3072,8 @@ final class ChekiRecord {
     }
 
     var size: ChekiSize? {
-        get { sizeRawValue.flatMap(ChekiSize.init(rawValue:)) }
-        set { sizeRawValue = newValue?.rawValue }
+        get { sizeRawValue.flatMap(ChekiSize.init(rawValue:)) ?? .mini }
+        set { sizeRawValue = (newValue ?? .mini).rawValue }
     }
 
     init(
@@ -1785,7 +3092,7 @@ final class ChekiRecord {
         self.detachedIdols = idols
         self.detachedEvent = event
         self.date = date
-        self.sizeRawValue = size?.rawValue
+        self.sizeRawValue = (size ?? .mini).rawValue
         self.note = note
         self.count = max(1, count)
     }
@@ -1888,6 +3195,125 @@ enum ChekinanaPersistenceMutationCoordinator {
     }
 }
 
+/// Applies an explicit Event association to otherwise-unassigned records for
+/// the same single Idol and canonical day. This mutates only scalar Event keys;
+/// callers keep the propagation in the same transaction as the source save.
+enum ChekinanaEventAssociationPropagation {
+    @discardableResult
+    static func propagate(
+        from source: MediaItem,
+        in modelContext: ModelContext
+    ) throws -> Int {
+        try propagate(
+            idolIDs: source.idolIDs,
+            eventID: source.eventID,
+            date: source.date,
+            protectingRecordIDs: [],
+            in: modelContext
+        )
+    }
+
+    @discardableResult
+    static func propagate(
+        from source: ChekiRecord,
+        in modelContext: ModelContext
+    ) throws -> Int {
+        try propagate(
+            idolIDs: source.idolIDs,
+            eventID: source.eventID,
+            date: source.date,
+            protectingRecordIDs: [],
+            in: modelContext
+        )
+    }
+
+    /// Batch editors use `protectingRecordIDs` for rows whose Event field was
+    /// explicitly touched. In particular, an explicit clear must remain nil
+    /// even when a sibling row supplies an Event to the same propagation group.
+    @discardableResult
+    static func propagate(
+        idolIDs: [UUID],
+        eventID: UUID?,
+        date: Date?,
+        protectingRecordIDs: Set<UUID>,
+        in modelContext: ModelContext,
+        editIntentDirectory: URL? = nil
+    ) throws -> Int {
+        try ChekinanaPersistenceMutationCoordinator.withLock {
+            // Every association writer reaches this shared preflight before it
+            // can mutate a MediaItem. The lock is recursive for callers that
+            // already own the wider validation/save transaction.
+            try ChekinanaChekiEditRecovery.requireConvergedExclusively(
+                in: modelContext,
+                directory: editIntentDirectory
+            )
+            guard idolIDs.count == 1,
+                  let idolID = idolIDs.first,
+                  let eventID,
+                  let date,
+                  let canonicalDay = ChekinanaDateOnly.canonicalized(date) else {
+                return 0
+            }
+            let nextDay = canonicalDay.addingTimeInterval(86_400)
+            let missingDateSentinel = Date.distantPast
+
+            let mediaDescriptor = FetchDescriptor<MediaItem>(
+                predicate: #Predicate {
+                    $0.eventID == nil
+                        && ($0.date ?? missingDateSentinel) >= canonicalDay
+                        && ($0.date ?? missingDateSentinel) < nextDay
+                }
+            )
+            let recordDescriptor = FetchDescriptor<ChekiRecord>(
+                predicate: #Predicate {
+                    $0.eventID == nil
+                        && ($0.date ?? missingDateSentinel) >= canonicalDay
+                        && ($0.date ?? missingDateSentinel) < nextDay
+                }
+            )
+
+            var mutationCount = 0
+            for target in try modelContext.fetch(mediaDescriptor) where
+                target.eventID == nil
+                    && target.idolIDs.count == 1
+                    && target.idolIDs.first == idolID
+                    && target.date.flatMap(ChekinanaDateOnly.canonicalized)
+                        == canonicalDay {
+                target.eventID = eventID
+                mutationCount += 1
+            }
+            for target in try modelContext.fetch(recordDescriptor) where
+                target.eventID == nil
+                    && !protectingRecordIDs.contains(target.id)
+                    && target.idolIDs.count == 1
+                    && target.idolIDs.first == idolID
+                    && target.date.flatMap(ChekinanaDateOnly.canonicalized)
+                        == canonicalDay {
+                target.eventID = eventID
+                mutationCount += 1
+            }
+            return mutationCount
+        }
+    }
+}
+
+enum ChekinanaDisplayCount {
+    nonisolated static func normalized(_ value: Int) -> Int {
+        max(0, value)
+    }
+
+    nonisolated static func adding(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = normalized(lhs).addingReportingOverflow(
+            normalized(rhs)
+        )
+        return overflow ? Int.max : sum
+    }
+
+    nonisolated static func total(_ values: some Sequence<Int>) -> Int {
+        values.reduce(0) { adding($0, $1) }
+    }
+}
+
 @MainActor
 enum ChekinanaChekiRecordStore {
     typealias SaveContext = (ModelContext) throws -> Void
@@ -1898,14 +3324,13 @@ enum ChekinanaChekiRecordStore {
         try ChekinanaPersistenceMutationCoordinator.withLock(operation)
     }
 
+    /// User-visible/statistical total. Persistence mutations must use
+    /// `checkedCountSum` so real quantity overflow remains an explicit failure.
     nonisolated static func totalCount(
         _ records: some Sequence<ChekiRecord>
     ) -> Int {
         records.reduce(0) { partialResult, record in
-            let (sum, overflow) = partialResult.addingReportingOverflow(
-                max(1, record.count)
-            )
-            return overflow ? Int.max : sum
+            ChekinanaDisplayCount.adding(partialResult, record.count)
         }
     }
 
@@ -1923,19 +3348,22 @@ enum ChekinanaChekiRecordStore {
         precondition(quantity > 0)
         let requestedIdolIDs = idols.map(\.id)
         let requestedEventID = event?.id
+        let normalizedSize = size ?? .mini
+        let validatedDate = try ChekinanaPersistedContentDatePolicy
+            .validatedCanonical(date)
         return try withMutationLock {
             do {
                 let relationships = try validatedRelationshipIDs(
                     idolIDs: requestedIdolIDs,
                     eventID: requestedEventID,
-                    recordDate: date,
+                    recordDate: validatedDate,
                     in: modelContext
                 )
                 let identity = ChekinanaChekiRecordIdentity(
                     idolIDs: relationships.idolIDs,
-                    date: date,
+                    date: validatedDate,
                     eventID: relationships.eventID,
-                    sizeRawValue: size?.rawValue,
+                    sizeRawValue: normalizedSize.rawValue,
                     note: note
                 )
                 let matches = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
@@ -1952,18 +3380,26 @@ enum ChekinanaChekiRecordStore {
                     }
                     retained.count = mergedCount
                     matches.dropFirst().forEach(modelContext.delete)
+                    try ChekinanaEventAssociationPropagation.propagate(
+                        from: retained,
+                        in: modelContext
+                    )
                     try saveContext(modelContext)
                     return retained
                 }
                 let record = ChekiRecord(
                     date: identity.canonicalDate,
-                    size: size,
+                    size: normalizedSize,
                     note: note,
                     count: quantity
                 )
                 record.idolIDs = relationships.idolIDs
                 record.eventID = relationships.eventID
                 modelContext.insert(record)
+                try ChekinanaEventAssociationPropagation.propagate(
+                    from: record,
+                    in: modelContext
+                )
                 try saveContext(modelContext)
                 return record
             } catch {
@@ -1986,49 +3422,107 @@ enum ChekinanaChekiRecordStore {
         in modelContext: ModelContext,
         saveContext: SaveContext = { try $0.save() }
     ) throws -> ChekiRecord? {
-        let requestedIdolIDs = idols.map(\.id)
-        let requestedEventID = event?.id
+        try update(
+            recordID: record.id,
+            idolIDs: idols.map(\.id),
+            eventID: event?.id,
+            date: date,
+            size: size,
+            note: note,
+            count: count,
+            expected: expected,
+            in: modelContext,
+            saveContext: saveContext
+        )
+    }
+
+    /// Scalar-keyed update used by record editors. ChekiRecord persists these
+    /// relationship keys directly, so resolving them into full model objects
+    /// before entering the store only duplicates the store's validation work.
+    @discardableResult
+    static func update(
+        recordID: UUID,
+        idolIDs: [UUID],
+        eventID: UUID?,
+        date: Date?,
+        size: ChekiSize?,
+        note: String,
+        count: Int,
+        expected: ChekinanaChekiRecordSnapshot? = nil,
+        in modelContext: ModelContext,
+        saveContext: SaveContext = { try $0.save() }
+    ) throws -> ChekiRecord? {
+        let validatedDate = try ChekinanaPersistedContentDatePolicy
+            .validatedCanonical(date)
+        let normalizedSize = size ?? .mini
         return try withMutationLock { () -> ChekiRecord? in
-            do {
-                if expected != nil {
-                    modelContext.rollback()
-                }
-                guard let live = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
-                    .first(where: { $0.id == record.id }),
-                      expected == nil || ChekinanaChekiRecordSnapshot(live) == expected else {
-                    throw ChekinanaChekiRecordMutationError.changedRecord
-                }
-                guard count > 0 else {
+            try verifyPersistedSnapshot(
+                expected,
+                recordID: recordID,
+                in: modelContext
+            )
+            guard let live = try record(
+                id: recordID,
+                in: modelContext
+            ),
+                  expected == nil || ChekinanaChekiRecordSnapshot(live) == expected else {
+                throw ChekinanaChekiRecordMutationError.changedRecord
+            }
+
+            guard count > 0 else {
+                do {
                     modelContext.delete(live)
                     try saveContext(modelContext)
                     return nil
+                } catch {
+                    modelContext.rollback()
+                    throw error
                 }
-                let relationships = try validatedRelationshipIDs(
-                    idolIDs: requestedIdolIDs,
-                    eventID: requestedEventID,
-                    recordDate: date,
-                    in: modelContext
-                )
+            }
+
+            let relationships = try validatedRelationshipIDs(
+                idolIDs: idolIDs,
+                eventID: eventID,
+                recordDate: validatedDate,
+                in: modelContext
+            )
+            let identity = ChekinanaChekiRecordIdentity(
+                idolIDs: relationships.idolIDs,
+                date: validatedDate,
+                eventID: relationships.eventID,
+                sizeRawValue: normalizedSize.rawValue,
+                note: note
+            )
+            let collisions = try collisionCandidates(
+                for: identity,
+                excluding: live.id,
+                in: modelContext
+            )
+                .filter {
+                    ChekinanaChekiRecordIdentity($0) == identity
+                }
+            let mergedCount = try collisions.reduce(count) { partial, collision in
+                try checkedCountSum(partial, max(1, collision.count))
+            }
+
+            // Everything above this boundary is read-only validation. A stale
+            // snapshot or missing relationship must not roll back unrelated
+            // unsaved UI state in the shared ModelContext. From here onward,
+            // failures do require rollback because model objects are mutated.
+            do {
                 live.idolIDs = relationships.idolIDs
                 live.eventID = relationships.eventID
-                live.date = date.flatMap(ChekinanaDateOnly.canonicalized)
-                live.size = size
-                live.note = note
-                live.count = count
-                let identity = ChekinanaChekiRecordIdentity(live)
                 live.date = identity.canonicalDate
-                let collisions = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
-                    .filter {
-                        $0.id != live.id
-                            && ChekinanaChekiRecordIdentity($0) == identity
-                    }
+                live.sizeRawValue = identity.sizeRawValue
+                live.note = identity.note
+                live.count = mergedCount
                 for collision in collisions {
-                    live.count = try checkedCountSum(
-                        live.count,
-                        max(1, collision.count)
-                    )
                     modelContext.delete(collision)
                 }
+                try ChekinanaEventAssociationPropagation.propagate(
+                    from: live,
+                    in: modelContext
+                )
                 try saveContext(modelContext)
                 return live
             } catch {
@@ -2045,15 +3539,17 @@ enum ChekinanaChekiRecordStore {
         saveContext: SaveContext = { try $0.save() }
     ) throws {
         try withMutationLock {
+            try verifyPersistedSnapshot(
+                expected,
+                recordID: record.id,
+                in: modelContext
+            )
+            guard let live = try Self.record(id: record.id, in: modelContext),
+                  expected == nil || ChekinanaChekiRecordSnapshot(live) == expected else {
+                throw ChekinanaChekiRecordMutationError.changedRecord
+            }
+
             do {
-                if expected != nil {
-                    modelContext.rollback()
-                }
-                guard let live = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
-                    .first(where: { $0.id == record.id }),
-                      expected == nil || ChekinanaChekiRecordSnapshot(live) == expected else {
-                    throw ChekinanaChekiRecordMutationError.changedRecord
-                }
                 modelContext.delete(live)
                 try saveContext(modelContext)
             } catch {
@@ -2101,20 +3597,94 @@ enum ChekinanaChekiRecordStore {
         _ = recordDate
         var seen = Set<UUID>()
         let uniqueIdolIDs = idolIDs.filter { seen.insert($0).inserted }
-        let existingIdolIDs = Set(
-            try modelContext.fetch(FetchDescriptor<Idol>()).map(\.id)
-        )
-        guard uniqueIdolIDs.allSatisfy(existingIdolIDs.contains) else {
-            throw ChekinanaChekiRecordMutationError.missingRelationships
+        if !uniqueIdolIDs.isEmpty {
+            let requestedIdolIDs = uniqueIdolIDs
+            var idolDescriptor = FetchDescriptor<Idol>(
+                predicate: #Predicate { requestedIdolIDs.contains($0.id) }
+            )
+            idolDescriptor.fetchLimit = requestedIdolIDs.count
+            let existingIdolIDs = Set(
+                try modelContext.fetch(idolDescriptor).map(\.id)
+            )
+            guard existingIdolIDs.count == requestedIdolIDs.count else {
+                throw ChekinanaChekiRecordMutationError.missingRelationships
+            }
         }
         if let eventID {
-            let eventMatches = try modelContext.fetch(FetchDescriptor<Event>())
-                .filter { $0.id == eventID }
-            guard eventMatches.count == 1 else {
+            var eventDescriptor = FetchDescriptor<Event>(
+                predicate: #Predicate { $0.id == eventID }
+            )
+            eventDescriptor.fetchLimit = 1
+            guard try modelContext.fetch(eventDescriptor).first != nil else {
                 throw ChekinanaChekiRecordMutationError.missingRelationships
             }
         }
         return (uniqueIdolIDs, eventID)
+    }
+
+    private static func record(
+        id: UUID,
+        in modelContext: ModelContext
+    ) throws -> ChekiRecord? {
+        var descriptor = FetchDescriptor<ChekiRecord>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    /// Conflict checks must observe the persistent store, but rolling back the
+    /// editor's shared main context invalidates every registered object and
+    /// forces all visible SwiftData queries to rebuild. A targeted read in an
+    /// isolated context preserves the same stale-edit rejection without that
+    /// global synchronous reset.
+    private static func verifyPersistedSnapshot(
+        _ expected: ChekinanaChekiRecordSnapshot?,
+        recordID: UUID,
+        in modelContext: ModelContext
+    ) throws {
+        guard let expected else { return }
+        let verificationContext = ModelContext(modelContext.container)
+        verificationContext.autosaveEnabled = false
+        guard let persisted = try record(
+            id: recordID,
+            in: verificationContext
+        ), ChekinanaChekiRecordSnapshot(persisted) == expected else {
+            throw ChekinanaChekiRecordMutationError.changedRecord
+        }
+    }
+
+    /// The exact business identity still gets checked in Swift so legacy
+    /// non-canonical dates remain merge-compatible. Restricting the fetch to
+    /// the same note and canonical day avoids materializing the whole record
+    /// library on every editor save.
+    private static func collisionCandidates(
+        for identity: ChekinanaChekiRecordIdentity,
+        excluding recordID: UUID,
+        in modelContext: ModelContext
+    ) throws -> [ChekiRecord] {
+        let note = identity.note
+        if let day = identity.canonicalDate {
+            let nextDay = day.addingTimeInterval(86_400)
+            let missingDateSentinel = Date.distantPast
+            let descriptor = FetchDescriptor<ChekiRecord>(
+                predicate: #Predicate {
+                    $0.id != recordID
+                        && $0.note == note
+                        && ($0.date ?? missingDateSentinel) >= day
+                        && ($0.date ?? missingDateSentinel) < nextDay
+                }
+            )
+            return try modelContext.fetch(descriptor)
+        }
+        let descriptor = FetchDescriptor<ChekiRecord>(
+            predicate: #Predicate {
+                $0.id != recordID
+                    && $0.note == note
+                    && $0.date == nil
+            }
+        )
+        return try modelContext.fetch(descriptor)
     }
 
     nonisolated static func checkedCountSum(
@@ -2144,8 +3714,16 @@ struct ChekinanaChekiRecordRelationshipIndex {
         record.idolIDs.compactMap { idolsByID[$0] }
     }
 
+    func idols(for media: MediaItem) -> [Idol] {
+        media.idolIDs.compactMap { idolsByID[$0] }
+    }
+
     func event(for record: ChekiRecord) -> Event? {
         record.eventID.flatMap { eventsByID[$0] }
+    }
+
+    func event(for media: MediaItem) -> Event? {
+        media.eventID.flatMap { eventsByID[$0] }
     }
 
     func idolName(id: UUID) -> String? {
@@ -2181,56 +3759,6 @@ enum ChekinanaChekiRecordReadPolicy {
 
     static func isLinked(_ record: ChekiRecord, eventID: UUID) -> Bool {
         record.eventID == eventID
-    }
-}
-
-/// A regular phone photo kept alongside Cheki in Gallery. Product metadata is
-/// intentionally limited to the imported image and the shared library fields.
-@Model
-final class Shame {
-    @Attribute(.unique) var id: UUID
-    var imageRef: String?
-    @Relationship(deleteRule: .nullify) var idols: [Idol]
-    var date: Date?
-    var note: String
-
-    init(
-        id: UUID = UUID(),
-        imageRef: String? = nil,
-        idols: [Idol] = [],
-        date: Date? = nil,
-        note: String = ""
-    ) {
-        self.id = id
-        self.imageRef = imageRef
-        self.idols = idols
-        self.date = date
-        self.note = note
-    }
-}
-
-/// An imported animation or video kept alongside Cheki in Gallery. The video
-/// reference always names an app-managed copy, never a Photos temporary URL.
-@Model
-final class Douga {
-    @Attribute(.unique) var id: UUID
-    var videoRef: String?
-    @Relationship(deleteRule: .nullify) var idols: [Idol]
-    var date: Date?
-    var note: String
-
-    init(
-        id: UUID = UUID(),
-        videoRef: String? = nil,
-        idols: [Idol] = [],
-        date: Date? = nil,
-        note: String = ""
-    ) {
-        self.id = id
-        self.videoRef = videoRef
-        self.idols = idols
-        self.date = date
-        self.note = note
     }
 }
 
@@ -2856,12 +4384,12 @@ enum ChekinanaSchemaV4: VersionedSchema {
     static let versionIdentifier = Schema.Version(4, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventImage.self,
-            Cheki.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2870,13 +4398,13 @@ enum ChekinanaSchemaV5: VersionedSchema {
     static let versionIdentifier = Schema.Version(5, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventImage.self,
-            Cheki.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2885,14 +4413,14 @@ enum ChekinanaSchemaV6: VersionedSchema {
     static let versionIdentifier = Schema.Version(6, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventImage.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekinanaSchemaV6.ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 
@@ -2928,14 +4456,14 @@ enum ChekinanaSchemaV7: VersionedSchema {
     static let versionIdentifier = Schema.Version(7, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventImage.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2944,15 +4472,15 @@ enum ChekinanaSchemaV8: VersionedSchema {
     static let versionIdentifier = Schema.Version(8, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventSchedule.self,
             EventImage.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2961,16 +4489,16 @@ enum ChekinanaSchemaV9: VersionedSchema {
     static let versionIdentifier = Schema.Version(9, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventSchedule.self,
             EventImage.self,
             MediaEventLink.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2979,17 +4507,17 @@ enum ChekinanaSchemaV10: VersionedSchema {
     static let versionIdentifier = Schema.Version(10, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventSchedule.self,
             EventImage.self,
             MediaEventLink.self,
             CalendarGroupOrder.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -2998,18 +4526,18 @@ enum ChekinanaSchemaV11: VersionedSchema {
     static let versionIdentifier = Schema.Version(11, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventSchedule.self,
             EventImage.self,
             MediaEventLink.self,
             CalendarGroupOrder.self,
             TravelSegment.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
     }
 }
@@ -3018,20 +4546,122 @@ enum ChekinanaSchemaV12: VersionedSchema {
     static let versionIdentifier = Schema.Version(12, 0, 0)
     static var models: [any PersistentModel.Type] {
         [
-            Idol.self,
+            ChekinanaLegacyMediaSchema.Idol.self,
             IdolPatternState.self,
-            Event.self,
+            ChekinanaLegacyMediaSchema.Event.self,
             EventSchedule.self,
             EventImage.self,
             MediaEventLink.self,
             MediaShotType.self,
             CalendarGroupOrder.self,
             TravelSegment.self,
-            Cheki.self,
+            ChekinanaLegacyMediaSchema.Cheki.self,
             ChekiRecord.self,
-            Shame.self,
-            Douga.self,
+            ChekinanaLegacyMediaSchema.Shame.self,
+            ChekinanaLegacyMediaSchema.Douga.self,
         ]
+    }
+}
+
+/// Additive bridge: legacy media and scalar auxiliary rows remain readable
+/// while MediaItem is populated transactionally by the V13 -> V14 stage.
+enum ChekinanaSchemaV13: VersionedSchema {
+    static let versionIdentifier = Schema.Version(13, 0, 0)
+    static var models: [any PersistentModel.Type] {
+        ChekinanaSchemaV12.models + [MediaItem.self]
+    }
+}
+
+/// Frozen Event entity used by the shipped V14/V15 schemas. V16 replaces this
+/// carrier with the active Event model, which adds the persisted social source.
+enum ChekinanaPreEventSourceSchema {
+    @Model final class Event {
+        @Attribute(.unique) var id: UUID
+        var name: String
+        var date: Date?
+        var city: String?
+        var livehouse: String?
+        @Attribute(originalName: "venue") var legacyVenue: String?
+        var avatarImageRef: String?
+        var price: String?
+        var weiboURL: URL?
+        var ticketURL: URL?
+        var note: String
+        var createdAt: Date
+        var updatedAt: Date
+
+        init(id: UUID = UUID(), name: String) {
+            self.id = id
+            self.name = name
+            date = nil
+            city = nil
+            livehouse = nil
+            legacyVenue = nil
+            avatarImageRef = nil
+            price = nil
+            weiboURL = nil
+            ticketURL = nil
+            note = ""
+            createdAt = Date()
+            updatedAt = Date()
+        }
+    }
+}
+
+/// Final active schema. Legacy media entities and their two scalar side tables
+/// are intentionally absent; all product media reads and writes use MediaItem.
+enum ChekinanaSchemaV14: VersionedSchema {
+    static let versionIdentifier = Schema.Version(14, 0, 0)
+    static var models: [any PersistentModel.Type] {
+        [
+            Idol.self,
+            IdolPatternState.self,
+            ChekinanaPreEventSourceSchema.Event.self,
+            EventSchedule.self,
+            EventImage.self,
+            CalendarGroupOrder.self,
+            TravelSegment.self,
+            MediaItem.self,
+            ChekiRecord.self,
+        ]
+    }
+}
+
+/// Adds the independent Memory domain without changing MediaItem semantics.
+enum ChekinanaSchemaV15: VersionedSchema {
+    static let versionIdentifier = Schema.Version(15, 0, 0)
+    static var models: [any PersistentModel.Type] {
+        ChekinanaSchemaV14.models + [Memory.self, MemoryAttachment.self]
+    }
+}
+
+/// Adds persisted custom Cheki sizes and a source field directly on Event.
+enum ChekinanaSchemaV16: VersionedSchema {
+    static let versionIdentifier = Schema.Version(16, 0, 0)
+    static var models: [any PersistentModel.Type] {
+        [
+            Idol.self,
+            IdolPatternState.self,
+            Event.self,
+            EventSchedule.self,
+            EventImage.self,
+            CalendarGroupOrder.self,
+            TravelSegment.self,
+            MediaItem.self,
+            ChekiRecord.self,
+            Memory.self,
+            MemoryAttachment.self,
+            CustomChekiSize.self,
+        ]
+    }
+}
+
+/// Adds durable avatar provenance and user intent without changing the frozen
+/// Idol entity used by the preceding schema versions.
+enum ChekinanaSchemaV17: VersionedSchema {
+    static let versionIdentifier = Schema.Version(17, 0, 0)
+    static var models: [any PersistentModel.Type] {
+        ChekinanaSchemaV16.models + [IdolAvatarState.self]
     }
 }
 
@@ -3039,6 +4669,19 @@ enum ChekinanaMigrationIntegrityError: Error, Equatable {
     case duplicateIdolID
     case duplicateCarrierIdolID
     case missingCarrierIdol
+    case duplicateMediaID
+    case invalidMediaItem
+    case mediaCountMismatch
+    case convertedRecordCountMismatch
+}
+
+/// Mirrors the existing ChekiRecord/MediaItem constructors and V16 repair.
+/// Projects newly constructed rows and final witnesses; existing V13 records
+/// retain their raw size identity until the original V16 normalization stage.
+private enum ChekinanaMigrationChekiSize {
+    static func normalizedRawValue(_ value: String?) -> String {
+        (value.flatMap(ChekiSize.init(rawValue:)) ?? .mini).rawValue
+    }
 }
 
 enum ChekinanaSchemaMigrationPlan: SchemaMigrationPlan {
@@ -3056,6 +4699,11 @@ enum ChekinanaSchemaMigrationPlan: SchemaMigrationPlan {
             ChekinanaSchemaV10.self,
             ChekinanaSchemaV11.self,
             ChekinanaSchemaV12.self,
+            ChekinanaSchemaV13.self,
+            ChekinanaSchemaV14.self,
+            ChekinanaSchemaV15.self,
+            ChekinanaSchemaV16.self,
+            ChekinanaSchemaV17.self,
         ]
     }
 
@@ -3126,7 +4774,7 @@ enum ChekinanaSchemaMigrationPlan: SchemaMigrationPlan {
                 didMigrate: { context in
                     try context.transaction {
                         let legacyRecords = try context.fetch(
-                            FetchDescriptor<Cheki>()
+                            FetchDescriptor<ChekinanaLegacyMediaSchema.Cheki>()
                         ).filter { $0.imageRef?.trimmingCharacters(
                             in: .whitespacesAndNewlines
                         ).isEmpty != false }
@@ -3152,7 +4800,9 @@ enum ChekinanaSchemaMigrationPlan: SchemaMigrationPlan {
                 willMigrate: nil,
                 didMigrate: { context in
                     try context.transaction {
-                        for cheki in try context.fetch(FetchDescriptor<Cheki>())
+                        for cheki in try context.fetch(
+                            FetchDescriptor<ChekinanaLegacyMediaSchema.Cheki>()
+                        )
                         where cheki.userAppears == nil {
                             cheki.userAppears = false
                         }
@@ -3181,7 +4831,312 @@ enum ChekinanaSchemaMigrationPlan: SchemaMigrationPlan {
                 fromVersion: ChekinanaSchemaV11.self,
                 toVersion: ChekinanaSchemaV12.self
             ),
+            .lightweight(
+                fromVersion: ChekinanaSchemaV12.self,
+                toVersion: ChekinanaSchemaV13.self
+            ),
+            .custom(
+                fromVersion: ChekinanaSchemaV13.self,
+                toVersion: ChekinanaSchemaV14.self,
+                willMigrate: { context in
+                    try migrateLegacyMediaToMediaItems(in: context)
+                },
+                didMigrate: { context in
+                    let items = try context.fetch(FetchDescriptor<MediaItem>())
+                    guard Set(items.map(\.id)).count == items.count else {
+                        throw ChekinanaMigrationIntegrityError.duplicateMediaID
+                    }
+                    for item in items {
+                        do {
+                            try item.validateInvariant()
+                        } catch {
+                            throw ChekinanaMigrationIntegrityError.invalidMediaItem
+                        }
+                    }
+                }
+            ),
+            .lightweight(
+                fromVersion: ChekinanaSchemaV14.self,
+                toVersion: ChekinanaSchemaV15.self
+            ),
+            .custom(
+                fromVersion: ChekinanaSchemaV15.self,
+                toVersion: ChekinanaSchemaV16.self,
+                willMigrate: nil,
+                didMigrate: { context in
+                    for event in try context.fetch(FetchDescriptor<Event>()) {
+                        event.source = ChekinanaEventSource.infer(from: event.weiboURL)
+                    }
+                    for record in try context.fetch(FetchDescriptor<ChekiRecord>()) {
+                        guard let rawValue = record.sizeRawValue,
+                              ChekiSize(rawValue: rawValue) != nil else {
+                            record.sizeRawValue = ChekiSize.mini.rawValue
+                            continue
+                        }
+                    }
+                    try ChekinanaChekiRecordStore.mergeDuplicates(in: context)
+                    try context.save()
+                }
+            ),
+            .lightweight(
+                fromVersion: ChekinanaSchemaV16.self,
+                toVersion: ChekinanaSchemaV17.self
+            ),
         ]
+    }
+
+    private static func migrateLegacyMediaToMediaItems(
+        in context: ModelContext
+    ) throws {
+        try context.transaction {
+            let legacyChekis = try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Cheki>()
+            )
+            let legacyShames = try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Shame>()
+            )
+            let legacyDougas = try context.fetch(
+                FetchDescriptor<ChekinanaLegacyMediaSchema.Douga>()
+            )
+            let links = try context.fetch(FetchDescriptor<MediaEventLink>())
+            let shotTypes = try context.fetch(FetchDescriptor<MediaShotType>())
+            let linksByKey = Dictionary(
+                links.map { ($0.id, $0.eventID) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let shotsByKey = Dictionary(
+                shotTypes.map { ($0.id, $0.userAppears) },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            for existing in try context.fetch(FetchDescriptor<MediaItem>()) {
+                context.delete(existing)
+            }
+
+            var occupiedMediaIDs = Set<UUID>()
+            let initialRecords = try context.fetch(FetchDescriptor<ChekiRecord>())
+                .sorted { $0.id.uuidString < $1.id.uuidString }
+            var recordIDs = Set(initialRecords.map(\.id))
+            var recordsByIdentity: [ChekinanaChekiRecordIdentity: ChekiRecord] = [:]
+            var expectedRecordQuantities: [ChekinanaChekiRecordIdentity: Int] = [:]
+            for record in initialRecords {
+                let identity = ChekinanaChekiRecordIdentity(record)
+                expectedRecordQuantities[identity] = try ChekinanaChekiRecordStore.checkedCountSum(
+                    expectedRecordQuantities[identity, default: 0],
+                    max(1, record.count)
+                )
+                if let retained = recordsByIdentity[identity] {
+                    retained.count = try ChekinanaChekiRecordStore.checkedCountSum(
+                        retained.count,
+                        max(1, record.count)
+                    )
+                    context.delete(record)
+                } else {
+                    record.date = identity.canonicalDate
+                    recordsByIdentity[identity] = record
+                }
+            }
+            var validCounts: [MediaItemKind: Int] = [.cheki: 0, .shame: 0, .douga: 0]
+
+            for cheki in legacyChekis.sorted(by: legacyMediaOrder) {
+                guard let mediaRef = cheki.imageRef?.nonEmpty else {
+                    let identity = ChekinanaChekiRecordIdentity(
+                        idolIDs: uniqueIDs(cheki.idols.map(\.id)),
+                        date: cheki.date,
+                        eventID: cheki.event?.id,
+                        sizeRawValue: ChekinanaMigrationChekiSize.normalizedRawValue(
+                            cheki.sizeRawValue
+                        ),
+                        note: cheki.note
+                    )
+                    expectedRecordQuantities[identity] = try ChekinanaChekiRecordStore.checkedCountSum(
+                        expectedRecordQuantities[identity, default: 0],
+                        1
+                    )
+                    if let retained = recordsByIdentity[identity] {
+                        retained.count = try ChekinanaChekiRecordStore.checkedCountSum(
+                            max(1, retained.count),
+                            1
+                        )
+                    } else {
+                        let recordID = availableID(
+                            original: cheki.id,
+                            kind: .cheki,
+                            occupied: &recordIDs,
+                            namespace: "record"
+                        )
+                        let record = ChekiRecord(
+                            id: recordID,
+                            idols: [],
+                            event: nil,
+                            date: identity.canonicalDate,
+                            size: cheki.sizeRawValue.flatMap(ChekiSize.init(rawValue:)),
+                            note: cheki.note,
+                            count: 1
+                        )
+                        record.idolIDs = identity.idolIDs
+                        record.eventID = identity.eventID
+                        context.insert(record)
+                        recordsByIdentity[identity] = record
+                    }
+                    continue
+                }
+                let id = availableID(
+                    original: cheki.id,
+                    kind: .cheki,
+                    occupied: &occupiedMediaIDs
+                )
+                context.insert(MediaItem(
+                    id: id,
+                    mediaOwnerID: cheki.id,
+                    kind: .cheki,
+                    idolIDs: uniqueIDs(cheki.idols.map(\.id)),
+                    eventID: cheki.event?.id,
+                    date: cheki.date,
+                    userAppears: cheki.userAppears ?? false,
+                    isFavorite: cheki.isFavorite,
+                    hasPostedToSNS: cheki.hasPostedToSNS,
+                    note: cheki.note,
+                    mediaRef: mediaRef,
+                    sizeRawValue: cheki.sizeRawValue,
+                    idx: cheki.idx,
+                    createdAt: cheki.createdAt,
+                    updatedAt: cheki.updatedAt
+                ))
+                validCounts[.cheki, default: 0] += 1
+            }
+
+            for shame in legacyShames.sorted(by: legacyMediaOrder) {
+                guard let mediaRef = shame.imageRef?.nonEmpty else { continue }
+                let id = availableID(
+                    original: shame.id,
+                    kind: .shame,
+                    occupied: &occupiedMediaIDs
+                )
+                let key = MediaEventLink.key(mediaID: shame.id, kind: .shame)
+                let shotKey = MediaShotType.key(mediaID: shame.id, kind: .shame)
+                let timestamp = shame.date ?? Date(timeIntervalSince1970: 0)
+                context.insert(MediaItem(
+                    id: id,
+                    mediaOwnerID: shame.id,
+                    kind: .shame,
+                    idolIDs: uniqueIDs(shame.idols.map(\.id)),
+                    eventID: linksByKey[key],
+                    date: shame.date,
+                    userAppears: shotsByKey[shotKey] ?? false,
+                    isFavorite: false,
+                    hasPostedToSNS: false,
+                    note: shame.note,
+                    mediaRef: mediaRef,
+                    sizeRawValue: nil,
+                    idx: nil,
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                ))
+                validCounts[.shame, default: 0] += 1
+            }
+
+            for douga in legacyDougas.sorted(by: legacyMediaOrder) {
+                guard let mediaRef = douga.videoRef?.nonEmpty else { continue }
+                let id = availableID(
+                    original: douga.id,
+                    kind: .douga,
+                    occupied: &occupiedMediaIDs
+                )
+                let key = MediaEventLink.key(mediaID: douga.id, kind: .douga)
+                let shotKey = MediaShotType.key(mediaID: douga.id, kind: .douga)
+                let timestamp = douga.date ?? Date(timeIntervalSince1970: 0)
+                context.insert(MediaItem(
+                    id: id,
+                    mediaOwnerID: douga.id,
+                    kind: .douga,
+                    idolIDs: uniqueIDs(douga.idols.map(\.id)),
+                    eventID: linksByKey[key],
+                    date: douga.date,
+                    userAppears: shotsByKey[shotKey] ?? false,
+                    isFavorite: false,
+                    hasPostedToSNS: false,
+                    note: douga.note,
+                    mediaRef: mediaRef,
+                    sizeRawValue: nil,
+                    idx: nil,
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                ))
+                validCounts[.douga, default: 0] += 1
+            }
+
+            let migrated = try context.fetch(FetchDescriptor<MediaItem>())
+            guard Set(migrated.map(\.id)).count == migrated.count else {
+                throw ChekinanaMigrationIntegrityError.duplicateMediaID
+            }
+            let migratedCounts = Dictionary(grouping: migrated, by: \.kind)
+                .mapValues(\.count)
+            guard MediaItemKind.allCases.allSatisfy({ kind in
+                migratedCounts[kind, default: 0] == validCounts[kind, default: 0]
+            }) else {
+                throw ChekinanaMigrationIntegrityError.mediaCountMismatch
+            }
+            let migratedRecords = try context.fetch(FetchDescriptor<ChekiRecord>())
+            var migratedRecordQuantities: [ChekinanaChekiRecordIdentity: Int] = [:]
+            for record in migratedRecords {
+                let identity = ChekinanaChekiRecordIdentity(record)
+                migratedRecordQuantities[identity] = try ChekinanaChekiRecordStore.checkedCountSum(
+                    migratedRecordQuantities[identity, default: 0],
+                    max(1, record.count)
+                )
+            }
+            guard Set(migratedRecords.map(\.id)).count == migratedRecords.count,
+                  Set(migratedRecords.map(ChekinanaChekiRecordIdentity.init)).count
+                    == migratedRecords.count,
+                  migratedRecordQuantities == expectedRecordQuantities else {
+                throw ChekinanaMigrationIntegrityError.convertedRecordCountMismatch
+            }
+            for item in migrated {
+                do { try item.validateInvariant() }
+                catch { throw ChekinanaMigrationIntegrityError.invalidMediaItem }
+            }
+            try context.save()
+        }
+    }
+
+    private static func legacyMediaOrder<T>(
+        _ lhs: T,
+        _ rhs: T
+    ) -> Bool where T: PersistentModel {
+        String(describing: lhs.persistentModelID)
+            < String(describing: rhs.persistentModelID)
+    }
+
+    private static func availableID(
+        original: UUID,
+        kind: MediaItemKind,
+        occupied: inout Set<UUID>,
+        namespace: String = "media"
+    ) -> UUID {
+        if occupied.insert(original).inserted { return original }
+        var attempt = 0
+        while true {
+            let value = deterministicUUID(
+                "\(namespace)|\(kind.rawValue)|\(original.uuidString.lowercased())|\(attempt)"
+            )
+            if occupied.insert(value).inserted { return value }
+            attempt += 1
+        }
+    }
+
+    private static func deterministicUUID(_ value: String) -> UUID {
+        func fnv64(seed: UInt64, bytes: some Sequence<UInt8>) -> UInt64 {
+            bytes.reduce(seed) { partial, byte in
+                (partial ^ UInt64(byte)) &* 1_099_511_628_211
+            }
+        }
+        let bytes = Array(value.utf8)
+        let high = fnv64(seed: 14_695_981_039_346_656_037, bytes: bytes)
+        let low = fnv64(seed: 10_995_116_282_11, bytes: bytes.reversed())
+        let compact = String(format: "%016llx%016llx", high, low)
+        let formatted = "\(compact.prefix(8))-\(compact.dropFirst(8).prefix(4))-4\(compact.dropFirst(13).prefix(3))-a\(compact.dropFirst(17).prefix(3))-\(compact.dropFirst(20).prefix(12))"
+        return UUID(uuidString: formatted)!
     }
 
     private static func uniqueIDs(_ values: [UUID]) -> [UUID] {
@@ -3233,11 +5188,11 @@ enum ChekinanaModelContextResolver {
 
         var errorDescription: String? {
             switch self {
-            case .missingCheki: "The Cheki is no longer available."
-            case .missingChekiRecord: "The record is no longer available."
-            case .missingShame: "The Shame photo is no longer available."
-            case .missingDouga: "The Douga video is no longer available."
-            case .hiddenIdol: "A hidden Idol cannot be selected or modified."
+            case .missingCheki: ChekinanaL10n.message("The Cheki is no longer available.")
+            case .missingChekiRecord: ChekinanaL10n.message("The record is no longer available.")
+            case .missingShame: ChekinanaL10n.message("The Phone Photo is no longer available.")
+            case .missingDouga: ChekinanaL10n.message("The Video is no longer available.")
+            case .hiddenIdol: ChekinanaL10n.message("A hidden Idol cannot be selected or modified.")
             }
         }
     }
@@ -3246,9 +5201,14 @@ enum ChekinanaModelContextResolver {
         idolIDs: Set<UUID>,
         in modelContext: ModelContext
     ) throws -> [Idol] {
-        let fetchedIdols = try modelContext.fetch(FetchDescriptor<Idol>())
+        guard !idolIDs.isEmpty else { return [] }
+        let requestedIDs = Array(idolIDs)
+        var descriptor = FetchDescriptor<Idol>(
+            predicate: #Predicate { requestedIDs.contains($0.id) }
+        )
+        descriptor.fetchLimit = requestedIDs.count
         let resolved = ChekinanaIdolOrdering.ordered(
-            fetchedIdols.filter { idolIDs.contains($0.id) }
+            try modelContext.fetch(descriptor)
         )
         guard resolved.count == idolIDs.count,
               ChekinanaVisibilityPolicy.includesRecord(
@@ -3268,8 +5228,11 @@ enum ChekinanaModelContextResolver {
         let selectedIdols = try idols(idolIDs: idolIDs, in: modelContext)
         let selectedEvent: Event?
         if let eventID {
-            selectedEvent = try modelContext.fetch(FetchDescriptor<Event>())
-                .first { $0.id == eventID }
+            var descriptor = FetchDescriptor<Event>(
+                predicate: #Predicate { $0.id == eventID }
+            )
+            descriptor.fetchLimit = 1
+            selectedEvent = try modelContext.fetch(descriptor).first
         } else {
             selectedEvent = nil
         }
@@ -3279,9 +5242,46 @@ enum ChekinanaModelContextResolver {
         )
     }
 
-    static func cheki(id: UUID, in modelContext: ModelContext) throws -> Cheki {
-        guard let value = try modelContext.fetch(FetchDescriptor<Cheki>())
-            .first(where: { $0.id == id }) else {
+    static func mediaItem(
+        id: UUID,
+        kind: MediaItemKind,
+        in modelContext: ModelContext
+    ) throws -> MediaItem {
+        let kindRawValue = kind.rawValue
+        var descriptor = FetchDescriptor<MediaItem>(
+            predicate: #Predicate {
+                $0.id == id && $0.kindRawValue == kindRawValue
+            }
+        )
+        descriptor.fetchLimit = 1
+        guard let value = try modelContext.fetch(descriptor).first else {
+            switch kind {
+            case .cheki: throw ResolutionError.missingCheki
+            case .shame: throw ResolutionError.missingShame
+            case .douga: throw ResolutionError.missingDouga
+            }
+        }
+        return value
+    }
+
+    static func cheki(id: UUID, in modelContext: ModelContext) throws -> MediaItem {
+        try mediaItem(id: id, kind: .cheki, in: modelContext)
+    }
+
+    static func shame(id: UUID, in modelContext: ModelContext) throws -> MediaItem {
+        try mediaItem(id: id, kind: .shame, in: modelContext)
+    }
+
+    static func douga(id: UUID, in modelContext: ModelContext) throws -> MediaItem {
+        try mediaItem(id: id, kind: .douga, in: modelContext)
+    }
+
+    static func mediaItem(id: UUID, in modelContext: ModelContext) throws -> MediaItem {
+        var descriptor = FetchDescriptor<MediaItem>(
+            predicate: #Predicate { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        guard let value = try modelContext.fetch(descriptor).first else {
             throw ResolutionError.missingCheki
         }
         return value
@@ -3301,26 +5301,132 @@ enum ChekinanaModelContextResolver {
         return value
     }
 
-    static func shame(id: UUID, in modelContext: ModelContext) throws -> Shame {
-        guard let value = try modelContext.fetch(FetchDescriptor<Shame>())
-            .first(where: { $0.id == id }) else {
-            throw ResolutionError.missingShame
-        }
-        return value
+}
+
+/// Pure values only: no bridge model/context may survive into the next open.
+private struct ChekinanaLegacyMediaMigrationWitness: Equatable {
+    struct Media: Hashable {
+        let ownerID: UUID
+        let kind: MediaItemKind
+        let idolIDs: [UUID]
+        let eventID: UUID?
+        let date: Date?
+        let userAppears: Bool
+        let isFavorite: Bool
+        let hasPostedToSNS: Bool
+        let note: String
+        let mediaRef: String
+        let sizeRawValue: String?
+        let idx: Int?
+        let createdAt: Date
+        let updatedAt: Date
     }
 
-    static func douga(id: UUID, in modelContext: ModelContext) throws -> Douga {
-        guard let value = try modelContext.fetch(FetchDescriptor<Douga>())
-            .first(where: { $0.id == id }) else {
-            throw ResolutionError.missingDouga
+    let idolIDs: Set<UUID>
+    let eventIDs: Set<UUID>
+    let media: Set<Media>
+    let recordQuantities: [ChekinanaChekiRecordIdentity: Int]
+
+    private static func ordered(_ ids: [UUID]) -> [UUID] {
+        Array(Set(ids)).sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private static func recordIdentity(
+        idolIDs: [UUID], date: Date?, eventID: UUID?, size: String?, note: String
+    ) -> ChekinanaChekiRecordIdentity {
+        // This is the existing V16 metadata normalization, which happens
+        // before the final container is published by the production opener.
+        ChekinanaChekiRecordIdentity(
+            idolIDs: idolIDs, date: date, eventID: eventID,
+            sizeRawValue: ChekinanaMigrationChekiSize.normalizedRawValue(size),
+            note: note
+        )
+    }
+
+    private static func quantities(
+        in context: ModelContext
+    ) throws -> [ChekinanaChekiRecordIdentity: Int] {
+        var result: [ChekinanaChekiRecordIdentity: Int] = [:]
+        for value in try context.fetch(FetchDescriptor<ChekiRecord>()) {
+            let identity = recordIdentity(idolIDs: value.idolIDs, date: value.date,
+                eventID: value.eventID, size: value.sizeRawValue, note: value.note)
+            result[identity] = try ChekinanaChekiRecordStore.checkedCountSum(
+                result[identity, default: 0], max(1, value.count)
+            )
         }
-        return value
+        return result
+    }
+
+    static func legacy(in context: ModelContext) throws -> Self {
+        var media = Set<Media>()
+        var quantities = try quantities(in: context)
+        for value in try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Cheki>()) {
+            let ids = ordered(value.idols.map(\.id))
+            guard let ref = value.imageRef?.nonEmpty else {
+                let identity = recordIdentity(idolIDs: ids, date: value.date,
+                    eventID: value.event?.id, size: value.sizeRawValue, note: value.note)
+                quantities[identity] = try ChekinanaChekiRecordStore.checkedCountSum(
+                    quantities[identity, default: 0], 1
+                )
+                continue
+            }
+            media.insert(Media(ownerID: value.id, kind: .cheki, idolIDs: ids,
+                eventID: value.event?.id, date: value.date, userAppears: value.userAppears ?? false,
+                isFavorite: value.isFavorite, hasPostedToSNS: value.hasPostedToSNS,
+                note: value.note, mediaRef: ref,
+                sizeRawValue: ChekinanaMigrationChekiSize.normalizedRawValue(value.sizeRawValue),
+                idx: value.idx, createdAt: value.createdAt, updatedAt: value.updatedAt))
+        }
+        for value in try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Shame>()) {
+            guard let ref = value.imageRef?.nonEmpty else { continue }
+            let timestamp = value.date ?? Date(timeIntervalSince1970: 0)
+            media.insert(Media(ownerID: value.id, kind: .shame,
+                idolIDs: ordered(value.idols.map(\.id)), eventID: nil, date: value.date,
+                userAppears: false, isFavorite: false, hasPostedToSNS: false,
+                note: value.note, mediaRef: ref, sizeRawValue: nil, idx: nil,
+                createdAt: timestamp, updatedAt: timestamp))
+        }
+        for value in try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Douga>()) {
+            guard let ref = value.videoRef?.nonEmpty else { continue }
+            let timestamp = value.date ?? Date(timeIntervalSince1970: 0)
+            media.insert(Media(ownerID: value.id, kind: .douga,
+                idolIDs: ordered(value.idols.map(\.id)), eventID: nil, date: value.date,
+                userAppears: false, isFavorite: false, hasPostedToSNS: false,
+                note: value.note, mediaRef: ref, sizeRawValue: nil, idx: nil,
+                createdAt: timestamp, updatedAt: timestamp))
+        }
+        return Self(
+            idolIDs: Set(try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Idol>()).map(\.id)),
+            eventIDs: Set(try context.fetch(FetchDescriptor<ChekinanaLegacyMediaSchema.Event>()).map(\.id)),
+            media: media, recordQuantities: quantities
+        )
+    }
+
+    static func current(in context: ModelContext) throws -> Self {
+        let values = try context.fetch(FetchDescriptor<MediaItem>())
+        let media = Set(values.map { value in
+            Media(ownerID: value.mediaOwnerID, kind: value.kind,
+                idolIDs: ordered(value.idolIDs), eventID: value.eventID, date: value.date,
+                userAppears: value.userAppears, isFavorite: value.isFavorite,
+                hasPostedToSNS: value.hasPostedToSNS, note: value.note,
+                mediaRef: value.mediaRef, sizeRawValue: value.sizeRawValue, idx: value.idx,
+                createdAt: value.createdAt, updatedAt: value.updatedAt)
+        })
+        guard media.count == values.count else {
+            throw ChekinanaMigrationIntegrityError.duplicateMediaID
+        }
+        return Self(
+            idolIDs: Set(try context.fetch(FetchDescriptor<Idol>()).map(\.id)),
+            eventIDs: Set(try context.fetch(FetchDescriptor<Event>()).map(\.id)),
+            media: media, recordQuantities: try quantities(in: context)
+        )
     }
 }
 
 enum ChekinanaDataStore {
-    private static let currentMarkerSchemaVersion = 12
-    private static let migratableMarkerSchemaVersions: Set<Int> = [4, 5, 6, 7, 8, 9, 10, 11]
+    private static let currentMarkerSchemaVersion = 17
+    private static let preservedV16SourceMarker = ".preserved-v16-source"
+    private static let migratableMarkerSchemaVersions: Set<Int> = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     /// Frozen Core Data checksum for the production V7 schema. The V7 store
     /// copied from the affected iOS 17 device and a store generated from
     /// `ChekinanaSchemaV7` have this exact checksum.
@@ -3340,6 +5446,11 @@ enum ChekinanaDataStore {
         case v10 = 10
         case v11 = 11
         case v12 = 12
+        case v13 = 13
+        case v14 = 14
+        case v15 = 15
+        case v16 = 16
+        case v17 = 17
     }
 
     private final class ProcessCache: @unchecked Sendable {
@@ -3399,7 +5510,7 @@ enum ChekinanaDataStore {
             return .success(container)
         }
 
-        let schema = Schema(versionedSchema: ChekinanaSchemaV12.self)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
         let applicationSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let paths: StorePaths
@@ -3430,7 +5541,7 @@ enum ChekinanaDataStore {
 #endif
 
         let automaticContainer: (URL) throws -> ModelContainer = { candidateURL in
-            try ModelContainer(
+            let container = try ModelContainer(
                 for: schema,
                 configurations: [ModelConfiguration(
                     configurationName,
@@ -3439,13 +5550,22 @@ enum ChekinanaDataStore {
                     cloudKitDatabase: .none
                 )]
             )
+            try normalizeV16Metadata(in: container)
+            return container
         }
         let result = openPreservingStoreFamily(
             paths: paths,
             inspectStoreVersion: physicalStoreVersion,
-            makeAutomaticContainer: automaticContainer
+            makeAutomaticContainer: automaticContainer,
+            makeCompatibleV16Container: { candidateURL in
+                try compatibleV16Container(at: candidateURL, configurationName: configurationName)
+            },
+            makeLegacyMediaContainer: { candidateURL, version in
+                try legacyMediaContainer(at: candidateURL, sourceVersion: version,
+                    configurationName: configurationName)
+            }
         ) { candidateURL in
-            try ModelContainer(
+            let container = try ModelContainer(
                 for: schema,
                 migrationPlan: ChekinanaSchemaMigrationPlan.self,
                 configurations: [ModelConfiguration(
@@ -3455,11 +5575,322 @@ enum ChekinanaDataStore {
                     cloudKitDatabase: .none
                 )]
             )
+            try normalizeV16Metadata(in: container)
+            return container
         }
         if case .success(let container) = result {
             processCache.container = container
         }
         return result
+    }
+
+    /// Idempotent post-open repair also covers production V14 stores that must
+    /// use Core Data's automatic additive migration because their shipped V14
+    /// model checksum predates the frozen staged-migration schema.
+    static func normalizeV16Metadata(in container: ModelContainer) throws {
+        let context = ModelContext(container)
+        try context.transaction {
+            for event in try context.fetch(FetchDescriptor<Event>())
+            where event.source == nil {
+                event.source = ChekinanaEventSource.infer(from: event.weiboURL)
+            }
+            for record in try context.fetch(FetchDescriptor<ChekiRecord>())
+            where record.sizeRawValue.flatMap(ChekiSize.init(rawValue:)) == nil {
+                record.sizeRawValue = ChekiSize.mini.rawValue
+            }
+            try ChekinanaChekiRecordStore.mergeDuplicates(in: context)
+            try context.save()
+        }
+    }
+
+    /// Permit the additive V16 -> V17 upgrade without requiring a checksum
+    /// match to the full historical staged plan. Admit this path only when
+    /// exact version/entity metadata and stored values survive unchanged.
+    static func compatibleV16Container(
+        at candidateURL: URL,
+        configurationName: String,
+        afterMigration: (URL) throws -> Void = { _ in }
+    ) throws -> ModelContainer {
+        let before = try v16EntityHashes(at: candidateURL, expectedVersion: "16.0.0")
+        let valuesBefore = try v16StoredValues(at: candidateURL)
+        let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+        let container = try ModelContainer(for: schema, configurations: [
+            ModelConfiguration(configurationName, schema: schema, url: candidateURL,
+                cloudKitDatabase: .none)
+        ])
+        try afterMigration(candidateURL)
+        let after = try v16EntityHashes(at: candidateURL, expectedVersion: "17.0.0")
+        guard before == after,
+              try v16StoredValues(at: candidateURL) == valuesBefore else {
+            throw OpenFailure()
+        }
+        // Existing normalization is intentional business repair, so compare
+        // the raw additive result before performing it.
+        try validateV16ModelProjection(in: container)
+        try normalizeV16Metadata(in: container)
+        return container
+    }
+
+    /// Ask the current model mapping to compile a projection of every stored
+    /// property, even for an empty table. This validates renamed properties
+    /// without assuming a physical column spelling from another OS.
+    private static func validateV16ModelProjection(in container: ModelContainer) throws {
+        func validate<Model: PersistentModel>(
+            _ model: Model.Type, _ properties: [PartialKeyPath<Model>]
+        ) throws {
+            try autoreleasepool {
+                let context = ModelContext(container)
+                context.autosaveEnabled = false
+                var descriptor = FetchDescriptor<Model>()
+                descriptor.fetchLimit = 1
+                descriptor.includePendingChanges = false
+                descriptor.propertiesToFetch = properties
+                _ = try context.fetch(descriptor)
+            }
+        }
+        try validate(Idol.self, [
+            \.id, \.sourceId, \.name, \.group, \.color, \.birthday,
+            \.avatarImageRef, \.isFavorite, \.sortOrder, \.note,
+            \.createdAt, \.updatedAt, \.verification, \.bio, \.pattern, \.patterns,
+        ])
+        try validate(IdolPatternState.self, [
+            \.idolID, \.encoderVersion, \.cataloguePatternIDs, \.cataloguePatternCount,
+        ])
+        try validate(Event.self, [
+            \.id, \.name, \.date, \.city, \.livehouse, \.legacyVenue,
+            \.avatarImageRef, \.price, \.weiboURL, \.sourceRawValue,
+            \.ticketURL, \.note, \.createdAt, \.updatedAt,
+        ])
+        try validate(EventSchedule.self, [\.eventID, \.openTime, \.startTime])
+        try validate(EventImage.self, [\.id, \.eventID, \.imageRef, \.sortOrder])
+        try validate(CalendarGroupOrder.self, [\.id, \.dateKey, \.groupKey, \.sortOrder])
+        try validate(TravelSegment.self, [
+            \.id, \.modeRawValue, \.operatorName, \.operatorIconRef, \.serviceNumber,
+            \.departureCity, \.departureLocation, \.arrivalCity, \.arrivalLocation,
+            \.departureTime, \.arrivalTime, \.seatNumber, \.carriageNumber,
+            \.note, \.createdAt, \.updatedAt,
+        ])
+        try validate(MediaItem.self, [
+            \.id, \.mediaOwnerID, \.kindRawValue, \.idolIDs, \.eventID, \.date,
+            \.userAppears, \.isFavorite, \.hasPostedToSNS, \.note, \.mediaRef,
+            \.sizeRawValue, \.idx, \.createdAt, \.updatedAt,
+        ])
+        try validate(ChekiRecord.self, [
+            \.id, \.idolIDs, \.eventID, \.date, \.sizeRawValue, \.note, \.count,
+        ])
+        try validate(Memory.self, [
+            \.id, \.title, \.bodyText, \.date, \.eventID, \.idolIDs,
+            \.createdAt, \.updatedAt,
+        ])
+        try validate(MemoryAttachment.self, [
+            \.id, \.memoryID, \.kindRawValue, \.managedRef, \.sortOrder,
+            \.createdAt, \.updatedAt,
+        ])
+        try validate(CustomChekiSize.self, [
+            \.id, \.name, \.widthRatio, \.heightRatio,
+            \.pixelWidth, \.pixelHeight, \.createdAt,
+        ])
+    }
+
+    private static let v16Tables: [(entity: String, table: String, key: String)] = [
+        ("Idol", "ZIDOL", "ZID"),
+        ("IdolPatternState", "ZIDOLPATTERNSTATE", "ZIDOLID"),
+        ("Event", "ZEVENT", "ZID"),
+        ("EventSchedule", "ZEVENTSCHEDULE", "ZEVENTID"),
+        ("EventImage", "ZEVENTIMAGE", "ZID"),
+        ("CalendarGroupOrder", "ZCALENDARGROUPORDER", "ZID"),
+        ("TravelSegment", "ZTRAVELSEGMENT", "ZID"),
+        ("MediaItem", "ZMEDIAITEM", "ZID"),
+        ("ChekiRecord", "ZCHEKIRECORD", "ZID"),
+        ("Memory", "ZMEMORY", "ZID"),
+        ("MemoryAttachment", "ZMEMORYATTACHMENT", "ZID"),
+        ("CustomChekiSize", "ZCUSTOMCHEKISIZE", "ZID"),
+    ]
+
+    private static func v16EntityHashes(
+        at url: URL, expectedVersion: String
+    ) throws -> [String: Data] {
+        let metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(
+            type: .sqlite, at: url
+        )
+        let identifiers: [String]
+        if let values = metadata[NSStoreModelVersionIdentifiersKey] as? [String] {
+            identifiers = values
+        } else if let values = metadata[NSStoreModelVersionIdentifiersKey] as? Set<String> {
+            identifiers = Array(values)
+        } else {
+            throw OpenFailure()
+        }
+        guard identifiers == [expectedVersion],
+              let hashes = metadata[NSStoreModelVersionHashesKey] as? [String: Data] else {
+            throw OpenFailure()
+        }
+        let originalNames = Set(v16Tables.map { $0.entity })
+        let expectedNames = expectedVersion == "17.0.0"
+            ? originalNames.union(["IdolAvatarState"]) : originalNames
+        guard Set(hashes.keys) == expectedNames,
+              hashes.values.allSatisfy({ !$0.isEmpty }) else { throw OpenFailure() }
+        return hashes.filter { originalNames.contains($0.key) }
+    }
+
+    private struct V16StoredValues: Equatable {
+        let columns: [String]
+        let rows: Int
+        let digest: Data
+    }
+
+    /// The current V16 entities have scalar keys, not Core Data relationships.
+    /// Stream one row at a time; do not fetch all models or copy large blobs.
+    private static func v16StoredValues(at url: URL) throws -> [String: V16StoredValues] {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+                == SQLITE_OK, let database = handle else {
+            if let handle { sqlite3_close(handle) }
+            throw OpenFailure()
+        }
+        defer { sqlite3_close(database) }
+        guard sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else {
+            throw OpenFailure()
+        }
+        defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
+        func prepare(_ sql: String) throws -> OpaquePointer {
+            var statement: OpaquePointer?
+            let result = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
+            guard result == SQLITE_OK, let statement else {
+                if let statement { sqlite3_finalize(statement) }
+                throw OpenFailure()
+            }
+            return statement
+        }
+        var result: [String: V16StoredValues] = [:]
+        for item in v16Tables {
+            let names = try prepare("PRAGMA table_info(\"\(item.table)\")")
+            var columns: [String] = []
+            var code = sqlite3_step(names)
+            while code == SQLITE_ROW {
+                guard let value = sqlite3_column_text(names, 1) else {
+                    sqlite3_finalize(names)
+                    throw OpenFailure()
+                }
+                let name = String(cString: value)
+                guard name.utf8.allSatisfy({
+                    ($0 >= 65 && $0 <= 90) || ($0 >= 48 && $0 <= 57) || $0 == 95
+                }) else {
+                    sqlite3_finalize(names)
+                    throw OpenFailure()
+                }
+                if !["Z_PK", "Z_ENT", "Z_OPT"].contains(name) { columns.append(name) }
+                code = sqlite3_step(names)
+            }
+            sqlite3_finalize(names)
+            guard code == SQLITE_DONE, columns.contains(item.key) else { throw OpenFailure() }
+            columns.sort()
+            let projection = columns.map { "\"\($0)\"" }.joined(separator: ",")
+            let statement = try prepare(
+                "SELECT \(projection) FROM \"\(item.table)\" ORDER BY \"\(item.key)\""
+            )
+            defer { sqlite3_finalize(statement) }
+            var hash = SHA256()
+            func append(_ value: UInt64) {
+                var bits = value.littleEndian
+                withUnsafeBytes(of: &bits) { hash.update(data: Data($0)) }
+            }
+            var rows = 0
+            code = sqlite3_step(statement)
+            while code == SQLITE_ROW {
+                let next = rows.addingReportingOverflow(1)
+                guard !next.overflow else { throw OpenFailure() }
+                rows = next.partialValue
+                for column in columns.indices {
+                    let index = Int32(column)
+                    let type = sqlite3_column_type(statement, index)
+                    append(UInt64(type))
+                    switch type {
+                    case SQLITE_NULL:
+                        break
+                    case SQLITE_INTEGER:
+                        append(UInt64(bitPattern: sqlite3_column_int64(statement, index)))
+                    case SQLITE_FLOAT:
+                        append(sqlite3_column_double(statement, index).bitPattern)
+                    case SQLITE_TEXT, SQLITE_BLOB:
+                        let count = Int(sqlite3_column_bytes(statement, index))
+                        append(UInt64(count))
+                        if count > 0 {
+                            guard let bytes = sqlite3_column_blob(statement, index) else {
+                                throw OpenFailure()
+                            }
+                            // SQLite owns this memory until the next step.
+                            // Feed bounded slices synchronously to the hasher.
+                            var offset = 0
+                            while offset < count {
+                                let size = min(65_536, count - offset)
+                                hash.update(data: Data(bytes: bytes.advanced(by: offset), count: size))
+                                offset += size
+                            }
+                        }
+                    default:
+                        throw OpenFailure()
+                    }
+                }
+                code = sqlite3_step(statement)
+            }
+            guard code == SQLITE_DONE else { throw OpenFailure() }
+            result[item.entity] = V16StoredValues(
+                columns: columns, rows: rows, digest: Data(hash.finalize())
+            )
+        }
+        return result
+    }
+
+    /// V7/V8 need automatic additive repair on older runtimes, but that repair
+    /// must end at V13 while every legacy media entity is still present.
+    static func legacyMediaContainer(
+        at candidateURL: URL,
+        sourceVersion: PhysicalStoreVersion,
+        configurationName: String,
+        afterBridge: () throws -> Void = {}
+    ) throws -> ModelContainer {
+        let sourceSchema: Schema
+        switch sourceVersion {
+        case .v7: sourceSchema = Schema(versionedSchema: ChekinanaSchemaV7.self)
+        case .v8: sourceSchema = Schema(versionedSchema: ChekinanaSchemaV8.self)
+        default: throw OpenFailure()
+        }
+        func configuration(_ schema: Schema) -> ModelConfiguration {
+            ModelConfiguration(configurationName, schema: schema, url: candidateURL,
+                cloudKitDatabase: .none)
+        }
+        let expected = try autoreleasepool {
+            let source = try ModelContainer(for: sourceSchema,
+                configurations: [configuration(sourceSchema)])
+            let context = ModelContext(source)
+            context.autosaveEnabled = false
+            return try ChekinanaLegacyMediaMigrationWitness.legacy(in: context)
+        }
+        try autoreleasepool {
+            let bridgeSchema = Schema(versionedSchema: ChekinanaSchemaV13.self)
+            let bridge = try ModelContainer(for: bridgeSchema,
+                configurations: [configuration(bridgeSchema)])
+            let context = ModelContext(bridge)
+            context.autosaveEnabled = false
+            guard try ChekinanaLegacyMediaMigrationWitness.legacy(in: context) == expected else {
+                throw ChekinanaMigrationIntegrityError.mediaCountMismatch
+            }
+        }
+        // Both earlier autorelease pools return pure values/void. No source
+        // or bridge model, context, or container is retained into this open.
+        try afterBridge()
+        let schema = Schema(versionedSchema: ChekinanaSchemaV17.self)
+        let container = try ModelContainer(for: schema,
+            migrationPlan: ChekinanaSchemaMigrationPlan.self,
+            configurations: [configuration(schema)])
+        try normalizeV16Metadata(in: container)
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        guard try ChekinanaLegacyMediaMigrationWitness.current(in: context) == expected else {
+            throw ChekinanaMigrationIntegrityError.mediaCountMismatch
+        }
+        return container
     }
 
     static func openPreservingStoreFamily(
@@ -3468,6 +5899,8 @@ enum ChekinanaDataStore {
         copyStore: ((URL, URL, FileManager) throws -> Void)? = nil,
         inspectStoreVersion: ((URL) throws -> PhysicalStoreVersion?)? = nil,
         makeAutomaticContainer: ((URL) throws -> ModelContainer)? = nil,
+        makeCompatibleV16Container: ((URL) throws -> ModelContainer)? = nil,
+        makeLegacyMediaContainer: ((URL, PhysicalStoreVersion) throws -> ModelContainer)? = nil,
         makeContainer: (URL) throws -> ModelContainer
     ) -> Result<ModelContainer, OpenFailure> {
         var sourceURL: URL?
@@ -3518,8 +5951,9 @@ enum ChekinanaDataStore {
 
             if case .current = markerState,
                let sourceURL,
-               physicalStoreVersion == nil || physicalStoreVersion == .v12 {
-                // A versioned marker is published only after this exact V12
+               physicalStoreVersion == nil
+                    || physicalStoreVersion?.rawValue == currentMarkerSchemaVersion {
+                // A versioned marker is published only after this current
                 // store has opened successfully. Reopen it in place on every
                 // later cold launch; copying or rotating it would add startup
                 // I/O and make the active store less stable.
@@ -3565,18 +5999,38 @@ enum ChekinanaDataStore {
                 }
             }
 
+            // V7/V8 use their dedicated additive bridge plus explicit media
+            // conversion. V14 was published before its model
+            // checksum was frozen. Some
+            // production stores therefore identify themselves as 14.x while
+            // their entity hashes do not match the V14 snapshot embedded in
+            // the staged plan. Handing those stores to staged migration fails
+            // with NSCocoaErrorDomain 134504 (unknown model version). V14 ->
+            // V15 is purely additive, so migrate the isolated candidate with
+            // Core Data's inferred lightweight mapping instead. The
+            // authoritative source and marker remain untouched until this
+            // open succeeds.
             let container: ModelContainer
-            if physicalStoreVersion == .v7 || physicalStoreVersion == .v8,
+            if let physicalStoreVersion,
+               [PhysicalStoreVersion.v7, .v8].contains(physicalStoreVersion),
+               let makeLegacyMediaContainer {
+                container = try makeLegacyMediaContainer(candidateURL, physicalStoreVersion)
+            } else if physicalStoreVersion == .v16,
+               let makeCompatibleV16Container {
+                container = try makeCompatibleV16Container(candidateURL)
+            } else if physicalStoreVersion == .v14,
                let makeAutomaticContainer {
-                // iOS 17.3.1 cannot recognize this otherwise valid V7 store
-                // when it is opened with the full staged plan (134504). The
-                // V8 through V12 changes only add scalar-keyed entities/fields, so the
-                // automatic lightweight path is sufficient and compatible.
                 container = try makeAutomaticContainer(candidateURL)
             } else {
-                // V1-V6 retain their custom/staged repair and data migration
-                // chain. A newly created store also uses this closure.
                 container = try makeContainer(candidateURL)
+            }
+            if physicalStoreVersion == .v16, let sourceDirectory {
+                // Only a verified successful V16 candidate earns a durable
+                // source-retention flag. Failed candidates are still bounded.
+                try Data("16".utf8).write(
+                    to: sourceDirectory.appendingPathComponent(preservedV16SourceMarker),
+                    options: .atomic
+                )
             }
             try markerData(directoryName: candidateName).write(
                 to: paths.activeMarkerURL,
@@ -3585,16 +6039,24 @@ enum ChekinanaDataStore {
 
             // Once the marker atomically points at the successfully opened
             // candidate, an older managed candidate is no longer authoritative.
-            // The original legacy store and its sidecars are intentionally
-            // never removed, so a pre-repair physical backup stays available.
-            if let sourceURL,
+            // The original legacy store is never removed. Keep the historical
+            // V14 managed candidate as well because it is the only byte-exact
+            // rollback source for an installation whose reused V14 identifier
+            // does not describe its entity hashes.
+            if physicalStoreVersion != .v14, physicalStoreVersion != .v16,
+               let sourceURL,
                sourceURL.deletingLastPathComponent().deletingLastPathComponent()
                     .standardizedFileURL == paths.candidateRootURL.standardizedFileURL {
                 try? fileManager.removeItem(at: sourceURL.deletingLastPathComponent())
             }
+            let successfullyPreservedDirectories = [
+                newCandidateDirectory,
+                (physicalStoreVersion == .v14 || physicalStoreVersion == .v16)
+                    ? sourceDirectory : nil,
+            ].compactMap { $0 }
             cleanupManagedCandidates(
                 in: paths.candidateRootURL,
-                preserving: [newCandidateDirectory],
+                preserving: successfullyPreservedDirectories,
                 diagnosticLimit: 0,
                 fileManager: fileManager
             )
@@ -3744,6 +6206,8 @@ enum ChekinanaDataStore {
                   values.isSymbolicLink != true else {
                 return nil
             }
+            guard !fileManager.fileExists(atPath: standardized
+                .appendingPathComponent(preservedV16SourceMarker).path) else { return nil }
             return (standardized, values.contentModificationDate ?? .distantPast)
         }.sorted {
             if $0.1 != $1.1 { return $0.1 > $1.1 }
@@ -3790,23 +6254,17 @@ enum ChekinanaDataStore {
                 for order in try context.fetch(FetchDescriptor<CalendarGroupOrder>()) {
                     context.delete(order)
                 }
-                for link in try context.fetch(FetchDescriptor<MediaEventLink>()) {
-                    context.delete(link)
-                }
-                for shotType in try context.fetch(FetchDescriptor<MediaShotType>()) {
-                    context.delete(shotType)
-                }
-                for douga in try context.fetch(FetchDescriptor<Douga>()) {
-                    context.delete(douga)
-                }
-                for shame in try context.fetch(FetchDescriptor<Shame>()) {
-                    context.delete(shame)
-                }
-                for cheki in try context.fetch(FetchDescriptor<Cheki>()) {
-                    context.delete(cheki)
+                for item in try context.fetch(FetchDescriptor<MediaItem>()) {
+                    context.delete(item)
                 }
                 for record in try context.fetch(FetchDescriptor<ChekiRecord>()) {
                     context.delete(record)
+                }
+                for attachment in try context.fetch(FetchDescriptor<MemoryAttachment>()) {
+                    context.delete(attachment)
+                }
+                for memory in try context.fetch(FetchDescriptor<Memory>()) {
+                    context.delete(memory)
                 }
                 try context.save()
                 let eventImages = try context.fetch(FetchDescriptor<EventImage>())
@@ -3828,6 +6286,9 @@ enum ChekinanaDataStore {
                 travelSegments.forEach(context.delete)
                 for idol in try context.fetch(FetchDescriptor<Idol>()) {
                     context.delete(idol)
+                }
+                for size in try context.fetch(FetchDescriptor<CustomChekiSize>()) {
+                    context.delete(size)
                 }
                 try context.save()
             }

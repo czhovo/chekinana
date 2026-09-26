@@ -602,7 +602,7 @@ class DeepSeekClient:
 
     endpoint = "https://api.deepseek.com/chat/completions"
     models_endpoint = "https://api.deepseek.com/models"
-    model = "deepseek-v4-pro"
+    model = "deepseek-flash"
 
     def __init__(self, api_key: str | None = None, timeout: float = 30.0):
         self._api_key = api_key

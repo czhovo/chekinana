@@ -74,6 +74,7 @@ async function interpret(content, input = DEFAULT_INPUT, options = {}) {
 
 for (const { intent, utterance, slots } of [
   { intent: "addidol", utterance: "添加 Idol 小爱", slots: { name: "小爱" } },
+  { intent: "editidol", utterance: "把 Idol 小爱的团体改成 Lumina", slots: { target: "小爱", group: "Lumina" } },
   { intent: "deleteidol", utterance: "删除 Idol 小爱", slots: { target: "小爱" } },
   { intent: "favoriteidol", utterance: "把 Idol 小爱设为喜欢", slots: { target: "小爱", favorite: true } },
   { intent: "addevent", utterance: "添加 2026-08-01 的夏日祭", slots: { name: "夏日祭", date: "2026-08-01" } },
@@ -81,22 +82,6 @@ for (const { intent, utterance, slots } of [
   { intent: "deleteevent", utterance: "删除 Event 夏日祭", slots: { target: "夏日祭" } },
   { intent: "listidol", utterance: "列出所有 Idol", slots: {} },
   { intent: "listevent", utterance: "列出所有 Event", slots: {} },
-  { intent: "navigate", utterance: "打开 2026-08-01 的日历", slots: { destination: "calendar", date: "2026-08-01" } },
-  {
-    intent: "open_scan",
-    utterance: "打开扫描，识别日期和 Idol，包括未分配，候选小爱和小桃，日期从 2026-08-01 到 2026-08-03",
-    slots: {
-      recognize_date: true,
-      recognize_idol: true,
-      includes_unassigned: true,
-      candidate_refs: ["小爱", "小桃"],
-      date_from: "2026-08-01",
-      date_to: "2026-08-03",
-    },
-  },
-  { intent: "scancheki", utterance: "扫描我已经选择的照片", slots: {} },
-  { intent: "addcheki", utterance: "从相册把小爱的 2026-08-01 照片添加为 Cheki", slots: { idols: ["小爱"], date: "2026-08-01" } },
-  { intent: "addscancheki", utterance: "把全部扫描结果关联小爱和 2026-08-01", slots: { temporary: "all", idols: ["小爱"], date: "2026-08-01" } },
   { intent: "listcheki", utterance: "列出小爱在夏日祭的 Cheki", slots: { idol: "小爱", event: "夏日祭" } },
   { intent: "showidol", utterance: "查看 Idol 小爱", slots: { target: "小爱" } },
   { intent: "showevent", utterance: "查看 Event 夏日祭", slots: { target: "夏日祭" } },
@@ -119,20 +104,21 @@ for (const { intent, utterance, slots } of [
       size: "mini",
     },
   },
-  { intent: "showrecord", utterance: "查看手机合影记录 合影1", slots: { record_type: "shame", target: "合影1" } },
+  { intent: "showrecord", utterance: "查看拍立得记录 切1", slots: { record_type: "cheki", target: "切1" } },
   {
     intent: "addrecord",
-    utterance: "添加小爱在 2026-08-01 的手机合影记录，备注开心",
-    slots: { record_type: "shame", idols: ["小爱"], date: "2026-08-01", note: "开心" },
+    utterance: "添加小爱在 2026-08-01 的3张拍立得记录，备注开心",
+    slots: { record_type: "cheki", idols: ["小爱"], date: "2026-08-01", note: "开心", count: 3 },
   },
   {
     intent: "editrecord",
     utterance: "把拍立得记录 切1 的 idx 改为 3 并设为不喜欢",
     slots: { record_type: "cheki", target: "切1", idx: 3, favorite: false },
   },
-  { intent: "deleterecord", utterance: "删除视频记录 视频1", slots: { record_type: "douga", target: "视频1" } },
+  { intent: "deleterecord", utterance: "删除拍立得记录 切2", slots: { record_type: "cheki", target: "切2" } },
+  { intent: "statscheki", utterance: "我切了谁多少张", slots: {} },
 ]) {
-  test(`accepts the complete iOS intent registry entry: ${intent}`, async () => {
+  test(`accepts supported Assistant runtime intent: ${intent}`, async () => {
     const result = await interpret({
       version: 1,
       kind: "plan",
@@ -141,6 +127,29 @@ for (const { intent, utterance, slots } of [
 
     assert.equal(result.status, 200);
     assert.deepEqual(result.body.operations, [{ intent, slots }]);
+  });
+}
+
+for (const { intent, utterance, slots } of [
+  { intent: "navigate", utterance: "打开偶像页面", slots: { destination: "idols" } },
+  { intent: "open_scan", utterance: "打开扫描", slots: {} },
+  { intent: "scancheki", utterance: "扫描已选照片", slots: {} },
+  { intent: "addcheki", utterance: "从相册添加拍立得", slots: {} },
+  { intent: "addscancheki", utterance: "保存全部扫描结果", slots: { temporary: "all" } },
+]) {
+  test(`rejects removed Assistant runtime intent: ${intent}`, async () => {
+    const result = await interpret({
+      version: 1,
+      kind: "plan",
+      operations: [{ intent, slots }],
+    }, { ...DEFAULT_INPUT, utterance });
+
+    assert.equal(result.status, 422);
+    assert.deepEqual(result.body, {
+      version: 1,
+      kind: "reject",
+      code: "invalid_model_output",
+    });
   });
 }
 
@@ -159,57 +168,12 @@ for (const { label, utterance, draft, missing } of [
   });
 }
 
-test("enforces navigate and open_scan implication rules", async () => {
-  const invalidOperations = [
-    {
-      utterance: "打开 2026-08-01 的设置",
-      operation: { intent: "navigate", slots: { destination: "settings", date: "2026-08-01" } },
-    },
-    {
-      utterance: "打开扫描，固定 2026-08-01，同时从 2026-08-01 到 2026-08-02",
-      operation: {
-        intent: "open_scan",
-        slots: { fixed_date: "2026-08-01", date_from: "2026-08-01", date_to: "2026-08-02" },
-      },
-    },
-    {
-      utterance: "打开扫描，从 2026-08-01 开始",
-      operation: { intent: "open_scan", slots: { date_from: "2026-08-01" } },
-    },
-    {
-      utterance: "打开扫描，从 2026-08-03 到 2026-08-01",
-      operation: { intent: "open_scan", slots: { date_from: "2026-08-03", date_to: "2026-08-01" } },
-    },
-    {
-      utterance: "打开扫描并识别日期",
-      operation: { intent: "open_scan", slots: { recognize_date: "true" } },
-    },
-    {
-      utterance: "打开扫描，不识别日期但固定为 2026-08-01",
-      operation: { intent: "open_scan", slots: { recognize_date: false, fixed_date: "2026-08-01" } },
-    },
-    {
-      utterance: "打开扫描，不识别 Idol 但包括未分配",
-      operation: { intent: "open_scan", slots: { recognize_idol: false, includes_unassigned: true } },
-    },
-  ];
-  for (const { utterance, operation } of invalidOperations) {
-    const result = await interpret({
-      version: 1,
-      kind: "plan",
-      operations: [operation],
-    }, { ...DEFAULT_INPUT, utterance });
-    assert.equal(result.status, 422, utterance);
-    assert.equal(result.body.code, "invalid_model_output", utterance);
-  }
-});
-
 test("record schemas enforce Cheki-only fields and optional add date", async () => {
   const addWithoutDate = await interpret({
     version: 1,
     kind: "plan",
-    operations: [{ intent: "addrecord", slots: { record_type: "douga", idols: ["小爱"] } }],
-  }, { ...DEFAULT_INPUT, utterance: "给小爱添加一个视频记录" });
+    operations: [{ intent: "addrecord", slots: { record_type: "cheki", idols: ["小爱"], count: 1 } }],
+  }, { ...DEFAULT_INPUT, utterance: "给小爱添加1张拍立得记录" });
   assert.equal(addWithoutDate.status, 200);
 
   const invalidOperations = [
@@ -255,17 +219,12 @@ test("record and Event edits accept only their exact clear_fields enums", async 
         intent: "editrecord",
         slots: { record_type: "cheki", target: "记录1", clear_fields: ["idx", "size"] },
       },
-      {
-        intent: "editrecord",
-        slots: { record_type: "shame", target: "合影1", clear_fields: ["event", "note"] },
-      },
     ],
-  }, { ...DEFAULT_INPUT, utterance: "清空夏日祭的日期和 URL，清空记录1的 idx 和 size，清空合影1的 event 和 note" });
+  }, { ...DEFAULT_INPUT, utterance: "清空夏日祭的日期和 URL，清空记录1的 idx 和 size" });
   assert.equal(result.status, 200);
   assert.deepEqual(result.body.operations.map(({ slots }) => slots.clear_fields), [
     ["date", "url"],
     ["idx", "size"],
-    ["event", "note"],
   ]);
 });
 
@@ -297,22 +256,6 @@ test("human-reference slots reject UUIDs, URIs, and file paths", async () => {
     assert.equal(result.body.code, "invalid_model_output");
   }
 });
-
-for (const { intent, utterance } of [
-  { intent: "addcheki", utterance: "从已选照片添加 Cheki" },
-  { intent: "addscancheki", utterance: "保存已选扫描结果" },
-]) {
-  test(`${intent} accepts a complete plan without metadata slots`, async () => {
-    const result = await interpret({
-      version: 1,
-      kind: "plan",
-      operations: [{ intent, slots: {} }],
-    }, { ...DEFAULT_INPUT, utterance });
-
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body.operations, [{ intent, slots: {} }]);
-  });
-}
 
 test("accepts a typed unsupported result for an action outside the typed registry", async () => {
   const result = await interpret({
@@ -754,67 +697,6 @@ test("rejects a miscalculated relative date", async () => {
   assert.equal(result.body.code, "invalid_model_output");
 });
 
-test("accepts addscancheki with typed slots", async () => {
-  const result = await interpret({
-    version: 1,
-    kind: "plan",
-    operations: [{
-      intent: "addscancheki",
-      slots: {
-        temporary: "all",
-        idols: ["小爱", "小美"],
-        event: "夏日祭",
-        user: "true",
-        size: "wide",
-        note: "双人签名切",
-      },
-    }],
-  }, { ...DEFAULT_INPUT, utterance: "把全部扫描结果存为小爱和小美在夏日祭的双人签名切，我也在，宽版" });
-
-  assert.equal(result.status, 200);
-  assert.equal(result.body.operations[0].intent, "addscancheki");
-  assert.deepEqual(result.body.operations[0].slots.idols, ["小爱", "小美"]);
-});
-
-test("accepts addscancheki without event or date so the App can use recognized dates", async () => {
-  const result = await interpret({
-    version: 1,
-    kind: "plan",
-    operations: [{
-      intent: "addscancheki",
-      slots: { temporary: "all", idols: ["巫歌"] },
-    }],
-  }, { ...DEFAULT_INPUT, utterance: "把全部扫描结果关联巫歌，使用识别日期" });
-
-  assert.equal(result.status, 200);
-  assert.deepEqual(result.body.operations[0], {
-    intent: "addscancheki",
-    slots: { temporary: "all", idols: ["巫歌"] },
-  });
-});
-
-for (const intent of ["addcheki", "addscancheki"]) {
-  test(`${intent} preserves explicitly supplied event and date together`, async () => {
-    const result = await interpret({
-      version: 1,
-      kind: "plan",
-      operations: [{
-        intent,
-        slots: { event: "夏日祭", date: "2026-08-01" },
-      }],
-    }, {
-      ...DEFAULT_INPUT,
-      utterance: `${intent === "addcheki" ? "从已选照片添加 Cheki" : "保存已选扫描结果"}，活动夏日祭，日期 2026-08-01`,
-    });
-
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body.operations[0].slots, {
-      event: "夏日祭",
-      date: "2026-08-01",
-    });
-  });
-}
-
 test("rejects listcheki with both event and date to match the iOS contract", async () => {
   const result = await interpret({
     version: 1,
@@ -829,64 +711,16 @@ test("rejects listcheki with both event and date to match the iOS contract", asy
   assert.equal(result.body.code, "invalid_model_output");
 });
 
-for (const [utterance, user, size] of [
-  ["添加小爱在 2026-07-16 的切，我不在，小尺寸", "false", "mini"],
-  ["添加小爱在 2026-07-16 的切，不知道我在不在，尺寸不确定", "?", "?"],
-  ["添加小爱在 2026-07-16 的切，我出镜，其他尺寸", "true", "else"],
-]) {
-  test(`accepts narrow Chinese enum mappings for user=${user}, size=${size}`, async () => {
-    const result = await interpret({
-      version: 1,
-      kind: "plan",
-      operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", user, size },
-      }],
-    }, { ...DEFAULT_INPUT, utterance });
-
-    assert.equal(result.status, 200);
-    assert.equal(result.body.operations[0].slots.user, user);
-    assert.equal(result.body.operations[0].slots.size, size);
-  });
-}
-
-test("accepts the production album-Cheki wording with 我没有出镜", async () => {
-  const utterance = "把选中的相册照片整理为 Cheki，偶像是 aina，活动日期 2026-07-11，我没有出镜，尺寸宽版，备注 首次演示";
-  const result = await interpret({
-    version: 1,
-    kind: "plan",
-    operations: [{
-      intent: "addcheki",
-      slots: {
-        idols: ["aina"],
-        date: "2026-07-11",
-        user: "false",
-        size: "wide",
-        note: "首次演示",
-      },
-    }],
-  }, { ...DEFAULT_INPUT, utterance });
-
-  assert.equal(result.status, 200);
-  assert.deepEqual(result.body.operations[0].slots, {
-    idols: ["aina"],
-    date: "2026-07-11",
-    user: "false",
-    size: "wide",
-    note: "首次演示",
-  });
-});
-
 for (const phrase of ["我没有出镜", "我并未出镜", "照片里没有我", "没有拍到我"]) {
-  test(`accepts explicit false user evidence: ${phrase}`, async () => {
+  test(`editcheki accepts explicit false user evidence: ${phrase}`, async () => {
     const result = await interpret({
       version: 1,
       kind: "plan",
       operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", user: "false" },
+        intent: "editcheki",
+        slots: { target: "切1", user: "false" },
       }],
-    }, { ...DEFAULT_INPUT, utterance: `添加小爱在 2026-07-16 的切，${phrase}` });
+    }, { ...DEFAULT_INPUT, utterance: `把切1改为${phrase}` });
 
     assert.equal(result.status, 200);
     assert.equal(result.body.operations[0].slots.user, "false");
@@ -904,10 +738,10 @@ for (const [label, phrase, modelValue] of [
       version: 1,
       kind: "plan",
       operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", user: modelValue },
+        intent: "editcheki",
+        slots: { target: "切1", user: modelValue },
       }],
-    }, { ...DEFAULT_INPUT, utterance: `添加小爱在 2026-07-16 的切，${phrase}` });
+    }, { ...DEFAULT_INPUT, utterance: `把切1改为${phrase}` });
 
     assert.equal(result.status, 422);
     assert.equal(result.body.code, "invalid_model_output");
@@ -925,10 +759,10 @@ for (const [label, phrase, modelValue] of [
       version: 1,
       kind: "plan",
       operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", user: modelValue },
+        intent: "editcheki",
+        slots: { target: "切1", user: modelValue },
       }],
-    }, { ...DEFAULT_INPUT, utterance: `添加小爱在 2026-07-16 的切，${phrase}` });
+    }, { ...DEFAULT_INPUT, utterance: `把切1改为${phrase}` });
 
     assert.equal(result.status, 422);
     assert.equal(result.body.code, "invalid_model_output");
@@ -948,10 +782,10 @@ for (const [phrase, modelValue] of [
       version: 1,
       kind: "plan",
       operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", user: modelValue },
+        intent: "editcheki",
+        slots: { target: "切1", user: modelValue },
       }],
-    }, { ...DEFAULT_INPUT, utterance: `添加小爱在 2026-07-16 的切，${phrase}` });
+    }, { ...DEFAULT_INPUT, utterance: `把切1改为${phrase}` });
 
     assert.equal(result.status, 200);
     assert.equal(result.body.operations[0].slots.user, modelValue);
@@ -964,63 +798,13 @@ for (const extraSlots of [{ user: "true" }, { size: "wide" }]) {
       version: 1,
       kind: "plan",
       operations: [{
-        intent: "addcheki",
-        slots: { idols: ["小爱"], date: "2026-07-16", ...extraSlots },
+        intent: "editcheki",
+        slots: { target: "切1", ...extraSlots },
       }],
-    }, { ...DEFAULT_INPUT, utterance: "添加小爱在 2026-07-16 的切" });
+    }, { ...DEFAULT_INPUT, utterance: "修改切1" });
 
     assert.equal(result.status, 422);
     assert.equal(result.body.code, "invalid_model_output");
-  });
-}
-
-test("rejects temporary=all without explicit selection or anaphora semantics", async () => {
-  const result = await interpret({
-    version: 1,
-    kind: "plan",
-    operations: [{
-      intent: "addscancheki",
-      slots: { temporary: "all", idols: ["小爱"], date: "2026-07-16" },
-    }],
-  }, { ...DEFAULT_INPUT, utterance: "保存扫描结果，关联小爱和 2026-07-16" });
-
-  assert.equal(result.status, 422);
-  assert.equal(result.body.code, "invalid_model_output");
-});
-
-test("does not treat an unrelated all-quantifier as temporary=all evidence", async () => {
-  const result = await interpret({
-    version: 1,
-    kind: "plan",
-    operations: [{
-      intent: "addscancheki",
-      slots: { temporary: "all", idols: ["小爱"], date: "2026-07-16" },
-    }],
-  }, {
-    ...DEFAULT_INPUT,
-    utterance: "显示所有 Idol，再保存这张扫描结果，关联小爱和 2026-07-16",
-  });
-
-  assert.equal(result.status, 422);
-  assert.equal(result.body.code, "invalid_model_output");
-});
-
-for (const phrase of ["保存全部扫描结果", "保存这些切", "保存这批照片"]) {
-  test(`accepts temporary=all for the targeted phrase: ${phrase}`, async () => {
-    const result = await interpret({
-      version: 1,
-      kind: "plan",
-      operations: [{
-        intent: "addscancheki",
-        slots: { temporary: "all", idols: ["小爱"], date: "2026-07-16" },
-      }],
-    }, {
-      ...DEFAULT_INPUT,
-      utterance: `${phrase}，关联小爱和 2026-07-16`,
-    });
-
-    assert.equal(result.status, 200);
-    assert.equal(result.body.operations[0].slots.temporary, "all");
   });
 }
 
@@ -1143,15 +927,10 @@ test("rejects multiple operations while completing a draft", async () => {
 for (const [label, content] of [
   ["confirm", { version: 1, kind: "plan", operations: [{ intent: "confirm", slots: {} }] }],
   ["delete without target", { version: 1, kind: "plan", operations: [{ intent: "deletecheki", slots: {} }] }],
-  ["idx", {
-    version: 1,
-    kind: "plan",
-    operations: [{ intent: "addcheki", slots: { idols: ["小爱"], date: "2026-07-16", idx: 1 } }],
-  }],
   ["image", {
     version: 1,
     kind: "plan",
-    operations: [{ intent: "addcheki", slots: { image: "selected-photo" } }],
+    operations: [{ intent: "editcheki", slots: { target: "切1", image: "selected-photo" } }],
   }],
 ]) {
   test(`rejects forbidden ${label} model output`, async () => {
@@ -1169,16 +948,16 @@ test("accepts an ordered heterogeneous multi-intent plan", async () => {
       { intent: "addidol", slots: { name: "小爱" } },
       { intent: "favoriteidol", slots: { target: "小爱", favorite: true } },
       { intent: "addevent", slots: { name: "夏日祭", date: "2026-08-01" } },
-      { intent: "navigate", slots: { destination: "events" } },
+      { intent: "listevent", slots: {} },
     ],
-  }, { ...DEFAULT_INPUT, utterance: "添加小爱，把小爱设为喜欢，添加 2026-08-01 的夏日祭，然后打开活动页" });
+  }, { ...DEFAULT_INPUT, utterance: "添加小爱，把小爱设为喜欢，添加 2026-08-01 的夏日祭，然后列出活动" });
 
   assert.equal(result.status, 200);
   assert.deepEqual(result.body.operations.map(({ intent }) => intent), [
     "addidol",
     "favoriteidol",
     "addevent",
-    "navigate",
+    "listevent",
   ]);
 });
 
@@ -1226,10 +1005,10 @@ test("rejects JSON Boolean for the user enum", async () => {
     version: 1,
     kind: "plan",
     operations: [{
-      intent: "addcheki",
-      slots: { idols: ["小爱"], date: "2026-07-16", user: true },
+      intent: "editcheki",
+      slots: { target: "切1", user: true },
     }],
-  }, { ...DEFAULT_INPUT, utterance: "添加小爱在 2026-07-16 的切，我也在" });
+  }, { ...DEFAULT_INPUT, utterance: "把切1改为我也在照片里" });
 
   assert.equal(result.status, 422);
   assert.equal(result.body.code, "invalid_model_output");
@@ -1463,7 +1242,7 @@ for (const [label, stream] of [
   });
 }
 
-test("makes one bounded JSON-mode request with the current default model", async () => {
+test("makes one bounded JSON-mode request whose prompt exposes only Assistant-supported intents", async () => {
   let calls = 0;
   const result = await interpretNaturalLanguage(nlRequest(), TEST_ENV, {
     skipRateLimit: true,
@@ -1471,7 +1250,7 @@ test("makes one bounded JSON-mode request with the current default model", async
       calls += 1;
       const body = JSON.parse(init.body);
       assert.equal(url, "https://api.deepseek.com/chat/completions");
-      assert.equal(body.model, "deepseek-v4-flash");
+      assert.equal(body.model, "deepseek-flash");
       assert.equal(body.temperature, 0);
       assert.equal(body.max_tokens, 8_192);
       assert.equal(body.stream, false);
@@ -1479,15 +1258,27 @@ test("makes one bounded JSON-mode request with the current default model", async
       assert.deepEqual(body.thinking, { type: "disabled" });
       assert.deepEqual(body.messages.map(({ role }) => role), ["system", "user"]);
       assert.ok(body.messages[0].content.length < 12_000);
+      const systemPrompt = body.messages[0].content;
       for (const intent of [
-        "navigate", "open_scan", "addidol", "editidol", "deleteidol", "favoriteidol",
-        "addevent", "editevent", "deleteevent", "listidol", "listevent", "scancheki",
-        "addcheki", "addscancheki", "listcheki", "showidol", "showevent", "showcheki",
-        "editcheki", "deletecheki", "listrecord", "showrecord", "addrecord",
-        "editrecord", "deleterecord",
+        "addidol", "editidol", "deleteidol", "favoriteidol", "listidol", "showidol",
+        "addevent", "editevent", "deleteevent", "listevent", "showevent",
+        "listcheki", "showcheki", "editcheki", "deletecheki",
+        "listrecord", "showrecord", "addrecord", "editrecord", "deleterecord",
+        "statscheki",
       ]) {
-        assert.match(body.messages[0].content, new RegExp(`\\b${intent}\\b`, "u"));
+        assert.match(systemPrompt, new RegExp(`\\b${intent}\\b`, "u"));
       }
+      for (const removed of ["addcheki", "navigate", "open_scan", "scancheki", "addscancheki", "shame", "douga"]) {
+        assert.doesNotMatch(systemPrompt, new RegExp(`\\b${removed}\\b`, "u"));
+      }
+      assert.match(systemPrompt, /every record operation requires record_type:"cheki"/u);
+      assert.match(systemPrompt, /The only supported capabilities are Idol, Event, and Cheki/u);
+      assert.match(systemPrompt, /accepts text input only/u);
+      assert.match(systemPrompt, /never accept image input or produce an operation that creates a photo-backed Cheki/u);
+      assert.match(systemPrompt, /addevent \{url\?,name\?,date\?/u);
+      assert.match(systemPrompt, /preserve an explicit URL in the draft/u);
+      assert.match(systemPrompt, /Missing name produces event_name and missing date produces date/u);
+      assert.match(systemPrompt, /never copy a raw URL into name/u);
       assert.deepEqual(JSON.parse(body.messages[1].content), DEFAULT_INPUT);
       return modelFetch({
         version: 1,
@@ -1501,42 +1292,32 @@ test("makes one bounded JSON-mode request with the current default model", async
   assert.equal(result.status, 200);
 });
 
-test("prompt makes Cheki metadata optional and leaves media selection to the App", async () => {
+test("prompt limits new Cheki creation to text-only quantity records", async () => {
   let systemPrompt = "";
-  const result = await interpretNaturalLanguage(nlRequest({
-    ...DEFAULT_INPUT,
-    utterance: "从已选照片添加 Cheki",
-  }), TEST_ENV, {
+  const result = await interpretNaturalLanguage(nlRequest(), TEST_ENV, {
     skipRateLimit: true,
     fetchImpl: async (_url, init) => {
       systemPrompt = JSON.parse(init.body).messages[0].content;
       return modelFetch({
         version: 1,
         kind: "plan",
-        operations: [{ intent: "addcheki", slots: {} }],
+        operations: [{ intent: "addidol", slots: { name: "小爱" } }],
       })();
     },
   });
 
-  assert.match(systemPrompt, /addcheki \{idols\?:\[human-reference\]/u);
-  assert.match(systemPrompt, /addscancheki \{temporary\?:"all"\|human-reference,idols\?:\[human-reference\]/u);
-  assert.match(systemPrompt, /all metadata is optional and event\/date may coexist/u);
-  assert.match(systemPrompt, /“从已选照片添加 Cheki”/u);
-  assert.match(systemPrompt, /Missing metadata still produces a complete addcheki \{\} plan/u);
-  assert.match(systemPrompt, /Missing metadata still produces a complete addscancheki \{\} plan/u);
-  assert.match(systemPrompt, /must never be guessed/u);
-  assert.doesNotMatch(systemPrompt, /addcheki creates Cheki from album photos and still requires/u);
-  assert.doesNotMatch(systemPrompt, /exactly one of event\/date/u);
-  assert.doesNotMatch(systemPrompt, /\bimage\??:/u);
+  assert.match(systemPrompt, /New Cheki creation is quantity-only and uses addrecord with record_type:"cheki"/u);
+  assert.match(systemPrompt, /Existing photo-backed Cheki may be listed, shown, edited, or deleted/u);
+  assert.doesNotMatch(systemPrompt, /\baddcheki\b|local photo picker|selected or album photos/iu);
   assert.equal(result.status, 200);
-  assert.deepEqual(result.body.operations, [{ intent: "addcheki", slots: {} }]);
+  assert.deepEqual(result.body.operations, [{ intent: "addidol", slots: { name: "小爱" } }]);
 });
 
-test("prompt contract anchors selected-photo scan phrases and the album-add boundary", async () => {
+test("prompt keeps URL-only Event creation as a name-and-date clarification", async () => {
   let systemPrompt = "";
   const result = await interpretNaturalLanguage(nlRequest({
     ...DEFAULT_INPUT,
-    utterance: "扫描已选照片",
+    utterance: "添加活动 https://example.com/event",
   }), TEST_ENV, {
     skipRateLimit: true,
     fetchImpl: async (_url, init) => {
@@ -1545,23 +1326,28 @@ test("prompt contract anchors selected-photo scan phrases and the album-add boun
       assert.equal(body.temperature, 0);
       return modelFetch({
         version: 1,
-        kind: "plan",
-        operations: [{ intent: "scancheki", slots: {} }],
+        kind: "clarify",
+        draft: { intent: "addevent", slots: { url: "https://example.com/event" } },
+        missing: ["event_name", "date"],
       })();
     },
   });
 
-  assert.match(systemPrompt, /standalone affirmative request/u);
-  assert.match(systemPrompt, /sole action is scanning/u);
-  assert.match(systemPrompt, /are App-local/u);
-  assert.match(systemPrompt, /从相册添加 Cheki/u);
-  assert.match(systemPrompt, /addcheki, not scancheki/u);
+  assert.match(systemPrompt, /addevent \{url\?,name\?,date\?/u);
+  assert.match(systemPrompt, /preserve an explicit URL in the draft/u);
+  assert.match(systemPrompt, /Completion requires both name and date/u);
+  assert.match(systemPrompt, /never copy a raw URL into name/u);
   assert.equal(result.status, 200);
-  assert.deepEqual(result.body.operations, [{ intent: "scancheki", slots: {} }]);
+  assert.deepEqual(result.body, {
+    version: 1,
+    kind: "clarify",
+    draft: { intent: "addevent", slots: { url: "https://example.com/event" } },
+    missing: ["event_name", "date"],
+  });
 });
 
 for (const phrase of SCAN_PHRASES) {
-  test(`accepts one strict DeepSeek scan plan without local semantic routing: ${phrase}`, async () => {
+  test(`rejects a removed scan plan returned by the model: ${phrase}`, async () => {
     let calls = 0;
     const result = await interpretNaturalLanguage(nlRequest({
       ...DEFAULT_INPUT,
@@ -1573,8 +1359,11 @@ for (const phrase of SCAN_PHRASES) {
         return modelFetch(SCAN_PLAN)();
       },
     });
-    assert.equal(calls, 1);
-    assert.deepEqual(result, { status: 200, body: SCAN_PLAN });
+    assert.equal(calls, 2);
+    assert.deepEqual(result, {
+      status: 422,
+      body: { version: 1, kind: "reject", code: "invalid_model_output" },
+    });
   });
 }
 
@@ -1594,7 +1383,7 @@ test("a valid unsupported result is final and never triggers text-based model ro
   assert.deepEqual(result, { status: 200, body: UNSUPPORTED_RESULT });
 });
 
-test("scan prompt examples do not bypass the existing slot validator", async () => {
+test("removed scan intent is rejected even when its former slot shape is invalid", async () => {
   const result = await interpret({
     version: 1,
     kind: "plan",
@@ -1763,12 +1552,12 @@ test("route rate limiting runs once for a heterogeneous typed plan", async () =>
     kind: "plan",
     operations: [
       { intent: "deleteidol", slots: { target: "小爱" } },
-      { intent: "navigate", slots: { destination: "idols" } },
+      { intent: "listidol", slots: {} },
     ],
   };
   const response = await handleRequest(nlRequest({
     ...DEFAULT_INPUT,
-    utterance: "删除小爱然后打开 Idol 页面",
+    utterance: "删除小爱然后列出 Idol",
   }), {
     ...TEST_ENV,
     NL_RATE_LIMITER: {
@@ -1793,9 +1582,14 @@ test("the single interpretation request does not forward client credentials", as
   const clientCookie = "session=client-private-value";
   const clientScannerToken = "client-private-scanner-value";
   const modelRequests = [];
+  const plan = {
+    version: 1,
+    kind: "plan",
+    operations: [{ intent: "addidol", slots: { name: "小爱" } }],
+  };
   const result = await interpretNaturalLanguage(nlRequest({
     ...DEFAULT_INPUT,
-    utterance: "扫描已选照片",
+    utterance: "添加小爱",
   }, {
     authorization: clientAuthorization,
     cookie: clientCookie,
@@ -1804,7 +1598,7 @@ test("the single interpretation request does not forward client credentials", as
     skipRateLimit: true,
     fetchImpl: async (_url, init) => {
       modelRequests.push(init);
-      return modelFetch(SCAN_PLAN)();
+      return modelFetch(plan)();
     },
   });
 
@@ -1817,7 +1611,7 @@ test("the single interpretation request does not forward client credentials", as
     assert.equal(request.body.includes(clientCookie), false);
     assert.equal(request.body.includes(clientScannerToken), false);
   }
-  assert.deepEqual(result, { status: 200, body: SCAN_PLAN });
+  assert.deepEqual(result, { status: 200, body: plan });
 });
 
 test("keeps prompt-injection text isolated as untrusted user JSON", async () => {
@@ -2001,7 +1795,7 @@ test("NL route is handled before Pod-token parsing and disables caching", async 
   assert.equal((await response.json()).kind, "plan");
 });
 
-test("NL route uses deepseek-v4-flash and preserves all nine requested addidol operations", async () => {
+test("NL route uses deepseek-flash and preserves all nine requested addidol operations", async () => {
   resetMemoryRateLimitForTests();
   const utterance = "添加以下idol：巫歌 饭饭 木兰 aina eriko mina 石榴 优子 萝北";
   const names = ["巫歌", "饭饭", "木兰", "aina", "eriko", "mina", "石榴", "优子", "萝北"];
@@ -2010,7 +1804,7 @@ test("NL route uses deepseek-v4-flash and preserves all nine requested addidol o
     modelCalls += 1;
     assert.equal(url, "https://api.deepseek.com/chat/completions");
     const body = JSON.parse(init.body);
-    assert.equal(body.model, "deepseek-v4-flash");
+    assert.equal(body.model, "deepseek-flash");
     assert.equal(JSON.parse(body.messages[1].content).utterance, utterance);
     return modelFetch({
       version: 1,

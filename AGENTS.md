@@ -12,16 +12,26 @@ Apply instructions in this order:
 1. the user's latest explicit instruction
 2. this `AGENTS.md`
 3. the matching role file under `agents/`
-4. `docs/agents/context/current.md` for resumable facts and execution state
-5. task-specific source files and current Git state
+4. task-specific source files and current Git state
 
 `docs/agents/README.md`, `docs/agents/taskboard.md`,
 `docs/agents/handoffs/**`, `docs/agents/worktree-workflow.md`, and older prompts
 are historical unless the user explicitly reopens them. Historical documents
-never override this file or the user's latest instruction. Live Git, filesystem,
-build, browser, and deployment state can drift after `current.md` is written;
-verify relevant live state before relying on a snapshot for an external or
+never override this file or the user's latest instruction. Verify relevant live
+Git, filesystem, build, browser, and deployment state before an external or
 state-changing action.
+
+### Retired `current.md`
+
+- `docs/agents/context/current.md` is permanently retired.
+- Never read, inspect, search, diff, summarize, update, replace, regenerate, or
+  otherwise use that file.
+- Do not use it for startup recovery, routing, planning, handoff, context
+  compaction, verification, or task completion.
+- Its existing contents have no authority and may be stale. Leave the file
+  untouched unless the user explicitly orders a one-time deletion of the file.
+- Do not create a replacement current-state file under another name unless the
+  user explicitly requests one.
 
 ## Startup Protocol
 
@@ -29,19 +39,14 @@ A new PM agent must restore state in this order:
 
 1. Read `AGENTS.md`.
 2. Read `agents/frontend.md`, `agents/backend.md`, and `agents/reviewer.md`.
-3. Read `docs/agents/context/current.md` if it exists.
-4. Run `git status --short --branch`.
-5. Confirm the checkout is on `main`. If it is not, stop and report the
+3. Run `git status --short --branch`.
+4. Confirm the checkout is on `main`. If it is not, stop and report the
    mismatch; do not create or switch branches without the user's direction.
-6. Report briefly in Chinese:
+5. Report briefly in Chinese:
    - current repository/branch/worktree state
-   - key facts recovered from `current.md`
    - unfinished work or blockers
    - the next intended action
-7. Check `## Authoritative References And Routing` in `current.md`. If the
-   user's newest request matches a listed trigger, read the referenced file
-   completely before planning, answering, or delegating that work.
-8. Read only the other files needed for the user's newest request.
+6. Read only the other files needed for the user's newest request.
 
 Do not start by reading the full repository, old handoffs, the taskboard, or the
 historical mini-program. If the startup message also contains a concrete task,
@@ -149,6 +154,17 @@ Do not stop at a plan when the user asked to implement and the work can proceed
 safely. Do not claim completion while required subagents or command sessions are
 still running.
 
+## 内存监控、Agent 通信与等待成本
+
+- 适用于 PM、Frontend、Backend、Reviewer 及其他子 Agent。
+- 除非用户明确要求，否则不进行内存监控、采样或周期性检查；不得在每轮开始、操作前后或等待期间自动运行 `memory-guard/guard.py check`。旧的默认监控、内存软暂停和自动恢复授权不再作为执行依据；未经新的明确要求，不登记内存暂停或自动恢复任务。
+- 用户要求单次内存检查不等于授权持续监控，只执行明确指定的范围。
+- 尽量减少 Agent 间消息和状态通信。PM 一次给出完整任务边界、约束、验收条件及返回要求；同一接收方的相关信息合并发送。
+- 仅在完成、实质性阻塞、必要的决策或接口变化、影响其他 Agent 的新发现、用户修改要求时发送必要消息。禁止例行催进度、重复提醒、纯确认和无变化状态往返；不要为确认消息另发确认。
+- 完全避免反复短时间等待：不得循环数秒或十秒级等待、立即状态查询，或反复搜索子 Agent 尚未写好的代码、列举尚未生成的报告来探测进度。
+- 优先依赖完成通知或事件驱动等待；有独立工作先执行独立工作。确需有界等待时，使用工具与上级指令允许的较长窗口；超时本身不是发送消息或再做空探测的理由。
+- 收到完成或实质变化通知后集中读取产物并验证，不要因无变化状态反复唤醒模型作相同决策。仍须履行必要验证、用户进度告知和完成责任，不得把减少通信作为漏审或提前结束的理由。
+
 ## Small-Change Fast Path
 
 Use one compact assignment to exactly one owning subagent when all are true:
@@ -175,6 +191,63 @@ Reviewer is normally unnecessary for discussion-only work and narrow
 coordination-document edits. Reviewer reports findings first, ordered P0 to P3,
 and gives `approved` or `changes requested`. Reviewer does not implement fixes;
 PM returns fixes to the owning implementation subagent.
+
+## Full Repository Review Protocol
+
+Use this protocol only when the user explicitly requests a complete repository
+or system-wide code review. The authoritative stage prompt templates are:
+
+1. `docs/agents/prompts/full-code-review/01-architecture.md`
+2. `docs/agents/prompts/full-code-review/02-module.md`
+3. `docs/agents/prompts/full-code-review/03-cross-module-risks.md`
+4. `docs/agents/prompts/full-code-review/04-executable-report.md`
+
+These are four stage templates, not four review tasks. A complete review executes
+as `1 architecture + N module + 1 cross-module + 1 report` tasks, where `N` is
+the number of in-scope modules discovered by architecture review. The stages are
+strictly ordered. Architecture review must finish before PM creates the module
+review tasks. PM then instantiates `02-module.md` separately for every
+`MODULE-ID`, filling in that module's exact files, entry points, flows,
+contracts, risk hypotheses, and exclusions from the architecture result. One
+module task must contain exactly one `MODULE-ID`; do not combine several modules
+into a single review result. PM runs module tasks one at a time in the dependency
+order produced by architecture review and records each result before starting
+the next module, unless the user explicitly requests parallel module review.
+
+Every module identified by the architecture inventory must have its own review
+result or be explicitly marked out of scope by PM before cross-module review
+starts. The executable report is produced only after cross-module review
+finishes.
+
+Before stage 1, PM states the review baseline, included roots, exclusions, and
+whether uncommitted work is included. Unless the user says otherwise, review the
+current checkout as read-only, include the active iOS, Backend, Cloudflare, and
+runtime/script surfaces, preserve all local changes, and apply the existing
+historical and secret-file exclusions in this document. A full review does not
+authorize edits, commits, deployment, remote-state changes, or reading secret
+values.
+
+Each stage must pass its complete output to the next stage. Reviewers must verify
+claims against current source and configuration rather than relying only on
+earlier summaries. Findings require a concrete trigger, user or system impact,
+root cause, exact repository-relative file and line evidence, severity, and
+responsible owner. Hypotheses and unverified concerns must be labeled separately
+and must not be counted as confirmed findings.
+
+Module review is complete only when the architecture inventory has a separate
+coverage entry and a separate stage-2 result for every in-scope module,
+including an explicit reason for any skipped or partially reviewed surface.
+Cross-module review must trace real end-to-end paths
+and reconcile route, payload, auth, state, persistence, timeout, retry,
+cancellation, and deployment assumptions across owners. It must merge duplicate
+findings rather than inflate counts.
+
+The final report must be executable. For every confirmed finding it provides an
+owner, affected modules, ordered repair steps, acceptance criteria, focused
+verification, dependencies, and blocking status. It also records the baseline,
+coverage, checks run, checks not run, residual risk, and an `approved` or
+`changes requested` verdict. Any confirmed unresolved P0, P1, or P2 finding
+requires `changes requested`.
 
 ## Completion Gate
 
@@ -242,97 +315,13 @@ approved / changes requested
 
 Subagent output is evidence, not final authority. PM owns the integrated result.
 
-## Context Rebuild Protocol
+## Context And Handoff Documentation
 
-PM should rebuild context proactively when automatic compaction occurs, the
-thread becomes long, several subagent/review passes accumulate, or continuing
-safely depends on many contracts or external-state decisions.
-
-`current.md` is both a compact state snapshot and a routing index to durable,
-task-specific knowledge. A change of current goal may compress old details, but
-must not make a still-valid authoritative method, contract, runbook, or
-verification document undiscoverable.
-
-### Context-affecting deliverables
-
-A deliverable is context-affecting when a future agent would need it to perform
-a recognizable task correctly, including a new or materially updated method,
-contract, runbook, deployment guide, data schema, verification procedure, or
-known-limitations document.
-
-Before declaring a context-affecting deliverable complete, PM must update
-`docs/agents/context/current.md` even when a full context rebuild was not
-otherwise required. Add or update a routing entry containing:
-
-- the user request or task trigger that activates the reference
-- the exact repository-relative path to read
-- whether it must be read completely before work starts
-- the implemented/unimplemented boundary and any safety-critical known gaps
-
-Do not copy an entire durable document into `current.md`; preserve the minimum
-contract and an unambiguous route to the authoritative source.
-
-Write both:
-
-- latest resumable brief: `docs/agents/context/current.md`
-- timestamped archive:
-  `docs/agents/context/archive/YYYY-MM-DD-HHMM-<short-topic>.md`
-
-The brief must distinguish verified facts from assumptions and contain these
-sections:
-
-```md
-## Current Goal
-## Latest User Instructions
-## Repository State
-## Active Architecture And Contracts
-## Authoritative References And Routing
-## Scope And Non-Goals
-## Current Changes
-## Completed This Window
-## Pending Work
-## Subagent State
-## Verification State
-## Risks
-## External Archive Candidates
-## Resume Prompt
-```
-
-Keep only what a fresh PM needs to continue: the latest goal, active rules,
-current Git state, stable contracts, changed files and intent, completed and
-pending work, subagent/review status, verification, risks, and exact next action.
-Exclude full command output, repeated chatter, obsolete attempts, stale
-hypotheses, and broad project history. Never store secrets or full Pod IDs.
-
-### Reference continuity
-
-Before replacing `current.md` during a rebuild:
-
-1. Read the previous `current.md` and inventory every entry under
-   `## Authoritative References And Routing`.
-2. Add any context-affecting deliverable completed since that snapshot, using
-   the current turn, subagent results, and scoped Git status; do not scan the
-   whole repository.
-3. For every previous entry, explicitly choose one outcome: carry it forward,
-   replace it with a named successor path, or retire it because the user or a
-   verified newer contract made it obsolete.
-4. Never remove a reference merely because its task is not the current goal or
-   because the implementation is not integrated yet.
-5. Record replaced or retired references and the reason in the timestamped
-   archive. If validity is uncertain, carry the reference forward and mark the
-   uncertainty instead of silently dropping it.
-
-After writing the rebuild, verify:
-
-- both the latest brief and timestamped archive exist and contain every required
-  section
-- every carried or added repository path exists
-- any removed reference has an explicit replacement or retirement reason in the
-  archive
-- `Resume Prompt` names the matching authoritative path for any pending or
-  likely next task; a generic statement such as "not integrated" is not a
-  sufficient route
-- no secret, cookie, token, private endpoint, or full Pod ID was added
-
-After writing the rebuild, verify both files and continue the active task unless
-the user explicitly asked to stop.
+- Do not maintain or consult `docs/agents/context/current.md`.
+- Create or update durable task documentation only when the user explicitly
+  requests that documentation.
+- Automatic compaction, a long thread, subagent passes, or task completion do
+  not authorize creating context snapshots, routing indexes, or timestamped
+  context archives.
+- When the user explicitly requests a handoff, write only the narrowly requested
+  standalone handoff artifact and never route it through `current.md`.

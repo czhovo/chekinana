@@ -573,11 +573,9 @@ def apply_fixed_border_white_balance(image: np.ndarray, geometry: dict | None = 
     border_mask = border_mask.astype(bool)
 
     linear = srgb_u8_to_linear_rgb(image)
-    bright_threshold = srgb_channel_to_linear(170.0 / 255.0)
-    neutral_threshold = 25.0 / 255.0
+    bright_threshold = srgb_channel_to_linear(140.0 / 255.0)
     is_bright = np.all(linear > bright_threshold, axis=2)
-    is_neutral = np.std(linear, axis=2) < neutral_threshold
-    is_white = is_bright & is_neutral & border_mask
+    is_white = is_bright & border_mask
 
     blocks = []
     block_size = int(geometry.get("white_balance_block_size") or max(1, round(min(h, w) / 16)))
