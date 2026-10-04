@@ -836,7 +836,7 @@ enum ChekinanaAssistantLibrary {
                 : [try unique(events, id: { $0.id }, name: { $0.name }, token: command.target ?? "")]
             remember(values.prefix(100).map { .init(kind: .event, id: $0.id) })
             return numbered(values.map { item in
-                [item.name, item.date.map { ChekinanaDisplayFormat.date($0) }, item.city, item.resolvedLivehouse, item.price,
+                [item.name, item.date.map { ChekinanaDisplayFormat.date($0) }, ChekinanaEventCity.displayed(item.city), item.resolvedLivehouse, item.price,
                  item.note.isEmpty ? nil : item.note].compactMap { $0 }.joined(separator: " · ")
             })
         default: break

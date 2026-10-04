@@ -520,7 +520,7 @@ enum ChekinanaHiddenTemporaryReviewPolicy {
     ) -> Set<UUID> {
         Set(cards.compactMap { card in
             guard let ids = idolIDs(card.id),
-                  !ChekinanaVisibilityPolicy.includesRecord(
+                  !ChekinanaFourPageVisibilityPolicy.includesRecord(
                     idolIDs: ids,
                     hiddenIDs: hiddenIdolIDs
                   ) else { return nil }
@@ -1291,6 +1291,7 @@ final class ChekinanaConfirmationLedger {
         let requestedIdx: Int?
         let existingChekiID: UUID?
         let existingChekiRecordSnapshot: ChekinanaChekiRecordSnapshot?
+        let usesScanReviewRecordMatching: Bool
         let explicitlyEditedFields: Set<TemporaryChekiField>
 
         init(
@@ -1314,6 +1315,7 @@ final class ChekinanaConfirmationLedger {
             requestedIdx: Int?,
             existingChekiID: UUID?,
             existingChekiRecordSnapshot: ChekinanaChekiRecordSnapshot? = nil,
+            usesScanReviewRecordMatching: Bool = false,
             explicitlyEditedFields: Set<TemporaryChekiField>
         ) {
             self.id = id
@@ -1339,6 +1341,7 @@ final class ChekinanaConfirmationLedger {
             self.requestedIdx = requestedIdx
             self.existingChekiID = existingChekiID
             self.existingChekiRecordSnapshot = existingChekiRecordSnapshot
+            self.usesScanReviewRecordMatching = usesScanReviewRecordMatching
             self.explicitlyEditedFields = explicitlyEditedFields
         }
     }
@@ -1545,6 +1548,7 @@ final class ChekinanaConfirmationLedger {
         var image: ChekinanaPendingChekiImage
         var thumbnailImageData: Data?
         var reviewRectificationSource: ChekinanaReviewRectificationSource?
+        var refitOriginalSource: ChekinanaReviewRectificationSource? = nil
         let sourceID: UUID?
         let sourceOrigin: ChekinanaScanSourceOrigin
         var dateAnnotationState: ChekinanaChekiDateAnnotationState
@@ -1574,6 +1578,8 @@ final class ChekinanaConfirmationLedger {
         var idx: Int?
         var existingChekiID: UUID?
         var existingSelectionIsManual: Bool
+        var hasScanReviewRecordInheritance = false
+        var scanReviewRecordSnapshot: ChekinanaChekiRecordSnapshot? = nil
         var explicitlyEditedFields: Set<TemporaryChekiField>
         let inferredUserAppears: Bool?
         var userAppears: Bool?
@@ -1891,6 +1897,7 @@ final class ChekinanaConfirmationLedger {
         scannerMetadata: [ChekinanaTemporaryScannerMetadata]? = nil,
         sourceAnnotations: [ChekinanaScannerSourceAnnotation?]? = nil,
         reviewRectificationSources: [ChekinanaReviewRectificationSource?]? = nil,
+        refitOriginalSources: [ChekinanaReviewRectificationSource?]? = nil,
         dates: [Date?]? = nil,
         eventIDs: [UUID?]? = nil,
         eventAutoMatched: [Bool]? = nil,
@@ -1911,6 +1918,8 @@ final class ChekinanaConfirmationLedger {
         ).map { source in
             source?.isValid == true ? source : nil
         }
+        let resolvedRefitOriginalSources = refitOriginalSources ?? Array(repeating: nil, count: images.count)
+        precondition(images.count == resolvedRefitOriginalSources.count)
         let resolvedDates = dates ?? Array(repeating: nil, count: images.count)
         let resolvedEventIDs = eventIDs ?? Array(repeating: nil, count: images.count)
         let resolvedEventAutoMatched = eventAutoMatched
@@ -1942,6 +1951,7 @@ final class ChekinanaConfirmationLedger {
                 image: image,
                 thumbnailImageData: thumbnailImageData[index],
                 reviewRectificationSource: resolvedReviewRectificationSources[index],
+                refitOriginalSource: resolvedRefitOriginalSources[index],
                 sourceID: image.sourceID,
                 sourceOrigin: image.sourceOrigin,
                 dateAnnotationState: annotationStates[index],
@@ -2119,6 +2129,14 @@ final class ChekinanaConfirmationLedger {
         return temporaryChekis[id]
     }
 
+    /// One expiry/protection pass for a single Review render snapshot.
+    func temporaryChekiSnapshot(_ ids: [UUID]) -> [UUID: TemporaryCheki] {
+        _ = pruneExpiredTemporaryChekis()
+        var result: [UUID: TemporaryCheki] = [:]
+        for id in ids { result[id] = temporaryChekis[id] }
+        return result
+    }
+
     func areTemporaryChekiTransformsSettled(_ ids: [UUID]) -> Bool {
         ids.allSatisfy { id in
             guard let value = temporaryChekis[id] else { return false }
@@ -2268,7 +2286,7 @@ final class ChekinanaConfirmationLedger {
                 generation: value.transformGeneration
             ),
             sourceImage: value.image,
-            reviewRectificationSource: nil,
+            reviewRectificationSource: value.reviewRectificationSource ?? value.refitOriginalSource,
             sourceDateAnnotationState: value.dateAnnotationState
         )
     }
@@ -2279,7 +2297,8 @@ final class ChekinanaConfirmationLedger {
         image: ChekinanaPendingChekiImage,
         thumbnailImageData: Data?,
         reviewSource: ChekinanaReviewRectificationSource,
-        sourceAnnotation: ChekinanaScannerSourceAnnotation?
+        sourceAnnotation: ChekinanaScannerSourceAnnotation?,
+        rotationQuarterTurns: Int = 0
     ) -> TemporaryChekiTransformPublication {
         guard !pendingTemporaryChekiIDs.contains(id),
               let value = temporaryChekis[id] else { return .unavailable }
@@ -2299,12 +2318,18 @@ final class ChekinanaConfirmationLedger {
         replacement.transformFallbackSourceImage = image
         replacement.transformSourceIsPublishedImage = true
         replacement.sourceAnnotation = sourceAnnotation
-        // Detection coordinates belong to the old pixels. The record's date
-        // remains unchanged, but its old date box cannot describe the new crop.
-        replacement.dateAnnotationState = .unavailable
-        replacement.transformSourceDateAnnotationState = .unavailable
-        replacement.imageRotationQuarterTurns = 0
-        replacement.desiredTransformRotationQuarterTurns = 0
+        // Refit preserves the displayed date box at its original coordinates.
+        // Subsequent transforms start from these same coordinates on the new image.
+        replacement.dateAnnotationState = value.dateAnnotationState
+        var unrotatedAnnotation = value.dateAnnotationState
+        let normalizedTurns = ((rotationQuarterTurns % 4) + 4) % 4
+        for _ in 0..<((4 - normalizedTurns) % 4) {
+            unrotatedAnnotation = ChekinanaScanCleanImageRotation
+                .counterclockwiseDateAnnotation(unrotatedAnnotation)
+        }
+        replacement.transformSourceDateAnnotationState = unrotatedAnnotation
+        replacement.imageRotationQuarterTurns = rotationQuarterTurns
+        replacement.desiredTransformRotationQuarterTurns = rotationQuarterTurns
         replacement.desiredTransformSize = value.size ?? .mini
         replacement.transformSourceVersion &+= 1
         replacement.transformGeneration &+= 1
@@ -2455,6 +2480,7 @@ final class ChekinanaConfirmationLedger {
                     && !pendingTemporaryChekiIDs.contains(candidate.id)
                     && !candidate.isTransformInFlight
                     && candidate.eventID == nil
+                    && !candidate.explicitlyEditedFields.contains(.event)
                     && Set(candidate.idolIDs) == sourceIdolIDs
                     && candidate.date.flatMap(ChekinanaDateOnly.canonicalized)
                         == sourceDate
@@ -2619,6 +2645,7 @@ final class ChekinanaConfirmationLedger {
         if temporary.hasPostedToSNS != hasPostedToSNS { temporary.explicitlyEditedFields.insert(.posted) }
         if temporary.note != note { temporary.explicitlyEditedFields.insert(.note) }
         if idxWasManuallyEdited { temporary.explicitlyEditedFields.insert(.idx) }
+        else { temporary.explicitlyEditedFields.remove(.idx) }
         temporary.idolIDs = normalizedIdolIDs
         temporary.date = date
         temporary.eventID = eventID
@@ -2631,6 +2658,27 @@ final class ChekinanaConfirmationLedger {
         temporary.idx = idx
         temporary.existingChekiID = existingChekiID
         temporary.existingSelectionIsManual = existingSelectionIsManual
+        temporaryChekis[id] = temporary
+        return true
+    }
+
+    @discardableResult
+    func reconcileScanReviewRecord(id: UUID, recordID: UUID?, eventID: UUID?, note: String?, snapshot: ChekinanaChekiRecordSnapshot? = nil) -> Bool {
+        guard !pendingTemporaryChekiIDs.contains(id), var temporary = temporaryChekis[id] else { return false }
+        let hadInheritance = temporary.hasScanReviewRecordInheritance
+        temporary.existingChekiID = recordID
+        temporary.existingSelectionIsManual = false
+        if recordID != nil || hadInheritance {
+            if !temporary.explicitlyEditedFields.contains(.event) {
+                temporary.eventID = recordID == nil ? nil : eventID
+                temporary.eventWasAutoMatched = false
+            }
+            if !temporary.explicitlyEditedFields.contains(.note) {
+                temporary.note = recordID == nil ? "" : (note ?? "")
+            }
+        }
+        temporary.hasScanReviewRecordInheritance = recordID != nil
+        temporary.scanReviewRecordSnapshot = snapshot
         temporaryChekis[id] = temporary
         return true
     }
@@ -2740,6 +2788,10 @@ final class ChekinanaConfirmationLedger {
                    countedSourceIdentities.insert(source.sourceIdentity).inserted {
                     add(source.imageData.count)
                 }
+            }
+            if let source = value.refitOriginalSource,
+               countedSourceIdentities.insert(source.sourceIdentity).inserted {
+                add(source.imageData.count)
             }
             if let source = value.reviewRectificationSource,
                countedSourceIdentities.insert(source.sourceIdentity).inserted {
@@ -3296,6 +3348,7 @@ struct ChekinanaTemporaryChekiBatchProgress: Equatable, Sendable {
 }
 
 private struct ChekinanaBatchChekiSnapshot: Sendable {
+    let size: ChekiSize?
     let id: UUID
     let idolIDs: [UUID]
     let date: Date?
@@ -3325,6 +3378,7 @@ private actor ChekinanaBatchSnapshotActor {
             $0.kind == .cheki
         }.map { cheki in
             ChekinanaBatchChekiSnapshot(
+                size: cheki.size,
                 id: cheki.id,
                 idolIDs: cheki.idolIDs,
                 date: cheki.date,
@@ -3339,6 +3393,68 @@ private actor ChekinanaBatchSnapshotActor {
 @MainActor
 enum ChekinanaStreamingScanScheduler {
     static let maximumConcurrentSourceProcessing = 2
+
+    /// A source holds its image slot only until image processing finishes.
+    /// Recognition/ordered publication continue in tracked tasks, all drained
+    /// before returning so their staged files remain alive through cancellation.
+    static func runOverlappingRecognition(
+        sourceCount: Int,
+        operation: @escaping @MainActor @Sendable (
+            Int, @escaping @MainActor @Sendable () -> Void
+        ) async -> Void
+    ) async {
+        let registry = SourceTasks()
+        await withTaskCancellationHandler {
+            let tasks = await run(sourceCount: sourceCount) { index in
+                let phase = ImagePhase()
+                let task = Task { @MainActor in
+                    defer { phase.finish() }
+                    guard !Task.isCancelled else { return }
+                    await operation(index, { phase.finish() })
+                }
+                registry.insert(task)
+                await phase.wait()
+                return task
+            }
+            for task in tasks { await task.value }
+        } onCancel: {
+            Task { @MainActor in registry.cancelAll() }
+        }
+    }
+
+    @MainActor
+    private final class ImagePhase {
+        private var finished = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        func finish() {
+            guard !finished else { return }
+            finished = true
+            waiter?.resume()
+            waiter = nil
+        }
+
+        func wait() async {
+            guard !finished else { return }
+            await withCheckedContinuation { waiter = $0 }
+        }
+    }
+
+    @MainActor
+    private final class SourceTasks {
+        private var tasks: [Task<Void, Never>] = []
+        private var isCancelled = false
+
+        func insert(_ task: Task<Void, Never>) {
+            tasks.append(task)
+            if isCancelled { task.cancel() }
+        }
+
+        func cancelAll() {
+            isCancelled = true
+            tasks.forEach { $0.cancel() }
+        }
+    }
 
     static func run<Output: Sendable>(
         sourceCount: Int,
@@ -3710,6 +3826,7 @@ struct ChekinanaCommandExecutor {
 
     let modelContext: ModelContext
     let confirmationLedger: ChekinanaConfirmationLedger
+    private let scanTightBoundaries: Bool?
     private let scannerProcessWithProgress: ScannerProcessWithProgress
     private let scanProgressObserver: ScanProgressObserver?
     private let recognitionSkipControl: ChekinanaScanRecognitionSkipControl?
@@ -3760,8 +3877,10 @@ struct ChekinanaCommandExecutor {
         simulateBatchFinalizeInvariantFailure: Bool = false,
         batchBeforeLiveIndexValidation: BatchBeforeLiveIndexValidation? = nil,
         usesLocalDirectProcessing: Bool = false,
-        usesRemoteScanner: Bool = false
+        usesRemoteScanner: Bool = false,
+        scanTightBoundaries: Bool? = nil
     ) {
+        self.scanTightBoundaries = scanTightBoundaries
         self.modelContext = modelContext
         self.confirmationLedger = confirmationLedger
         if let scannerProcess {
@@ -4352,7 +4471,7 @@ struct ChekinanaCommandExecutor {
                 let event = Event(
                     name: payload.name,
                     date: payload.date,
-                    city: payload.city,
+                    city: payload.city.map(ChekinanaEventCity.normalized),
                     livehouse: payload.livehouse,
                     price: payload.price,
                     weiboURL: payload.weiboURL,
@@ -4424,7 +4543,7 @@ struct ChekinanaCommandExecutor {
                     ) { liveEvent in
                         liveEvent.name = payload.name
                         liveEvent.date = payload.date
-                        liveEvent.city = payload.city
+                        liveEvent.city = payload.city.map(ChekinanaEventCity.normalized)
                         liveEvent.livehouse = payload.livehouse
                         liveEvent.price = payload.price
                         liveEvent.weiboURL = payload.weiboURL
@@ -4504,38 +4623,7 @@ struct ChekinanaCommandExecutor {
                     }
                 } else {
                     let idx: Int?
-                    if payload.explicitlyEditedFields.contains(.idx) {
-                        let group = ChekinanaChekiGroupKey(
-                            idolIDs: idols.map(\.id),
-                            date: payload.date
-                        )
-                        let requestedIdx = try ChekinanaChekiIndexing
-                            .normalizedExplicitIndex(
-                                payload.requestedIdx,
-                                isFavorite: payload.isFavorite
-                            )
-                        if let requestedIdx, let group {
-                            let collision = try modelContext.fetch(FetchDescriptor<MediaItem>())
-                                .contains {
-                                    $0.kind == .cheki && ChekinanaChekiGroupKey(
-                                        idolIDs: $0.idolIDs,
-                                        date: $0.date
-                                    ) == group && $0.idx == requestedIdx
-                                }
-                            guard !collision else {
-                                throw ChekinanaAddChekiError.duplicateIndex(requestedIdx)
-                            }
-                            idx = requestedIdx
-                        } else {
-                            idx = try nextChekiIndex(
-                                idolIDs: idols.map(\.id),
-                                eventID: event?.id,
-                                eventDate: payload.date,
-                                isFavorite: payload.isFavorite,
-                                excludingChekiID: nil
-                            )
-                        }
-                    } else {
+
                         idx = try nextChekiIndex(
                             idolIDs: idols.map(\.id),
                             eventID: event?.id,
@@ -4543,7 +4631,7 @@ struct ChekinanaCommandExecutor {
                             isFavorite: payload.isFavorite,
                             excludingChekiID: nil
                         )
-                    }
+
                     response = try await persistCheki(
                         id: payload.id,
                         image: payload.image,
@@ -6295,8 +6383,7 @@ struct ChekinanaCommandExecutor {
             for snapshot in snapshots {
                 guard let group = ChekinanaChekiGroupKey(
                     idolIDs: snapshot.idolIDs,
-                    date: snapshot.date
-                ), let idx = snapshot.idx else { continue }
+                    date: snapshot.date), let idx = snapshot.idx else { continue }
                 if idx > 0 {
                     maximumByGroup[group] = max(maximumByGroup[group] ?? 0, idx)
                 } else if idx < 0 {
@@ -6317,81 +6404,19 @@ struct ChekinanaCommandExecutor {
                 }
                 let group = ChekinanaChekiGroupKey(
                     idolIDs: payload.idolIDs,
-                    date: payload.date
-                )
+                    date: payload.date)
                 let idx: Int?
                 let indexStrategy: ChekinanaBatchIndexStrategy
-                if payload.explicitlyEditedFields.contains(.idx) {
-                    let requestedIdx = try ChekinanaChekiIndexing.normalizedExplicitIndex(
-                        payload.requestedIdx,
-                        isFavorite: payload.isFavorite
-                    )
-                    if let group, let requestedIdx {
-                        let key = ChekinanaBatchIndexKey(group: group, idx: requestedIdx)
-                        let allowedOwner: UUID? = nil
-                        let owners = ownersByIndex[key, default: []]
-                        let hasConflictingOwner = owners.contains { owner in
-                            owner != allowedOwner
-                        }
-                        guard !hasConflictingOwner,
-                              owners.count <= (allowedOwner == nil ? 0 : 1) else {
-                            throw ChekinanaAddChekiError.duplicateIndex(requestedIdx)
-                        }
-                        ownersByIndex[key, default: []].insert(payload.id)
-                        if requestedIdx > 0 {
-                            maximumByGroup[group] = max(
-                                maximumByGroup[group] ?? 0,
-                                requestedIdx
-                            )
-                        } else {
-                            minimumByGroup[group] = min(
-                                minimumByGroup[group] ?? 0,
-                                requestedIdx
-                            )
-                        }
-                        idx = requestedIdx
-                        indexStrategy = .explicit(requestedIdx)
-                    } else if let group {
-                        let next: Int
-                        if payload.isFavorite {
-                            let current = minimumByGroup[group] ?? 0
-                            guard current > Int.min else {
-                                throw ChekinanaAddChekiError.indexOverflow
-                            }
-                            next = current - 1
-                            minimumByGroup[group] = next
-                        } else {
-                            let current = maximumByGroup[group] ?? 0
-                            guard current < Int.max else {
-                                throw ChekinanaAddChekiError.indexOverflow
-                            }
-                            next = current + 1
-                            maximumByGroup[group] = next
-                        }
-                        ownersByIndex[.init(group: group, idx: next), default: []]
-                            .insert(payload.id)
-                        idx = next
-                        indexStrategy = .automatic
-                    } else {
-                        throw ChekinanaAddChekiError.indexOverflow
-                    }
-                } else if let group {
+                if let group {
                     let next: Int
-                    if payload.isFavorite {
-                        let current = minimumByGroup[group] ?? 0
-                        guard current > Int.min else {
-                            throw ChekinanaAddChekiError.indexOverflow
-                        }
-                        next = current - 1
-                        minimumByGroup[group] = next
-                    } else {
+
                         let current = maximumByGroup[group] ?? 0
                         guard current < Int.max else {
                             throw ChekinanaAddChekiError.indexOverflow
                         }
                         next = current + 1
                         maximumByGroup[group] = next
-                    }
+
                     ownersByIndex[.init(group: group, idx: next), default: []].insert(payload.id)
                     idx = next
                     indexStrategy = .automatic
@@ -6554,8 +6579,7 @@ struct ChekinanaCommandExecutor {
             for cheki in liveChekisByID.values {
                 guard let group = ChekinanaChekiGroupKey(
                     idolIDs: cheki.idols.map(\.id),
-                    date: cheki.date
-                ), let idx = cheki.idx else { continue }
+                    date: cheki.date), let idx = cheki.idx else { continue }
                 if idx > 0 {
                     liveMaximumByGroup[group] = max(liveMaximumByGroup[group] ?? 0, idx)
                 } else if idx < 0 {
@@ -6568,29 +6592,21 @@ struct ChekinanaCommandExecutor {
                 let payload = batch[index].payload
                 let group = ChekinanaChekiGroupKey(
                     idolIDs: payload.idolIDs,
-                    date: payload.date
-                )
+                    date: payload.date)
                 switch batch[index].indexStrategy {
                 case .none, .preserveExisting, .automatic:
                     guard let group else {
                         throw ChekinanaAddChekiError.indexOverflow
                     }
                     let next: Int
-                    if payload.isFavorite {
-                        let current = liveMinimumByGroup[group] ?? 0
-                        guard current > Int.min else {
-                            throw ChekinanaAddChekiError.indexOverflow
-                        }
-                        next = current - 1
-                        liveMinimumByGroup[group] = next
-                    } else {
+
                         let current = liveMaximumByGroup[group] ?? 0
                         guard current < Int.max else {
                             throw ChekinanaAddChekiError.indexOverflow
                         }
                         next = current + 1
                         liveMaximumByGroup[group] = next
-                    }
+
                     liveOwnersByIndex[.init(group: group, idx: next), default: []]
                         .insert(payload.id)
                     batch[index].idx = next
@@ -6601,21 +6617,14 @@ struct ChekinanaCommandExecutor {
                             throw ChekinanaAddChekiError.indexOverflow
                         }
                         let next: Int
-                        if payload.isFavorite {
-                            let current = liveMinimumByGroup[group] ?? 0
-                            guard current > Int.min else {
-                                throw ChekinanaAddChekiError.indexOverflow
-                            }
-                            next = current - 1
-                            liveMinimumByGroup[group] = next
-                        } else {
+
                             let current = liveMaximumByGroup[group] ?? 0
                             guard current < Int.max else {
                                 throw ChekinanaAddChekiError.indexOverflow
                             }
                             next = current + 1
                             liveMaximumByGroup[group] = next
-                        }
+
                         liveOwnersByIndex[.init(group: group, idx: next), default: []]
                             .insert(payload.id)
                         batch[index].idx = next
@@ -6665,7 +6674,8 @@ struct ChekinanaCommandExecutor {
                 // automatic association may populate the payload beforehand,
                 // but the persistence boundary never invents an Event.
                 let relationEvent = item.payload.eventID.flatMap { eventsByID[$0] }
-                guard !explicitEvent || item.payload.eventID == nil || relationEvent != nil else {
+                guard !(explicitEvent || item.payload.usesScanReviewRecordMatching)
+                        || item.payload.eventID == nil || relationEvent != nil else {
                     throw ChekinanaAddChekiError.modelContextMismatch
                 }
                 try validateChekiAssociations(
@@ -6691,17 +6701,33 @@ struct ChekinanaCommandExecutor {
                             ? record.count : 0
                     )
                 }
-                let matchedRecordID = ChekinanaChekiRecordAllocationPolicy.allocationIDs(
-                    media: [mediaContext],
-                    candidates: candidates,
-                    calendar: calendar
-                )[0]
+                let matchedRecordID: UUID?
+                if item.payload.usesScanReviewRecordMatching {
+                    matchedRecordID = item.payload.existingChekiID
+                    if let matchedRecordID {
+                        guard let record = recordsByID[matchedRecordID],
+                              let expected = item.payload.existingChekiRecordSnapshot,
+                              ChekinanaChekiRecordSnapshot(record) == expected,
+                              ChekinanaScanReviewRecordMatchPolicy.matches(
+                                .init(id: record.id, date: record.date, idolIDs: record.idolIDs,
+                                      eventID: record.eventID, size: record.size, count: record.count),
+                                media: mediaContext, calendar: calendar
+                              ) else { throw ChekinanaNLClientError.invalidSchema }
+                    }
+                } else {
+                    matchedRecordID = ChekinanaChekiRecordAllocationPolicy.allocationIDs(
+                        media: [mediaContext], candidates: candidates, calendar: calendar
+                    )[0]
+                }
                 let matchedRecord = matchedRecordID.flatMap { recordsByID[$0] }
                 if let matchedRecordID {
-                    remainingRecordCounts[matchedRecordID, default: 0] -= 1
+                    remainingRecordCounts[matchedRecordID, default: 0] = max(
+                        0, remainingRecordCounts[matchedRecordID, default: 0] - 1
+                    )
                     recordConsumptionCounts[matchedRecordID, default: 0] += 1
                 }
-                let effectiveNote = item.payload.explicitlyEditedFields.contains(.note)
+                let effectiveNote = item.payload.usesScanReviewRecordMatching
+                    || item.payload.explicitlyEditedFields.contains(.note)
                     ? item.payload.note
                     : (matchedRecord?.note ?? item.payload.note)
                 let persistedDate = try ChekinanaPersistedContentDatePolicy
@@ -6731,11 +6757,23 @@ struct ChekinanaCommandExecutor {
                 savedModels.append(cheki)
                 publish(.savingRecords, index + 1)
             }
-            for source in savedModels {
+            let reviewMatchedRecordIDs = Set(batch.compactMap {
+                $0.payload.usesScanReviewRecordMatching ? $0.payload.existingChekiID : nil
+            })
+            for (index, source) in savedModels.enumerated() {
+                let eventID = batch[index].payload.usesScanReviewRecordMatching
+                    ? batch[index].payload.eventID : source.eventID
                 try ChekinanaEventAssociationPropagation.propagate(
-                    from: source,
+                    idolIDs: source.idolIDs, eventID: eventID, date: source.date,
+                    protectingRecordIDs: reviewMatchedRecordIDs,
                     in: modelContext
                 )
+            }
+            // Propagation may fill a sibling's intentionally empty Event.
+            // Review's displayed final association remains authoritative.
+            for (index, source) in savedModels.enumerated()
+                where batch[index].payload.usesScanReviewRecordMatching {
+                source.eventID = batch[index].payload.eventID
             }
             // Consume only after propagation. Restore the matched canonical
             // date if SwiftData invalidated it during this mixed insert/update
@@ -6778,9 +6816,20 @@ struct ChekinanaCommandExecutor {
         })
     }
 
+    /// Review preserves existing hidden associations of shared temporary cards.
+    /// No caller-supplied Idol IDs or command fields enter this UI-only path.
+    func prepareScanReviewConfirmation(selection: String) -> ChekinanaCommandResponse {
+        addScanCheki(
+            .init(name: "addscancheki", target: selection, arguments: [:]),
+            usage: commandUsages["addscancheki"] ?? ["addscancheki"],
+            preservesReviewAssociations: true
+        )
+    }
+
     private func addScanCheki(
         _ command: ChekinanaParsedCommand,
-        usage: [String]
+        usage: [String],
+        preservesReviewAssociations: Bool = false
     ) -> ChekinanaCommandResponse {
         let allowed = Set(["idol", "idols", "event", "date", "user", "userappears", "size", "note"])
         guard let target = command.target,
@@ -6812,8 +6861,25 @@ struct ChekinanaCommandExecutor {
                 }
                 return temporary.idolIDs
             }
-            let idolsPerResult = try idolIDLists.map {
-                try refetchIdolsByIDs($0)
+            let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+            let idolsPerResult = try idolIDLists.enumerated().map { index, ids in
+                let preservedHiddenIDs: Set<UUID>
+                if preservesReviewAssociations {
+                    guard command.arguments.isEmpty,
+                          Set(ids) == Set(temporaryValues[index].idolIDs),
+                          ChekinanaFourPageVisibilityPolicy.includesRecord(
+                            idolIDs: ids, hiddenIDs: hiddenIDs
+                          ) else {
+                        throw ChekinanaNLClientError.invalidSchema
+                    }
+                    preservedHiddenIDs = Set(temporaryValues[index].idolIDs)
+                        .intersection(hiddenIDs)
+                } else {
+                    preservedHiddenIDs = []
+                }
+                return try refetchIdolsByIDs(
+                    ids, preservingHiddenIDs: preservedHiddenIDs
+                )
             }
             let prepared = try temporaryValues.enumerated().map {
                 index,
@@ -6831,7 +6897,13 @@ struct ChekinanaCommandExecutor {
                 ) in
                 let id = UUID()
                 let existingTarget = try temporary.existingChekiID.map {
-                    try refetchChekiRecordByID($0)
+                    try refetchChekiRecordByID(
+                        $0, allowsSharedHiddenAssociations: preservesReviewAssociations
+                    )
+                }
+                if preservesReviewAssociations,
+                   existingTarget.map(ChekinanaChekiRecordSnapshot.init) != temporary.scanReviewRecordSnapshot {
+                    throw ChekinanaNLClientError.invalidSchema
                 }
                 let createdAt = Date()
                 let date = fields.eventDate ?? temporary.date
@@ -6861,9 +6933,10 @@ struct ChekinanaCommandExecutor {
                     createdAt: createdAt,
                     requestedIdx: temporary.idx,
                     existingChekiID: temporary.existingChekiID,
-                    existingChekiRecordSnapshot: existingTarget.map(
-                        ChekinanaChekiRecordSnapshot.init
-                    ),
+                    existingChekiRecordSnapshot: preservesReviewAssociations
+                        ? temporary.scanReviewRecordSnapshot
+                        : existingTarget.map(ChekinanaChekiRecordSnapshot.init),
+                    usesScanReviewRecordMatching: preservesReviewAssociations,
                     explicitlyEditedFields: temporary.explicitlyEditedFields
                 )
                 return (
@@ -6892,7 +6965,9 @@ struct ChekinanaCommandExecutor {
                     createdAt: item.createdAt,
                     confirmationCode: code,
                     thumbnailImageData: item.temporary.thumbnailImageData,
-                    idolNames: item.idols.map(\.name),
+                    idolNames: item.idols.filter {
+                        !preservesReviewAssociations || !hiddenIDs.contains($0.id)
+                    }.map(\.name),
                     eventName: item.event?.name,
                     eventDateText: item.date.map(calendarDateString),
                     userAppears: item.userAppears,
@@ -7042,6 +7117,7 @@ struct ChekinanaCommandExecutor {
             var scannerMetadata: [ChekinanaTemporaryScannerMetadata] = []
             var sourceAnnotations: [ChekinanaScannerSourceAnnotation?] = []
             var reviewRectificationSources: [ChekinanaReviewRectificationSource?] = []
+            var refitOriginalSources: [ChekinanaReviewRectificationSource?] = []
             var inferredSizes: [ChekiSize?] = []
             var warningCount = 0
             let progressState = ScanProgressState()
@@ -7416,6 +7492,7 @@ struct ChekinanaCommandExecutor {
                             ))
                             dateAnnotationStates.append(annotationState)
                             sourceAnnotations.append(resultImage.sourceAnnotation)
+                            refitOriginalSources.append(resultImage.refitOriginalSource)
                             reviewRectificationSources.append(
                                 resultImage.reviewRectificationSource
                             )
@@ -7493,6 +7570,7 @@ struct ChekinanaCommandExecutor {
                 scannerMetadata: scannerMetadata,
                 sourceAnnotations: sourceAnnotations,
                 reviewRectificationSources: reviewRectificationSources,
+                refitOriginalSources: refitOriginalSources,
                 dates: inferredDates,
                 eventIDs: inferredEventIDs,
                 eventAutoMatched: inferredEventIDs.map { $0 != nil },
@@ -7884,8 +7962,7 @@ struct ChekinanaCommandExecutor {
                 eventDate: cheki.date,
                 otherIdolIDs: idols.map(\.id),
                 otherEventID: event?.id,
-                otherEventDate: eventDate
-            )
+                otherEventDate: eventDate)
             let card = ChekinanaChekiCard(
                 id: cheki.id,
                 imageRef: cheki.imageRef,
@@ -8618,6 +8695,7 @@ struct ChekinanaCommandExecutor {
             scannerSize: scannerSize,
             postprocessMode: ChekinanaScannerPostprocessor.fixedMode,
             whiteBalance: whiteBalance,
+            tightBoundaries: scanTightBoundaries ?? UserDefaults.standard.bool(forKey: ChekinanaScanBoundaryPreference.defaultsKey),
             sleevesEnabled: sleevesEnabled,
             directInputEnabled: directInputEnabled,
             dateRecognitionEnabled: dateRecognitionEnabled,
@@ -8938,22 +9016,7 @@ struct ChekinanaCommandExecutor {
             let persistedDate = try ChekinanaPersistedContentDatePolicy
                 .validatedCanonical(effectiveDate)
             let effectiveIdx: Int?
-            if edited.contains(.idx) {
-                if let requested = try ChekinanaChekiIndexing.normalizedExplicitIndex(
-                    payload.requestedIdx,
-                    isFavorite: payload.isFavorite
-                ) {
-                    effectiveIdx = requested
-                } else {
-                    effectiveIdx = try nextChekiIndex(
-                        idolIDs: effectiveIdols.map(\.id),
-                        eventID: effectiveEvent?.id,
-                        eventDate: effectiveDate,
-                        isFavorite: payload.isFavorite,
-                        excludingChekiID: nil
-                    )
-                }
-            } else {
+
                 effectiveIdx = try nextChekiIndex(
                     idolIDs: effectiveIdols.map(\.id),
                     eventID: effectiveEvent?.id,
@@ -8961,7 +9024,7 @@ struct ChekinanaCommandExecutor {
                     isFavorite: payload.isFavorite,
                     excludingChekiID: nil
                 )
-            }
+
             guard ChekinanaChekiIndexing.isValid(
                 effectiveIdx,
                 isFavorite: payload.isFavorite
@@ -9129,7 +9192,10 @@ struct ChekinanaCommandExecutor {
         }
     }
 
-    private func refetchIdolsByIDs(_ ids: [UUID]) throws -> [Idol] {
+    private func refetchIdolsByIDs(
+        _ ids: [UUID],
+        preservingHiddenIDs: Set<UUID> = []
+    ) throws -> [Idol] {
         guard !ids.isEmpty else {
             return []
         }
@@ -9144,7 +9210,8 @@ struct ChekinanaCommandExecutor {
             guard matches.count == 1, let idol = matches.first else {
                 throw ChekinanaAddChekiError.duplicateIdol(id.uuidString)
             }
-            guard ChekinanaVisibilityPolicy.includesIdol(idol.id, hiddenIDs: hiddenIDs) else {
+            guard preservingHiddenIDs.contains(idol.id)
+                    || ChekinanaVisibilityPolicy.includesIdol(idol.id, hiddenIDs: hiddenIDs) else {
                 throw ChekinanaAddChekiError.noIdol(id.uuidString)
             }
             return idol
@@ -9194,16 +9261,24 @@ struct ChekinanaCommandExecutor {
         return cheki
     }
 
-    private func refetchChekiRecordByID(_ id: UUID) throws -> ChekiRecord {
+    private func refetchChekiRecordByID(
+        _ id: UUID,
+        allowsSharedHiddenAssociations: Bool = false
+    ) throws -> ChekiRecord {
         var descriptor = FetchDescriptor<ChekiRecord>(
             predicate: #Predicate { $0.id == id }
         )
         descriptor.fetchLimit = 1
         guard let record = try modelContext.fetch(descriptor).first,
-              ChekinanaChekiRecordReadPolicy.isVisible(
-                record,
-                hiddenIDs: ChekinanaHiddenIdolPersistence.load()
-              ) else {
+              (allowsSharedHiddenAssociations
+                ? ChekinanaFourPageVisibilityPolicy.includesRecord(
+                    idolIDs: record.idolIDs,
+                    hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+                  )
+                : ChekinanaChekiRecordReadPolicy.isVisible(
+                    record,
+                    hiddenIDs: ChekinanaHiddenIdolPersistence.load()
+                  )) else {
             throw ChekinanaNLClientError.invalidSchema
         }
         return record
@@ -9455,13 +9530,11 @@ struct ChekinanaCommandExecutor {
         eventDate: Date?,
         otherIdolIDs: [UUID],
         otherEventID: UUID?,
-        otherEventDate: Date?
-    ) -> Bool {
+        otherEventDate: Date?) -> Bool {
         ChekinanaChekiGroupKey(idolIDs: idolIDs, date: eventDate)
             == ChekinanaChekiGroupKey(
                 idolIDs: otherIdolIDs,
-                date: otherEventDate
-            )
+                date: otherEventDate)
     }
 
     private func nextChekiIndex(
@@ -9480,8 +9553,7 @@ struct ChekinanaCommandExecutor {
         let snapshots = chekis.compactMap { cheki -> ChekinanaChekiIndexSnapshot? in
             guard let chekiGroup = ChekinanaChekiGroupKey(
                 idolIDs: cheki.idolIDs,
-                date: cheki.date
-            ) else {
+                date: cheki.date) else {
                 return nil
             }
             return .init(
@@ -9640,7 +9712,7 @@ struct ChekinanaCommandExecutor {
             event.date.map(calendarDateString)
                 ?? ChekinanaCommandCopy.text("value.date_undetermined", fallback: "Date not determined")
         ))
-        parts.append(ChekinanaCommandCopy.format("field.city", fallback: "City: %@", event.city ?? unset))
+        parts.append(ChekinanaCommandCopy.format("field.city", fallback: "City: %@", ChekinanaEventCity.displayed(event.city) ?? unset))
         parts.append(ChekinanaCommandCopy.format("field.livehouse", fallback: "Livehouse: %@", event.resolvedLivehouse ?? unset))
         let schedule = try? ChekinanaEventSchedulePersistence.value(
             for: event.id,
@@ -9661,7 +9733,7 @@ struct ChekinanaCommandExecutor {
     private func eventMetadataPreview(city: String?, livehouse: String?, price: String?, ticketURL: URL?, note: String) -> String {
         let unset = ChekinanaCommandCopy.text("value.unset", fallback: "Not set")
         return [
-            ChekinanaCommandCopy.format("field.city", fallback: "City: %@", city ?? unset),
+            ChekinanaCommandCopy.format("field.city", fallback: "City: %@", ChekinanaEventCity.displayed(city) ?? unset),
             ChekinanaCommandCopy.format("field.livehouse", fallback: "Venue: %@", livehouse ?? unset),
             ChekinanaCommandCopy.format("field.price", fallback: "Price: %@", price ?? unset),
             ChekinanaCommandCopy.format("field.ticket", fallback: "Ticket: %@", ticketURL?.absoluteString ?? unset),
@@ -10414,6 +10486,21 @@ actor ChekinanaThumbnailCache {
         }
     }
 
+    func thumbnailImage(
+        forEventAvatarRef imageRef: String?,
+        key sourceKey: String,
+        maxDimension: Int = 256
+    ) async -> ChekinanaRenderedImage? {
+        // Event references are validated without trimming; do not alias an
+        // invalid padded reference to a previously cached valid filename.
+        let key = "event-avatar|\(sourceKey)|\(imageRef ?? "<nil>")|\(maxDimension)"
+        return await cachedImage(for: key) {
+            await ChekinanaImageWorker.thumbnailImage(
+                fromEventAvatarRef: imageRef, maxDimension: maxDimension
+            )
+        }
+    }
+
     static func referenceCacheKey(
         kind: String,
         imageRef: String?,
@@ -10708,6 +10795,26 @@ enum ChekinanaImageWorker {
     ) async -> ChekinanaRenderedImage? {
         await performDecode {
             guard let url = ChekiImageRefResolver.managedLocalFileURL(for: imageRef),
+                  let source = CGImageSourceCreateWithURL(url as CFURL, [
+                    kCGImageSourceShouldCache: false,
+                  ] as CFDictionary),
+                  let image = makeThumbnailImage(from: source, maxDimension: maxDimension) else {
+                return nil
+            }
+            return ChekinanaRenderedImage(cgImage: image)
+        }
+    }
+
+    static func thumbnailImage(
+        fromEventAvatarRef imageRef: String?,
+        maxDimension: Int = 256
+    ) async -> ChekinanaRenderedImage? {
+        await performDecode {
+            guard let imageRef, ChekinanaEventAvatarStore.isManaged(imageRef),
+                  let directory = try? ChekiImageRefResolver.chekiImagesDirectory(),
+                  let url = ChekinanaEventMediaReference.localFileURL(
+                    for: imageRef, directory: directory
+                  ),
                   let source = CGImageSourceCreateWithURL(url as CFURL, [
                     kCGImageSourceShouldCache: false,
                   ] as CFDictionary),
@@ -12344,14 +12451,11 @@ enum ChekinanaChekiEditCommitter {
     ) throws {
         let previousGroup = ChekinanaChekiGroupKey(
             idolIDs: previous.idolIDs,
-            date: previous.date
-        )
+            date: previous.date)
         let targetGroup = ChekinanaChekiGroupKey(
             idolIDs: target.idolIDs,
-            date: target.date
-        )
-        // Read every group through a fresh context. An undated group is a real
-        // group, and favorite changes also require a sign-correct reassignment.
+            date: target.date)
+        // Read every group through a fresh context before checking index validity.
         let indexContext = ModelContext(modelContext.container)
         let existing = try ChekinanaChekiIndexing.snapshots(in: indexContext)
         do {
@@ -12819,6 +12923,7 @@ struct ChekinanaScannerOptions: Sendable {
     let expectedPolaroids: Int?
     let scannerSize: ChekinanaScannerSize
     let postprocessMode: ChekinanaScannerPostprocessMode
+    let tightBoundaries: Bool
     let whiteBalance: Bool
     let sleevesEnabled: Bool
     let directInputEnabled: Bool
@@ -12840,6 +12945,7 @@ struct ChekinanaScannerOptions: Sendable {
         scannerSize: ChekinanaScannerSize,
         postprocessMode _: ChekinanaScannerPostprocessMode,
         whiteBalance: Bool,
+        tightBoundaries: Bool = false,
         sleevesEnabled: Bool = false,
         directInputEnabled: Bool = false,
         dateRecognitionEnabled: Bool = false,
@@ -12849,6 +12955,7 @@ struct ChekinanaScannerOptions: Sendable {
         self.expectedPolaroids = expectedPolaroids
         self.scannerSize = scannerSize
         self.postprocessMode = ChekinanaScannerPostprocessor.fixedMode
+        self.tightBoundaries = tightBoundaries
         self.whiteBalance = whiteBalance
         self.sleevesEnabled = sleevesEnabled
         self.directInputEnabled = directInputEnabled
@@ -12870,6 +12977,7 @@ struct ChekinanaScannerResultImage: Sendable {
     let dateAnnotationState: ChekinanaChekiDateAnnotationState
     let sourceAnnotation: ChekinanaScannerSourceAnnotation?
     let reviewRectificationSource: ChekinanaReviewRectificationSource?
+    let refitOriginalSource: ChekinanaReviewRectificationSource?
     let inferredChekiSize: ChekiSize?
 
     init(
@@ -12881,6 +12989,7 @@ struct ChekinanaScannerResultImage: Sendable {
         dateAnnotationState: ChekinanaChekiDateAnnotationState = .notRequested,
         sourceAnnotation: ChekinanaScannerSourceAnnotation? = nil,
         reviewRectificationSource: ChekinanaReviewRectificationSource? = nil,
+        refitOriginalSource: ChekinanaReviewRectificationSource? = nil,
         inferredChekiSize: ChekiSize? = nil
     ) {
         self.data = data
@@ -12892,6 +13001,7 @@ struct ChekinanaScannerResultImage: Sendable {
         self.sourceAnnotation = sourceAnnotation?.isValid == true ? sourceAnnotation : nil
         self.reviewRectificationSource = reviewRectificationSource?.isValid == true
             ? reviewRectificationSource : nil
+        self.refitOriginalSource = refitOriginalSource
         self.inferredChekiSize = inferredChekiSize
     }
 }
@@ -13355,6 +13465,7 @@ enum ChekinanaLocalImportChekiProcessor {
             image.data,
             appliesWhiteBalance: options.whiteBalance
         )
+        let refitSource = makeRefitOriginalSource(image.data)
         return ChekinanaScannerProcessResult(
             images: [ChekinanaScannerResultImage(
                 data: output.data,
@@ -13362,10 +13473,23 @@ enum ChekinanaLocalImportChekiProcessor {
                 imagePixelHeight: output.height,
                 filenameExtension: "jpg",
                 dateAnnotationState: .notRequested,
+                refitOriginalSource: refitSource,
                 inferredChekiSize: output.inferredSize
             )],
             warningCount: 0
         )
+    }
+
+    static func makeRefitOriginalSource(_ data: Data) -> ChekinanaReviewRectificationSource? {
+        let dimensions = ChekinanaImagePixelGeometry.uprightDimensions(in: data)
+        return dimensions.map { size in
+            ChekinanaReviewRectificationSource(
+                imageData: data, sourcePixelWidth: size.width, sourcePixelHeight: size.height,
+                quadrilateral: [.init(x: 0, y: 0), .init(x: Double(size.width), y: 0),
+                    .init(x: Double(size.width), y: Double(size.height)), .init(x: 0, y: Double(size.height))],
+                appliesWhiteBalance: false, postprocessing: .perspectiveOnly
+            )
+        }
     }
 
     static func normalize(

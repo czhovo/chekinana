@@ -128,8 +128,28 @@ struct ChekinanaChekiRokuImportWizard: View {
                     HStack {
                         avatar(draft.avatarPreview)
                         VStack(alignment: .leading) {
-                            TextField(ChekinanaL10n.text("import.name", fallback: "Name"), text: $draft.name)
-                                .focused($isDraftFieldFocused)
+                            if draft.choice == .create, draft.catalogueSearchName != nil {
+                                HStack {
+                                    TextField(
+                                        ChekinanaL10n.text("import.catalogue.search_name", fallback: "Temporary search name"),
+                                        text: Binding(
+                                            get: { draft.catalogueSearchName ?? draft.name },
+                                            set: { draft.updateCatalogueSearchName($0) }
+                                        )
+                                    )
+                                    .focused($isDraftFieldFocused)
+                                    .submitLabel(.search)
+                                    .onSubmit { retryCatalogueSearch(memberID: draft.memberID) }
+                                    Button(ChekinanaL10n.text("import.catalogue.search_one", fallback: "Search")) {
+                                        retryCatalogueSearch(memberID: draft.memberID)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .accessibilityIdentifier("chekinana.import.step1.member.\(draft.memberID).search")
+                                }
+                            } else {
+                                TextField(ChekinanaL10n.text("import.name", fallback: "Name"), text: $draft.name)
+                                    .focused($isDraftFieldFocused)
+                            }
                             TextField(ChekinanaL10n.text("import.group", fallback: "Group"), text: $draft.group)
                                 .focused($isDraftFieldFocused)
                                 .foregroundStyle(.secondary)
@@ -230,7 +250,8 @@ struct ChekinanaChekiRokuImportWizard: View {
     }
 
     private var recordStep: some View {
-        List {
+        let selectedCount = selectedRecordCount
+        return List {
             Section {
                 ChekiRokuStepHeader(step: 2, title: ChekinanaL10n.text("import.step2", fallback: "Step 2 of 2 · Add Records"))
                 Text(ChekinanaL10n.text("import.only_missing", fallback: "Only missing quantities are added. Existing records count whether or not they have media."))
@@ -238,7 +259,7 @@ struct ChekinanaChekiRokuImportWizard: View {
                     "import.record_summary",
                     fallback: "Source rows: %1$lld · Records to add: %2$lld",
                     Int64(selectedSourceRowCount),
-                    Int64(selectedRecordCount)
+                    Int64(selectedCount)
                 ))
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -294,8 +315,8 @@ struct ChekinanaChekiRokuImportWizard: View {
         .background(ChekinanaDesignSystem.pageBackground)
         .safeAreaInset(edge: .bottom) {
             ViewThatFits(in: .horizontal) {
-                HStack { recordBackButton; Spacer(); recordImportButton }
-                VStack(spacing: 8) { recordImportButton; recordBackButton }
+                HStack { recordBackButton; Spacer(); recordImportButton(selectedCount: selectedCount) }
+                VStack(spacing: 8) { recordImportButton(selectedCount: selectedCount); recordBackButton }
             }
             .padding()
         }
@@ -336,17 +357,17 @@ struct ChekinanaChekiRokuImportWizard: View {
         .accessibilityIdentifier("chekinana.import.step2.back")
     }
 
-    private var recordImportButton: some View {
+    private func recordImportButton(selectedCount: Int) -> some View {
         Button(ChekinanaL10n.quantity(
             "import.action.records",
-            count: selectedRecordCount,
+            count: selectedCount,
             one: "Import %lld Record",
             other: "Import %lld Records"
         )) {
             Task { await saveRecords() }
         }
         .buttonStyle(.borderedProminent)
-        .disabled(isSaving || isPlanning || cachedPlan == nil || recordImporter == nil || selectedRecordCount == 0)
+        .disabled(isSaving || isPlanning || cachedPlan == nil || recordImporter == nil || selectedCount == 0)
         .accessibilityIdentifier("chekinana.import.step2.import")
     }
 
@@ -361,6 +382,8 @@ struct ChekinanaChekiRokuImportWizard: View {
                 Image(decorative: preview.cgImage, scale: 1, orientation: .up)
                     .resizable()
                     .scaledToFill()
+                    .frame(width: 44, height: 44)
+                    .background(Color.white)
             } else {
                 Image(systemName: "person.crop.circle.fill")
                     .resizable()
@@ -440,6 +463,7 @@ struct ChekinanaChekiRokuImportWizard: View {
             }
         }
         let queries = ChekiRokuMemberSelectionPolicy.catalogueQueries(drafts, memberIDs: memberIDs)
+        let revisions = Dictionary(uniqueKeysWithValues: drafts.map { ($0.memberID, $0.catalogueSearchRevision) })
         do {
             let results = try await ChekiRokuCatalogueMatching.resolve(queries)
             try Task.checkCancellation()
@@ -447,8 +471,9 @@ struct ChekinanaChekiRokuImportWizard: View {
             for index in drafts.indices {
                 guard drafts[index].isSelected, drafts[index].choice == .create,
                       memberIDs?.contains(drafts[index].memberID) ?? true,
+                      let revision = revisions[drafts[index].memberID],
                       let resolution = results[drafts[index].query] else { continue }
-                drafts[index].resolution = resolution
+                drafts[index].applyCatalogueResolution(resolution, revision: revision)
             }
         } catch is CancellationError {
             // Closing this wizard is never permission to create fallback Idols.
@@ -463,10 +488,19 @@ struct ChekinanaChekiRokuImportWizard: View {
         isMatching = false; progress = ""
     }
 
+    private func retryCatalogueSearch(memberID: Int) {
+        guard draftControlsEnabled,
+              let index = drafts.firstIndex(where: { $0.memberID == memberID }),
+              drafts[index].isSelected, drafts[index].choice == .create else { return }
+        isDraftFieldFocused = false
+        drafts[index].invalidateCatalogueSearch()
+        matchDrafts(memberIDs: [memberID])
+    }
+
     private func invalidateMatch(memberID: Int) {
         guard let index = drafts.firstIndex(where: { $0.memberID == memberID }),
               !drafts[index].hasCurrentResolution else { return }
-        drafts[index].resolution = nil
+        drafts[index].invalidateCatalogueSearch()
     }
 
     private func catalogueSummary(_ draft: ChekiRokuIdolDraft) -> String {
@@ -589,7 +623,11 @@ struct ChekinanaChekiRokuImportWizard: View {
             selectedRecordRowIDs.contains($0.sourceIndex) ? ($0.sourceIndex, $0.count) : nil
         }), ignoresNotes: ignoresRecordNotes)
     }
-    private var selectedRecordCount: Int { recordSelection.quantities.values.reduce(0, +) }
+    private var selectedRecordCount: Int {
+        recordPlan.rows.reduce(0) { total, row in
+            selectedRecordRowIDs.contains(row.sourceIndex) ? total + row.count : total
+        }
+    }
     private func planRecords() {
         guard !isPlanning else { return }
         isPlanning = true; progressTotal = 0; progressCompleted = 0; progress = ChekinanaL10n.text("import.stage.planning", fallback: "Planning records")
@@ -822,8 +860,35 @@ struct ChekiRokuIdolDraft: Identifiable {
     var choice: ChekiRokuIdolChoice
     var isSelected: Bool = true
     var resolution: ChekiRokuCatalogueMatching.Resolution? = nil
+    var catalogueSearchName: String? = nil
+    private(set) var catalogueSearchRevision = UUID()
 
-    var query: ChekiRokuCatalogueMatching.Query { .init(name: name, group: group) }
+    var query: ChekiRokuCatalogueMatching.Query {
+        .init(name: catalogueSearchName ?? name, group: group)
+    }
+
+    mutating func updateCatalogueSearchName(_ value: String) {
+        guard catalogueSearchName != value else { return }
+        catalogueSearchName = value
+        invalidateCatalogueSearch()
+    }
+
+    mutating func invalidateCatalogueSearch() {
+        resolution = nil
+        catalogueSearchRevision = UUID()
+    }
+
+    mutating func applyCatalogueResolution(
+        _ value: ChekiRokuCatalogueMatching.Resolution,
+        revision: UUID
+    ) {
+        guard isSelected, choice == .create,
+              catalogueSearchRevision == revision, value.query == query else { return }
+        resolution = value
+        if case .fallback = value.outcome, catalogueSearchName == nil {
+            catalogueSearchName = name
+        }
+    }
     var hasCurrentResolution: Bool { resolution?.query == query }
     var catalogueCandidate: ChekinanaEnrichedIdol? {
         guard let resolution, resolution.query == query,
@@ -898,6 +963,8 @@ private struct ChekiRokuExistingIdolOption: View {
                     Image(decorative: avatar.cgImage, scale: 1, orientation: .up)
                         .resizable()
                         .scaledToFill()
+                        .frame(width: 28, height: 28)
+                        .background(Color.white)
                 } else {
                     Image(systemName: "person.crop.circle.fill")
                         .resizable()

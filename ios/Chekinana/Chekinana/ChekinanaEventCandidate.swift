@@ -1,5 +1,19 @@
 import Foundation
 
+enum ChekinanaEventCity {
+    static func normalized(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != "芒市", trimmed.hasSuffix("市") else { return trimmed }
+        return String(trimmed.dropLast())
+    }
+
+    static func displayed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = normalized(value)
+        return normalized.isEmpty ? nil : normalized
+    }
+}
+
 struct ChekinanaEventCandidateFields: Equatable, Sendable {
     var name: String
     var date: String
@@ -247,7 +261,7 @@ enum ChekinanaEventCandidateValidator {
         if fields.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             blockers.append(.missingName)
         }
-        if fields.city.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if ChekinanaEventCity.normalized(fields.city).isEmpty {
             blockers.append(.missingCity)
         }
         let date = fields.date.trimmingCharacters(in: .whitespacesAndNewlines)

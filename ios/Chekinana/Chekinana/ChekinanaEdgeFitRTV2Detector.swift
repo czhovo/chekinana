@@ -6,7 +6,8 @@ import ImageIO
 enum ChekinanaEdgeFitRTV2Contract {
     static let displayName = "ChekiEdgeFit-RT v2"
     static let algorithmID = "ChekiEdgeFit-RT"
-    static let semanticVersion = "2.0.0"
+    static let semanticVersion = "2.1.0"
+    static let assetSemanticVersion = "2.0.0"
     static let detectorThreshold: Float = 0.9267578125
     static let modelResourceNames = [
         "CEFRT2Detector",
@@ -154,6 +155,7 @@ struct ChekinanaUprightRGBRaster: @unchecked Sendable {
 final class ChekinanaEdgeFitRTV2Detector: ChekinanaOnDeviceEdgeDetector,
     @unchecked Sendable {
     private let manifest: ChekinanaEdgeDetectorManifest
+    private let baseManifest: ChekinanaEdgeDetectorManifest
     private let models: Models
 
     init(bundle: Bundle = .main) throws {
@@ -165,26 +167,41 @@ final class ChekinanaEdgeFitRTV2Detector: ChekinanaOnDeviceEdgeDetector,
             ChekinanaEdgeDetectorManifest.self,
             from: data
            ), manifest.algorithmID == ChekinanaEdgeFitRTV2Contract.algorithmID,
-           manifest.semver == ChekinanaEdgeFitRTV2Contract.semanticVersion,
+           manifest.semver == ChekinanaEdgeFitRTV2Contract.assetSemanticVersion,
            manifest.outputSchemaVersion == "1.0.0" else {
             throw ChekinanaOnDeviceScannerError.invalidAssetManifest
         }
-        self.manifest = manifest
+        baseManifest = manifest
+        // Runtime algorithm version differs from the unchanged v2 model assets.
+        self.manifest = ChekinanaEdgeDetectorManifest(
+            algorithmID: manifest.algorithmID,
+            semver: ChekinanaEdgeFitRTV2Contract.semanticVersion,
+            build: manifest.build + "+refinement.1",
+            outputSchemaVersion: manifest.outputSchemaVersion,
+            assetVersion: manifest.assetVersion
+        )
         models = try Models(bundle: bundle)
     }
 
     func detect(_ image: ChekinanaPendingChekiImage) async throws
         -> ChekinanaEdgeDetectorOutput {
+        try await detect(image, refinementEnabled: true)
+    }
+
+    func detect(_ image: ChekinanaPendingChekiImage, refinementEnabled: Bool) async throws
+        -> ChekinanaEdgeDetectorOutput {
         let models = models
-        let manifest = manifest
+        let manifest = refinementEnabled ? manifest : baseManifest
         let work = Task.detached(priority: .userInitiated) {
             let source = try ChekinanaUprightRGBRaster.decode(
                 image.data
             )
             try Task.checkCancellation()
-            let quads = try RTV2Pipeline(models: models).detect(
-                source, encodedByteCount: image.data.count
-            )
+            let pipeline = RTV2Pipeline(models: models)
+            let first = try pipeline.detect(source, encodedByteCount: image.data.count)
+            let quads = refinementEnabled ? try pipeline.refine(
+                first, source: source, encodedByteCount: image.data.count
+            ) : first
             return ChekinanaEdgeDetectorOutput(
                 manifest: manifest,
                 sourcePixelWidth: source.width,
@@ -407,6 +424,162 @@ private struct RTV2Letterbox {
     let top: Float
 }
 
+/// The v2.1 acceptance rule operates in the first rectified instance, then
+/// maps accepted corners back to the original upright input. No corner clamp.
+enum ChekinanaEdgeFitRTV21Refinement {
+    typealias Point = ChekinanaScannerQuadrilateralPoint
+
+    struct Candidate {
+        let quadrilateral: [Point]
+        let width: Int
+        let height: Int
+    }
+
+    static func refine(
+        _ originals: [[Point]], sourceWidth: Int, sourceHeight: Int,
+        candidate: ([Point]) throws -> Candidate?
+    ) throws -> [[Point]] {
+        var result: [[Point]] = []
+        result.reserveCapacity(originals.count)
+        for original in originals {
+            try Task.checkCancellation()
+            do {
+                _ = try ChekinanaEdgeFitGeometry.validated(
+                    original, sourcePixelWidth: sourceWidth, sourcePixelHeight: sourceHeight
+                )
+                let next = try candidate(original)
+                try Task.checkCancellation()
+                result.append(try next.map {
+                    try selectedQuadrilateral(
+                        original: original, candidate: $0,
+                        sourceWidth: sourceWidth, sourceHeight: sourceHeight
+                    )
+                } ?? original)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Model/output/fitting/rendering failures belong only to this
+                // optional refinement, never to another first-pass instance.
+                try Task.checkCancellation()
+                result.append(original)
+            }
+        }
+        return result
+    }
+
+    static func selectedQuadrilateral(
+        original: [Point], candidate: Candidate,
+        sourceWidth: Int, sourceHeight: Int
+    ) throws -> [Point] {
+        let points = try ChekinanaEdgeFitGeometry.validated(
+            candidate.quadrilateral,
+            sourcePixelWidth: candidate.width, sourcePixelHeight: candidate.height
+        )
+        guard intersectionOverUnion(
+            points, width: Double(candidate.width), height: Double(candidate.height)
+        ) > 0.98 else { return original }
+        let mapped = try mapToOriginal(
+            points, width: Double(candidate.width), height: Double(candidate.height),
+            original: original
+        )
+        _ = try ChekinanaEdgeFitGeometry.validated(
+            mapped, sourcePixelWidth: sourceWidth, sourcePixelHeight: sourceHeight
+        )
+        if !isOutside(original, width: sourceWidth, height: sourceHeight),
+           isOutside(mapped, width: sourceWidth, height: sourceHeight) {
+            return original
+        }
+        return mapped
+    }
+
+    static func isOutside(_ points: [Point], width: Int, height: Int) -> Bool {
+        points.contains { $0.x < 0 || $0.y < 0 || $0.x > Double(width) || $0.y > Double(height) }
+    }
+
+    static func intersectionOverUnion(_ points: [Point], width: Double, height: Double) -> Double {
+        guard width > 0, height > 0 else { return 0 }
+        var intersection = points
+        // Sutherland-Hodgman clipping computes intersection only: candidate
+        // area remains the original polygon, including its out-of-bounds part.
+        for edge in 0..<4 {
+            guard !intersection.isEmpty else { return 0 }
+            func distance(_ p: Point) -> Double {
+                switch edge {
+                case 0: return p.x
+                case 1: return width - p.x
+                case 2: return p.y
+                default: return height - p.y
+                }
+            }
+            var clipped: [Point] = []
+            var previous = intersection[intersection.count - 1]
+            var previousDistance = distance(previous)
+            for current in intersection {
+                let currentDistance = distance(current)
+                if (previousDistance >= 0) != (currentDistance >= 0) {
+                    let t = previousDistance / (previousDistance - currentDistance)
+                    clipped.append(Point(
+                        x: previous.x + t * (current.x - previous.x),
+                        y: previous.y + t * (current.y - previous.y)
+                    ))
+                }
+                if currentDistance >= 0 { clipped.append(current) }
+                previous = current
+                previousDistance = currentDistance
+            }
+            intersection = clipped
+        }
+        let overlap = area(intersection)
+        let union = area(points) + width * height - overlap
+        guard union.isFinite, union > 0 else { return 0 }
+        return overlap / union
+    }
+
+    private static func area(_ points: [Point]) -> Double {
+        guard points.count >= 3 else { return 0 }
+        return abs(zip(points, points.dropFirst() + points.prefix(1)).reduce(0) {
+            $0 + $1.0.x * $1.1.y - $1.1.x * $1.0.y
+        }) / 2
+    }
+
+    static func mapToOriginal(
+        _ points: [Point], width: Double, height: Double, original q: [Point]
+    ) throws -> [Point] {
+        guard q.count == 4, width > 0, height > 0 else {
+            throw ChekinanaOnDeviceScannerError.invalidQuadrilateral
+        }
+        let dx1 = q[1].x - q[2].x, dx2 = q[3].x - q[2].x
+        let dy1 = q[1].y - q[2].y, dy2 = q[3].y - q[2].y
+        let dx3 = q[0].x - q[1].x + q[2].x - q[3].x
+        let dy3 = q[0].y - q[1].y + q[2].y - q[3].y
+        let determinant = dx1 * dy2 - dx2 * dy1
+        guard determinant.isFinite, determinant != 0 else {
+            throw ChekinanaOnDeviceScannerError.invalidQuadrilateral
+        }
+        let g = (dx3 * dy2 - dx2 * dy3) / determinant
+        let h = (dx1 * dy3 - dx3 * dy1) / determinant
+        let a = q[1].x - q[0].x + g * q[1].x
+        let b = q[3].x - q[0].x + h * q[3].x
+        let d = q[1].y - q[0].y + g * q[1].y
+        let e = q[3].y - q[0].y + h * q[3].y
+        return try points.map { point in
+            let u = point.x / width, v = point.y / height
+            let denominator = g * u + h * v + 1
+            guard denominator.isFinite, denominator != 0 else {
+                throw ChekinanaOnDeviceScannerError.invalidQuadrilateral
+            }
+            let result = Point(
+                x: (a * u + b * v + q[0].x) / denominator,
+                y: (d * u + e * v + q[0].y) / denominator
+            )
+            guard result.x.isFinite, result.y.isFinite else {
+                throw ChekinanaOnDeviceScannerError.invalidQuadrilateral
+            }
+            return result
+        }
+    }
+}
+
 private struct RTV2Pipeline {
     let models: ChekinanaEdgeFitRTV2Detector.Models
 
@@ -484,6 +657,47 @@ private struct RTV2Pipeline {
         return output
     }
 
+    func refine(
+        _ originals: [[ChekinanaScannerQuadrilateralPoint]],
+        source: ChekinanaUprightRGBRaster, encodedByteCount: Int
+    ) throws -> [[ChekinanaScannerQuadrilateralPoint]] {
+        guard !originals.isEmpty else { return originals }
+        // First-pass input tensors are out of scope. Reuse one pair for every
+        // refinement; do not retain rectified rasters between instances.
+        var inputs: (encoder: MLMultiArray, prompt: MLMultiArray)?
+        return try ChekinanaEdgeFitRTV21Refinement.refine(
+            originals, sourceWidth: source.width, sourceHeight: source.height
+        ) { original in
+            try autoreleasepool {
+                let instance = try ChekinanaEdgeFitRectifier.refinementRaster(
+                    source: source, quadrilateral: original,
+                    encodedByteCount: encodedByteCount
+                )
+                try Task.checkCancellation()
+                if inputs == nil {
+                    inputs = (
+                        try RTV2MultiArray.make(shape: [1, 3, 1024, 1024]),
+                        try RTV2MultiArray.make(shape: [1, 4])
+                    )
+                }
+                guard let inputs else { throw ChekinanaOnDeviceScannerError.modelOutputInvalid }
+                guard let quad = try edgeQuadrilateral(
+                    source: instance,
+                    box: RTV2Box(
+                        queryID: 0, score: 1,
+                        x1: 0, y1: 0, x2: Float(instance.width), y2: Float(instance.height)
+                    ),
+                    encoderInput: inputs.encoder, prompt: inputs.prompt,
+                    encodedByteCount: encodedByteCount,
+                    retainedSourceBytes: source.rgb.capacity
+                ) else { return nil }
+                return ChekinanaEdgeFitRTV21Refinement.Candidate(
+                    quadrilateral: quad, width: instance.width, height: instance.height
+                )
+            }
+        }
+    }
+
     private func detectorInput(_ source: ChekinanaUprightRGBRaster) throws
         -> RTV2Letterbox {
         let resizeScale = min(
@@ -531,8 +745,23 @@ private struct RTV2Pipeline {
         box: RTV2Box,
         encoderInput: MLMultiArray,
         prompt: MLMultiArray,
-        encodedByteCount: Int
+        encodedByteCount: Int,
+        retainedSourceBytes: Int = 0
     ) throws -> [ChekinanaScannerQuadrilateralPoint]? {
+        let sourceStorage = try RTV2WorkingSetBudget.checkedSum([
+            source.rgb.capacity, retainedSourceBytes,
+        ])
+        if retainedSourceBytes > 0 {
+            let crop = try ChekinanaEdgeFitRTV2ReferenceMath.fp32Square20Geometry(
+                width: source.width, height: source.height,
+                box: [box.x1, box.y1, box.x2, box.y2]
+            )
+            try RTV2WorkingSetBudget.validateCandidate(
+                sourceWidth: source.width, sourceHeight: source.height,
+                cropSide: crop.side, encodedByteCount: encodedByteCount,
+                sourceRGBStorageBytes: sourceStorage
+            )
+        }
         // Only scalar crop geometry leaves this scope; the streamed Float
         // output and its sampling scratch end before model/mask processing.
         let crop = try autoreleasepool {
@@ -553,7 +782,7 @@ private struct RTV2Pipeline {
         let budget = try RTV2WorkingSetBudget.validateCandidate(
             sourceWidth: source.width, sourceHeight: source.height,
             cropSide: crop.side, encodedByteCount: encodedByteCount,
-            sourceRGBStorageBytes: source.rgb.capacity
+            sourceRGBStorageBytes: sourceStorage
         )
         // Returned model values and 1024 mask interpolation scratch are local
         // to this scope. Fitting retains only the packed mask.

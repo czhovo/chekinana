@@ -860,18 +860,19 @@ enum ChekinanaIdolPatternPersistence {
                             != ChekinanaPatternContract.encoderVersion else {
                     continue
                 }
-                idol.pattern = nil
-                idol.patterns = []
+                if idol.pattern != nil { idol.pattern = nil }
+                if !idol.patterns.isEmpty { idol.patterns = [] }
                 let record = existingState ?? IdolPatternState(
                     idolID: idol.id,
                     encoderVersion: pendingVersion
                 )
                 if record.modelContext == nil { context.insert(record) }
-                record.cataloguePatternIDs = []
-                record.cataloguePatternCount = 0
-                record.encoderVersion = idol.sourceId?.nonEmpty == nil
+                if !record.cataloguePatternIDs.isEmpty { record.cataloguePatternIDs = [] }
+                if record.cataloguePatternCount != 0 { record.cataloguePatternCount = 0 }
+                let targetVersion = idol.sourceId?.nonEmpty == nil
                     ? ChekinanaPatternContract.encoderVersion
                     : pendingVersion
+                if record.encoderVersion != targetVersion { record.encoderVersion = targetVersion }
             }
             if context.hasChanges { try context.save() }
             defaults.set(

@@ -1826,6 +1826,16 @@ enum RTV2WorkingSetBudget {
         }
     }
 
+    /// Actual allocator capacity is a charge against a phase's total budget,
+    /// not a guarantee that malloc follows the reservation's size classes.
+    static func actualFixedArrayStorage(count: Int, capacity: Int, stride: Int) throws -> Int {
+        guard count >= 0, capacity >= count, stride > 0 else {
+            throw RTV2ReferenceMathError.invalidDimensions
+        }
+        guard capacity > 0 else { return 0 }
+        return try checkedSum([checkedProduct([capacity, stride]), storageAllowance])
+    }
+
     static func validateFixedCapacity(count: Int, capacity: Int, stride: Int) throws {
         guard capacity >= count,
               try checkedProduct([capacity, stride]) <= fixedArrayReservation(count: count, stride: stride) else {

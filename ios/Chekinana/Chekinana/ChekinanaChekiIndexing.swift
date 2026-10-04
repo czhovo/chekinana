@@ -2,8 +2,8 @@ import Foundation
 import SwiftData
 
 /// The complete unordered Idol set and canonical optional calendar day are the
-/// sole identity of a Cheki index group. `nil` is a real, independent date;
-/// Event and favorite state never change the group.
+/// identity. `nil` is a real, independent date;
+/// Event, favorite and solo/2shot state never change the group.
 struct ChekinanaChekiGroupKey: Hashable, Sendable {
     let idolIDs: Set<UUID>
     let date: String?
@@ -43,8 +43,8 @@ enum ChekinanaChekiIndexingError: Error, Equatable {
 
 enum ChekinanaChekiIndexing {
     static func isValid(_ idx: Int?, isFavorite: Bool) -> Bool {
-        guard let idx, idx != 0 else { return false }
-        return isFavorite ? idx < 0 : idx > 0
+        guard let idx else { return false }
+        return idx > 0
     }
 
     static func normalizedExplicitIndex(
@@ -52,11 +52,10 @@ enum ChekinanaChekiIndexing {
         isFavorite: Bool
     ) throws -> Int? {
         guard let idx else { return nil }
-        guard idx != 0, idx != Int.min else {
+        guard idx > 0 else {
             throw ChekinanaChekiIndexingError.overflow
         }
-        let magnitude = abs(idx)
-        return isFavorite ? -magnitude : magnitude
+        return idx
     }
 
     static func reassignedIndex(
@@ -70,7 +69,6 @@ enum ChekinanaChekiIndexing {
     ) throws -> Int? {
         guard let targetGroup else { throw ChekinanaChekiIndexingError.overflow }
         if previousGroup == targetGroup,
-           previousFavorite == targetFavorite,
            isValid(currentIndex, isFavorite: targetFavorite),
            existing.lazy.filter({ $0.chekiID != chekiID && $0.group == targetGroup })
             .allSatisfy({ $0.idx != currentIndex }) {
@@ -93,12 +91,7 @@ enum ChekinanaChekiIndexing {
         let occupied = existing.lazy
             .filter { $0.chekiID != excludingChekiID && $0.group == group }
             .compactMap(\.idx)
-            .filter { isFavorite ? $0 < 0 : $0 > 0 }
-        if isFavorite {
-            let currentMinimum = occupied.min() ?? 0
-            guard currentMinimum > Int.min else { throw ChekinanaChekiIndexingError.overflow }
-            return currentMinimum - 1
-        }
+            .filter { $0 > 0 }
         let currentMaximum = occupied.max() ?? 0
         guard currentMaximum < Int.max else { throw ChekinanaChekiIndexingError.overflow }
         return currentMaximum + 1
@@ -117,18 +110,8 @@ enum ChekinanaChekiIndexing {
             guard isValid(manualStart, isFavorite: isFavorite) else {
                 throw ChekinanaChekiIndexingError.overflow
             }
-            let indices: [Int]
-            if isFavorite {
-                guard quantity - 1 <= manualStart - Int.min else {
-                    throw ChekinanaChekiIndexingError.overflow
-                }
-                indices = (0..<quantity).map { manualStart - $0 }
-            } else {
-                guard quantity - 1 <= Int.max - manualStart else {
-                    throw ChekinanaChekiIndexingError.overflow
-                }
-                indices = (0..<quantity).map { manualStart + $0 }
-            }
+            guard quantity - 1 <= Int.max - manualStart else { throw ChekinanaChekiIndexingError.overflow }
+            let indices = (0..<quantity).map { manualStart + $0 }
             guard occupied.isDisjoint(with: Set(indices)) else {
                 throw ChekinanaChekiIndexingError.collision
             }
@@ -158,30 +141,24 @@ enum ChekinanaChekiIndexing {
     }
 
     /// Returns only values that must change. A fully valid group is untouched,
-    /// including any gaps. Invalid partitions keep usable numeric anchors when
-    /// enough space exists while restoring deterministic legacy display order.
+    /// including any gaps. Invalid or duplicate values append after the current
+    /// maximum without changing other valid indices.
     static func repairAssignments(
         for snapshots: [ChekinanaChekiIndexSnapshot]
     ) throws -> [UUID: Int] {
         var result: [UUID: Int] = [:]
         for groupValues in Dictionary(grouping: snapshots, by: \.group).values {
-            let indices = groupValues.compactMap(\.idx)
-            let valid = indices.count == groupValues.count
-                && Set(indices).count == indices.count
-                && groupValues.allSatisfy { isValid($0.idx, isFavorite: $0.isFavorite) }
-            guard !valid else { continue }
+            guard !hasValidIndices(groupValues) else { continue }
 
-            let legacyOrdered = groupValues.sorted(by: legacyPrecedes)
-            try repairPartition(
-                legacyOrdered.filter(\.isFavorite),
-                isFavorite: true,
-                into: &result
-            )
-            try repairPartition(
-                legacyOrdered.filter { !$0.isFavorite },
-                isFavorite: false,
-                into: &result
-            )
+            var used = Set<Int>()
+            var next = groupValues.compactMap(\.idx).filter { $0 > 0 }.max() ?? 0
+            for value in groupValues.sorted(by: addedPrecedes) {
+                if let idx = value.idx, idx > 0, used.insert(idx).inserted { continue }
+                guard next < Int.max else { throw ChekinanaChekiIndexingError.overflow }
+                next += 1
+                used.insert(next)
+                result[value.chekiID] = next
+            }
         }
         return result
     }
@@ -208,19 +185,8 @@ enum ChekinanaChekiIndexing {
                 )
             }
             result.merge(targetRepairs) { _, repaired in repaired }
-            var occupied = Set(reserved.compactMap(\.idx))
-            var pending: [ChekinanaChekiIndexSnapshot] = []
-            for value in values.filter({ movingChekiIDs.contains($0.chekiID) })
-                .sorted(by: legacyPrecedes) {
-                if let idx = value.idx,
-                   isValid(idx, isFavorite: value.isFavorite),
-                   occupied.insert(idx).inserted {
-                    reserved.append(value)
-                } else {
-                    pending.append(value)
-                }
-            }
-            // Reserve all valid incoming anchors before allocating conflicts.
+            let pending = values.filter { movingChekiIDs.contains($0.chekiID) }.sorted(by: addedPrecedes)
+            // Joining another base group always appends; existing target indices stay fixed.
             for value in pending {
                 let idx = try nextIndex(
                     for: group, isFavorite: value.isFavorite,
@@ -236,51 +202,58 @@ enum ChekinanaChekiIndexing {
         return result
     }
 
+    private static func hasValidIndices(_ groupValues: [ChekinanaChekiIndexSnapshot]) -> Bool {
+        let indices = groupValues.compactMap(\.idx)
+        return indices.count == groupValues.count
+            && Set(indices).count == indices.count
+            && groupValues.allSatisfy { isValid($0.idx, isFavorite: $0.isFavorite) }
+    }
+
     @discardableResult
     static func repairPersistedMediaItems(in modelContext: ModelContext) throws -> Int {
-        let mediaItems = try modelContext.fetch(FetchDescriptor<MediaItem>())
-        let chekis = mediaItems.filter { $0.kind == .cheki }
-        let assignments = try repairAssignments(for: chekis.compactMap { cheki in
-            guard let group = ChekinanaChekiGroupKey(
-                idolIDs: cheki.idolIDs,
-                date: cheki.date
-            ) else { return nil }
-            return ChekinanaChekiIndexSnapshot(
-                chekiID: cheki.id,
-                group: group,
-                idx: cheki.idx,
-                isFavorite: cheki.isFavorite,
-                createdAt: cheki.createdAt
-            )
+        let photoKind = MediaItemKind.shame.rawValue
+        let videoKind = MediaItemKind.douga.rawValue
+        let descriptor = FetchDescriptor<MediaItem>(predicate: #Predicate {
+            ($0.kindRawValue != photoKind && $0.kindRawValue != videoKind) || $0.idx != nil
         })
+        let items = try modelContext.fetch(descriptor)
+        let assignments = try repairAssignments(for: snapshots(items))
         var changed = 0
-        for cheki in chekis {
-            guard let idx = assignments[cheki.id], cheki.idx != idx else { continue }
-            cheki.idx = idx
+        for item in items {
+            guard let idx = assignments[item.id], item.idx != idx else { continue }
+            item.idx = idx
             changed += 1
         }
-        for item in mediaItems where item.kind != .cheki && item.idx != nil {
+        for item in items where item.kind != .cheki && item.idx != nil {
             item.idx = nil
             changed += 1
         }
         return changed
     }
 
-    static func snapshots(in modelContext: ModelContext) throws -> [ChekinanaChekiIndexSnapshot] {
-        try modelContext.fetch(FetchDescriptor<MediaItem>()).compactMap { cheki in
-            guard cheki.kind == .cheki,
-                  let group = ChekinanaChekiGroupKey(
-                    idolIDs: cheki.idolIDs,
-                    date: cheki.date
-                  ) else { return nil }
-            return .init(
-                chekiID: cheki.id,
-                group: group,
-                idx: cheki.idx,
-                isFavorite: cheki.isFavorite,
-                createdAt: cheki.createdAt
-            )
+    static func snapshots(_ items: [MediaItem]) -> [ChekinanaChekiIndexSnapshot] {
+        items.compactMap { item in
+            guard item.kind == .cheki, let group = ChekinanaChekiGroupKey(idolIDs: item.idolIDs, date: item.date) else { return nil }
+            return .init(chekiID: item.id, group: group, idx: item.idx, isFavorite: item.isFavorite, createdAt: item.createdAt)
         }
+    }
+
+    static func snapshots(in modelContext: ModelContext) throws -> [ChekinanaChekiIndexSnapshot] {
+        snapshots(try modelContext.fetch(FetchDescriptor<MediaItem>()))
+    }
+
+    /// Explicit one-off migration plan only. The caller controls the database
+    /// transaction; normal startup never renumbers already valid records.
+    static func initializationAssignments(_ values: [ChekinanaChekiIndexSnapshot]) -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        for group in Dictionary(grouping: values, by: \.group).values {
+            for (offset, value) in group.sorted(by: addedPrecedes).enumerated() { result[value.chekiID] = offset + 1 }
+        }
+        return result
+    }
+
+    private static func addedPrecedes(_ lhs: ChekinanaChekiIndexSnapshot, _ rhs: ChekinanaChekiIndexSnapshot) -> Bool {
+        lhs.createdAt != rhs.createdAt ? lhs.createdAt < rhs.createdAt : lhs.chekiID.uuidString < rhs.chekiID.uuidString
     }
 
     static func snapshots(
@@ -293,58 +266,7 @@ enum ChekinanaChekiIndexing {
         }
     }
 
-    private static func legacyPrecedes(
-        _ lhs: ChekinanaChekiIndexSnapshot,
-        _ rhs: ChekinanaChekiIndexSnapshot
-    ) -> Bool {
-        if lhs.isFavorite != rhs.isFavorite { return lhs.isFavorite }
-        if lhs.idx != rhs.idx { return (lhs.idx ?? .max) < (rhs.idx ?? .max) }
-        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-        return lhs.chekiID.uuidString < rhs.chekiID.uuidString
-    }
 
-    private static func repairPartition(
-        _ values: [ChekinanaChekiIndexSnapshot],
-        isFavorite: Bool,
-        into assignments: inout [UUID: Int]
-    ) throws {
-        guard !values.isEmpty else { return }
-        if isFavorite {
-            let reversed = Array(values.reversed())
-            let repaired = try repairedPositiveSequence(reversed.map { snapshot in
-                let candidate = snapshot.idx.flatMap { value -> Int? in
-                    guard value < 0, value != Int.min else { return nil }
-                    return -value
-                }
-                return (snapshot.chekiID, candidate)
-            })
-            for (id, magnitude) in repaired { assignments[id] = -magnitude }
-        } else {
-            let repaired = try repairedPositiveSequence(values.map {
-                ($0.chekiID, ($0.idx ?? 0) > 0 ? $0.idx : nil)
-            })
-            for (id, idx) in repaired { assignments[id] = idx }
-        }
-    }
-
-    private static func repairedPositiveSequence(
-        _ values: [(UUID, Int?)]
-    ) throws -> [(UUID, Int)] {
-        var result: [(UUID, Int)] = []
-        var previous = 0
-        for (id, candidate) in values {
-            let next: Int
-            if let candidate, candidate > previous {
-                next = candidate
-            } else {
-                guard previous < Int.max else { throw ChekinanaChekiIndexingError.overflow }
-                next = previous + 1
-            }
-            result.append((id, next))
-            previous = next
-        }
-        return result
-    }
 }
 
 @ModelActor

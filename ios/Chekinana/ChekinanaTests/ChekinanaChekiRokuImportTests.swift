@@ -227,6 +227,73 @@ final class ChekinanaChekiRokuImportTests: XCTestCase {
         XCTAssertEqual(ChekiRokuCatalogueMatching.match(.init(name: "Alice", group: ""), candidates: [first]), .fallback(.missingGroup))
     }
 
+    func testCatalogueMatchingIgnoresUnicodeWhitespaceAndCaseWithoutChangingLocalRules() {
+        let query = ChekiRokuCatalogueMatching.Query(name: " Ａ L\tI\nCE ", group: "G\u{3000}Roup")
+        let candidate = ChekinanaEnrichedIdol(
+            sourceId: "one", idolName: "aLI cE", groupName: "g r o u p", color: nil,
+            birthday: nil, verification: nil, bio: nil, avatarUrl: nil
+        )
+        XCTAssertEqual(query.name, "alice")
+        XCTAssertEqual(query.group, "group")
+        XCTAssertEqual(ChekiRokuCatalogueMatching.match(query, candidates: [candidate]), .matched(candidate))
+        XCTAssertEqual(ChekiRokuCatalogueMatching.Query(name: "Alice", group: "Group"), query)
+        XCTAssertEqual(Set([query, .init(name: "a l i c e", group: "GROUP")]).count, 1)
+        XCTAssertEqual(ChekinanaChekiRokuImport.normalized("A B"), "a b")
+        XCTAssertFalse(ChekinanaChekiRokuImport.fieldsMatch("A B", "AB", isName: true))
+        XCTAssertEqual(candidate.idolName, "aLI cE")
+        XCTAssertEqual(ChekiRokuCatalogueMatching.match(.init(name: "\u{3000}\t", group: "Group"), candidates: []), .fallback(.notFound))
+        let collision = ChekinanaEnrichedIdol(
+            sourceId: "two", idolName: "ALICE", groupName: "GROUP", color: nil,
+            birthday: nil, verification: nil, bio: nil, avatarUrl: nil
+        )
+        XCTAssertEqual(ChekiRokuCatalogueMatching.match(query, candidates: [candidate, collision]), .fallback(.ambiguous))
+    }
+
+    func testCatalogueRequestKeepsSpacedSearchTermButDeduplicatesMatchingKey() async throws {
+        let probe = ChekiRokuCatalogueSearchProbe()
+        _ = try await ChekiRokuCatalogueMatching.resolve([
+            .init(name: " Alice Smith ", group: "Group"),
+            .init(name: "ALICESMITH", group: "G R O U P")
+        ]) { try await probe.search($0) }
+        let (names, _) = await probe.snapshot()
+        XCTAssertEqual(names, ["alice smith"])
+    }
+
+    func testTemporaryCatalogueSearchPreservesBackupAndRejectsStaleResults() {
+        var draft = memberDraft(id: 1, name: "Backup Name")
+        let originalColor = draft.color
+        draft.applyCatalogueResolution(.init(query: draft.query, outcome: .fallback(.notFound)), revision: draft.catalogueSearchRevision)
+        XCTAssertEqual(draft.catalogueSearchName, "Backup Name")
+        draft.updateCatalogueSearchName("New Name")
+        XCTAssertNil(draft.resolution)
+        let query = draft.query
+        let revision = draft.catalogueSearchRevision
+        let candidate = ChekinanaEnrichedIdol(
+            sourceId: "catalogue", idolName: "NEWNAME", groupName: "G R O U P", color: "#123456",
+            birthday: "2001-02-03", verification: "verified", bio: "catalogue bio",
+            avatarUrl: "https://example.invalid/avatar.jpg", patternIds: ["pattern"]
+        )
+        let matched = ChekiRokuCatalogueMatching.Resolution(query: query, outcome: .matched(candidate))
+        draft.applyCatalogueResolution(matched, revision: revision)
+        XCTAssertEqual(draft.catalogueCandidate, candidate)
+        XCTAssertEqual(draft.catalogueSearchName, "New Name")
+        XCTAssertEqual(draft.name, "Backup Name")
+        XCTAssertEqual(draft.group, "Group")
+        XCTAssertEqual(draft.color, originalColor)
+        draft.updateCatalogueSearchName("N E W N A M E")
+        XCTAssertNil(draft.catalogueCandidate)
+        draft.applyCatalogueResolution(matched, revision: revision)
+        XCTAssertNil(draft.catalogueCandidate)
+        draft.applyCatalogueResolution(.init(query: draft.query, outcome: .fallback(.notFound)), revision: draft.catalogueSearchRevision)
+        XCTAssertTrue(draft.hasCurrentResolution)
+        XCTAssertEqual(draft.name, "Backup Name")
+        draft.invalidateCatalogueSearch()
+        XCTAssertFalse(draft.hasCurrentResolution)
+        draft.isSelected = false
+        draft.applyCatalogueResolution(matched, revision: draft.catalogueSearchRevision)
+        XCTAssertNil(draft.resolution)
+    }
+
     func testCatalogueQueriesLeaveExistingChoicesAndExcludedMembersAlone() {
         var existing = memberDraft(id: 1, choice: .existing(UUID()))
         existing.resolution = nil

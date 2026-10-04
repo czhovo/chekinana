@@ -19,6 +19,7 @@
 		1A1A1A1A1A1A1A1A1A1A1A09 /* ChekinanaNaturalLanguageTranslator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */; };
 		2B2B2B2B2B2B2B2B2B2B2B01 /* ChekinanaNaturalLanguageUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */; };
 		3C3C3C3C3C3C3C3C3C3C3C01 /* ChekinanaChekiIndexing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */; };
+		3F7A1E000000000000000001 /* ChekinanaDebugChekiIndexReallocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F7A1E000000000000000011 /* ChekinanaDebugChekiIndexReallocator.swift */; };
 		370037003700370037003701 /* ChekinanaMatchGameLocalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 370037003700370037003711 /* ChekinanaMatchGameLocalizationTests.swift */; };
 		4D4D4D4D4D4D4D4D4D4D4D01 /* ChekinanaCommandExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */; };
 		5E5E5E5E5E5E5E5E5E5E5E01 /* ChekinanaNLInterpretClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */; };
@@ -92,6 +93,7 @@
 		2B2B2B2B2B2B2B2B2B2B2B10 /* ChekinanaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2B2B2B2B2B2B2B2B2B2B2B11 /* ChekinanaNaturalLanguageUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaNaturalLanguageUITests.swift; sourceTree = "<group>"; };
 		3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaChekiIndexing.swift; sourceTree = "<group>"; };
+		3F7A1E000000000000000011 /* ChekinanaDebugChekiIndexReallocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaDebugChekiIndexReallocator.swift; sourceTree = "<group>"; };
 		370037003700370037003711 /* ChekinanaMatchGameLocalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaMatchGameLocalizationTests.swift; sourceTree = "<group>"; };
 		4D4D4D4D4D4D4D4D4D4D4D10 /* ChekinanaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChekinanaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4D4D4D4D4D4D4D4D4D4D4D11 /* ChekinanaCommandExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChekinanaCommandExecutorTests.swift; sourceTree = "<group>"; };
@@ -185,6 +187,7 @@
 				1A1A1A1A1A1A1A1A1A1A1A19 /* ChekinanaAlbumPickerStateMachine.swift */,
 				1A1A1A1A1A1A1A1A1A1A1A1A /* ChekinanaNaturalLanguageTranslator.swift */,
 				3C3C3C3C3C3C3C3C3C3C3C11 /* ChekinanaChekiIndexing.swift */,
+				3F7A1E000000000000000011 /* ChekinanaDebugChekiIndexReallocator.swift */,
 				5E5E5E5E5E5E5E5E5E5E5E11 /* ChekinanaNLInterpretClient.swift */,
 				5E5E5E5E5E5E5E5E5E5E5E12 /* ChekinanaConversationCoordinator.swift */,
 				7F7F7F7F7F7F7F7F7F7F7F11 /* ChekinanaEventCandidate.swift */,
@@ -403,6 +406,7 @@
 				1A1A1A1A1A1A1A1A1A1A1A08 /* ChekinanaAlbumPickerStateMachine.swift in Sources */,
 				1A1A1A1A1A1A1A1A1A1A1A09 /* ChekinanaNaturalLanguageTranslator.swift in Sources */,
 				3C3C3C3C3C3C3C3C3C3C3C01 /* ChekinanaChekiIndexing.swift in Sources */,
+				3F7A1E000000000000000001 /* ChekinanaDebugChekiIndexReallocator.swift in Sources */,
 				5E5E5E5E5E5E5E5E5E5E5E01 /* ChekinanaNLInterpretClient.swift in Sources */,
 				5E5E5E5E5E5E5E5E5E5E5E02 /* ChekinanaConversationCoordinator.swift in Sources */,
 				7F7F7F7F7F7F7F7F7F7F7F01 /* ChekinanaEventCandidate.swift in Sources */,

@@ -98,8 +98,6 @@ private struct TemporaryChekiEditorDraft: Equatable {
     var hasDate = false
     var date = Date()
     var eventID: UUID?
-    var idxText = ""
-    var initialIdxText = ""
     var userAppears: Bool?
     var size: ChekiSize?
     var isFavorite = false
@@ -2533,8 +2531,6 @@ struct ContentView: View {
                 ChekinanaDateOnly.displayDate(from: $0, calendar: .current)
             } ?? Date(),
             eventID: temporary.eventID,
-            idxText: temporary.idx.map(String.init) ?? "",
-            initialIdxText: temporary.idx.map(String.init) ?? "",
             userAppears: temporary.userAppears,
             size: temporary.size,
             isFavorite: temporary.isFavorite,
@@ -2564,56 +2560,6 @@ struct ContentView: View {
         } else {
             normalizedDate = nil
         }
-        let normalizedIdxText = draft.idxText.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let idx: Int?
-        if normalizedIdxText.isEmpty {
-            idx = nil
-        } else if let parsed = Int(normalizedIdxText),
-                  parsed != 0, parsed != Int.min {
-            let magnitude = abs(parsed)
-            idx = draft.isFavorite ? -magnitude : magnitude
-        } else {
-            assistantText {
-                ChekinanaL10n.text(
-                    "assistant.temporary.invalid_index",
-                    fallback: "The index must be empty or a non-zero integer."
-                )
-            }
-            return
-        }
-        let group = ChekinanaChekiGroupKey(
-            idolIDs: Array(draft.idolIDs),
-            date: normalizedDate
-        )
-        if idx != nil, group == nil {
-            assistantText {
-                ChekinanaL10n.text(
-                    "assistant.temporary.index_requires_group",
-                    fallback: "A positive index requires a date and at least one Idol."
-                )
-            }
-            return
-        }
-        if normalizedIdxText != draft.initialIdxText,
-           let idx, let group,
-           ((try? modelContext.fetch(FetchDescriptor<MediaItem>())) ?? []).contains(where: {
-               $0.kind == .cheki &&
-               ChekinanaChekiGroupKey(
-                   idolIDs: $0.idolIDs,
-                   date: $0.date
-               ) == group && $0.idx == idx
-           }) {
-            assistantText {
-                ChekinanaL10n.format(
-                    "assistant.temporary.index_conflict",
-                    fallback: "Index #%lld is already used by this Idol/date group.",
-                    Int64(idx)
-                )
-            }
-            return
-        }
         guard let currentTemporary = confirmationLedger.temporaryCheki(draft.id) else {
             assistantText {
                 ChekinanaL10n.text(
@@ -2638,8 +2584,8 @@ struct ContentView: View {
             isFavorite: draft.isFavorite,
             hasPostedToSNS: draft.hasPostedToSNS,
             note: draft.note,
-            idx: idx,
-            idxWasManuallyEdited: normalizedIdxText != draft.initialIdxText,
+            idx: nil,
+            idxWasManuallyEdited: false,
             existingChekiID: currentTemporary.existingChekiID,
             existingSelectionIsManual: currentTemporary.existingSelectionIsManual
         ) else {
@@ -3768,7 +3714,7 @@ private struct EventCardView: View {
                     ? replyLanguage.text("assistant.event.date_undetermined", fallback: "Undetermined")
                     : replyLanguage.localized { ChekinanaDisplayFormat.date(event.date) }
             )
-            value(replyLanguage.text("assistant.event.field.city", fallback: "City"), emptyFallback(event.city))
+            value(replyLanguage.text("assistant.event.field.city", fallback: "City"), emptyFallback(ChekinanaEventCity.displayed(event.city) ?? ""))
             value(replyLanguage.text("assistant.event.field.livehouse", fallback: "Livehouse"), emptyFallback(event.livehouse))
             value(replyLanguage.text("assistant.event.field.price", fallback: "Price"), emptyFallback(event.price))
             if let schedule = ChekinanaEventTime.summary(
@@ -4923,14 +4869,6 @@ private struct IdolCardView: View {
         return idol.avatarThumbnailImage
     }
 
-    private var avatarPlaceholderText: String {
-        guard let first = idol.name.trimmingCharacters(in: .whitespacesAndNewlines).first else {
-            return "?"
-        }
-
-        return String(first).uppercased()
-    }
-
     var body: some View {
         let presentation = ChekinanaIdolCardPresentation(
             idol: idol,
@@ -5037,18 +4975,21 @@ private struct IdolCardView: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: 64, height: 64)
+                    .background(Color.white)
                     .clipShape(Circle())
             } else if let renderedLocalAvatar {
                 Image(decorative: renderedLocalAvatar.cgImage, scale: 1, orientation: .up)
                     .resizable()
                     .scaledToFill()
                     .frame(width: 64, height: 64)
+                    .background(Color.white)
                     .clipShape(Circle())
             } else if let renderedRemoteAvatar {
                 Image(decorative: renderedRemoteAvatar.cgImage, scale: 1, orientation: .up)
                     .resizable()
                     .scaledToFill()
                     .frame(width: 64, height: 64)
+                    .background(Color.white)
                     .clipShape(Circle())
             } else {
                 placeholderAvatar
@@ -5090,10 +5031,6 @@ private struct IdolCardView: View {
         ZStack {
             Circle()
                 .fill(Color(.systemGray5))
-
-            Text(avatarPlaceholderText)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(Color(.secondaryLabel))
         }
     }
 }

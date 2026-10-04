@@ -50,6 +50,48 @@ protocol ChekinanaOnDeviceEdgeDetector: Sendable {
     func detect(
         _ image: ChekinanaPendingChekiImage
     ) async throws -> ChekinanaEdgeDetectorOutput
+    func detect(
+        _ image: ChekinanaPendingChekiImage,
+        refinementEnabled: Bool
+    ) async throws -> ChekinanaEdgeDetectorOutput
+}
+
+extension ChekinanaOnDeviceEdgeDetector {
+    func detect(_ image: ChekinanaPendingChekiImage, refinementEnabled: Bool) async throws
+        -> ChekinanaEdgeDetectorOutput {
+        try await detect(image)
+    }
+}
+
+enum ChekinanaReviewRefitProjection {
+    static func map(
+        _ points: [ChekinanaScannerQuadrilateralPoint],
+        displayedWidth: Int, displayedHeight: Int, rotationQuarterTurns: Int,
+        source: ChekinanaReviewRectificationSource
+    ) throws -> [ChekinanaScannerQuadrilateralPoint] {
+        guard source.isValid, displayedWidth > 0, displayedHeight > 0 else {
+            throw ChekinanaOnDeviceScannerError.sourceGeometryMismatch
+        }
+        _ = try ChekinanaEdgeFitGeometry.validated(points,
+            sourcePixelWidth: displayedWidth, sourcePixelHeight: displayedHeight)
+        let turns = ((rotationQuarterTurns % 4) + 4) % 4
+        var normalized = points.map {
+            ChekinanaScannerQuadrilateralPoint(
+                x: $0.x / Double(displayedWidth), y: $0.y / Double(displayedHeight))
+        }
+        for _ in 0..<turns {
+            normalized = normalized.map { .init(x: 1 - $0.y, y: $0.x) }
+            normalized.insert(normalized.removeLast(), at: 0)
+        }
+        let mapped = try ChekinanaEdgeFitRTV21Refinement.mapToOriginal(
+            normalized, width: 1, height: 1, original: source.quadrilateral)
+        return try ChekinanaEdgeFitGeometry.validated(mapped,
+            sourcePixelWidth: source.sourcePixelWidth, sourcePixelHeight: source.sourcePixelHeight)
+    }
+}
+
+enum ChekinanaScanBoundaryPreference {
+    static let defaultsKey = "chekinana.scan.tightBoundaries"
 }
 
 enum ChekinanaOnDeviceScannerError: LocalizedError, Equatable {
@@ -525,6 +567,53 @@ enum ChekinanaRectificationPostprocessing: Equatable, Sendable {
     case perspectiveOnly
 }
 
+/// Refit alone replaces an out-of-bounds corner with the corresponding
+/// corner of the current upright instance, without moving any other corner.
+enum ChekinanaRefitCornerPolicy {
+    enum Failure: Error {
+        case ambiguousCorrespondence
+    }
+
+    static func quadrilateral(
+        _ points: [ChekinanaScannerQuadrilateralPoint],
+        sourcePixelWidth: Int,
+        sourcePixelHeight: Int
+    ) throws -> [ChekinanaScannerQuadrilateralPoint] {
+        let validated = try ChekinanaEdgeFitGeometry.validated(
+            points,
+            sourcePixelWidth: sourcePixelWidth,
+            sourcePixelHeight: sourcePixelHeight
+        )
+        let width = Double(sourcePixelWidth)
+        let height = Double(sourcePixelHeight)
+        let centerX = width / 2
+        let centerY = height / 2
+        // Check the original canonical TL/TR/BR/BL candidates before replacing
+        // anything. A center-line point or a mismatched quadrant is ambiguous.
+        guard validated[0].x < centerX, validated[0].y < centerY,
+              validated[1].x > centerX, validated[1].y < centerY,
+              validated[2].x > centerX, validated[2].y > centerY,
+              validated[3].x < centerX, validated[3].y > centerY else {
+            throw Failure.ambiguousCorrespondence
+        }
+        let corners = [
+            ChekinanaScannerQuadrilateralPoint(x: 0, y: 0),
+            ChekinanaScannerQuadrilateralPoint(x: width, y: 0),
+            ChekinanaScannerQuadrilateralPoint(x: width, y: height),
+            ChekinanaScannerQuadrilateralPoint(x: 0, y: height),
+        ]
+        let replaced = validated.enumerated().map { index, point in
+            point.x < 0 || point.x > width || point.y < 0 || point.y > height
+                ? corners[index] : point
+        }
+        return try ChekinanaEdgeFitGeometry.validated(
+            replaced,
+            sourcePixelWidth: sourcePixelWidth,
+            sourcePixelHeight: sourcePixelHeight
+        )
+    }
+}
+
 enum ChekinanaEdgeFitRectifier {
     static let portraitWidth = 1_200
     static let portraitHeight = 1_908
@@ -537,6 +626,147 @@ enum ChekinanaEdgeFitRectifier {
         .outputColorSpace: outputColorSpace,
         .cacheIntermediates: false,
     ])
+
+    private static func perspectiveImage(
+        sourceImage: CGImage,
+        quadrilateral: [ChekinanaScannerQuadrilateralPoint],
+        size: ChekiSize
+    ) throws -> (image: CIImage, orientation: ChekinanaDetectedChekiOrientation, width: Int, height: Int) {
+        let points = try ChekinanaEdgeFitGeometry.validated(
+            quadrilateral,
+            sourcePixelWidth: sourceImage.width,
+            sourcePixelHeight: sourceImage.height
+        )
+        let orientation = try ChekinanaEdgeFitGeometry.orientation(of: points)
+        let target = ChekinanaImportedChekiCanvasPolicy.dimensions(
+            inferredSize: size,
+            isLandscape: orientation == .landscape
+        )
+        let sourceHeight = CGFloat(sourceImage.height)
+        func ciPoint(_ point: ChekinanaScannerQuadrilateralPoint) -> CIVector {
+            CIVector(x: point.x, y: Double(sourceHeight) - point.y)
+        }
+        // The delivered schema permits corners outside the original
+        // pixel extent. Clamp repeats the nearest edge pixel so every
+        // out-of-bounds sample follows one deterministic policy rather
+        // than becoming transparent/black.
+        let input = CIImage(cgImage: sourceImage).clampedToExtent()
+        guard let filter = CIFilter(
+            name: "CIPerspectiveCorrection",
+            parameters: [
+                "inputImage": input,
+                "inputTopLeft": ciPoint(points[0]),
+                "inputTopRight": ciPoint(points[1]),
+                "inputBottomRight": ciPoint(points[2]),
+                "inputBottomLeft": ciPoint(points[3]),
+            ]
+        ), let corrected = filter.outputImage,
+           corrected.extent.width.isFinite,
+           corrected.extent.height.isFinite,
+           corrected.extent.width > 0,
+           corrected.extent.height > 0 else {
+            throw ChekinanaOnDeviceScannerError.rectificationFailed
+        }
+        let normalized = corrected.transformed(
+            by: CGAffineTransform(
+                translationX: -corrected.extent.minX,
+                y: -corrected.extent.minY
+            )
+        )
+        let scaled = normalized.transformed(
+            by: CGAffineTransform(
+                scaleX: CGFloat(target.width) / normalized.extent.width,
+                y: CGFloat(target.height) / normalized.extent.height
+            )
+        ).cropped(to: CGRect(
+            x: 0,
+            y: 0,
+            width: target.width,
+            height: target.height
+        ))
+        return (scaled, orientation, target.width, target.height)
+    }
+
+    /// First-pass pixels for the one fixed-prompt v2.1 refinement. Rendering
+    /// shares the final perspective geometry, but never applies WB or denoise.
+    static func refinementRaster(
+        source: ChekinanaUprightRGBRaster,
+        quadrilateral: [ChekinanaScannerQuadrilateralPoint],
+        encodedByteCount: Int
+    ) throws -> ChekinanaUprightRGBRaster {
+        try Task.checkCancellation()
+        let orientation = try ChekinanaEdgeFitGeometry.orientation(of: quadrilateral)
+        let target = ChekinanaImportedChekiCanvasPolicy.dimensions(
+            inferredSize: .mini, isLandscape: orientation == .landscape
+        )
+        let pixels = try RTV2WorkingSetBudget.checkedProduct([target.width, target.height])
+        let rgbaReservation = try RTV2WorkingSetBudget.fixedArrayReservation(count: pixels * 4, stride: 1)
+        let rgbReservation = try RTV2WorkingSetBudget.fixedArrayReservation(count: pixels * 3, stride: 1)
+        let originalCGBytes = try RTV2WorkingSetBudget.checkedProduct([source.width, source.height, 3])
+        let retained = try RTV2WorkingSetBudget.checkedSum([
+            encodedByteCount, source.rgb.capacity,
+            // One reusable EdgeSAM input and its box tensor.
+            3 * 1024 * 1024 * 4 + 4 * 4,
+        ])
+        var rgbaStorageBytes = rgbaReservation
+        var rgbStorageBytes = rgbReservation
+        func validatePacking() throws {
+            let packing = try RTV2WorkingSetBudget.checkedSum([
+                retained, rgbaStorageBytes, rgbStorageBytes,
+            ])
+            guard packing <= RTV2WorkingSetBudget.maximumCandidatePeakBytes else {
+                throw RTV2ReferenceMathError.resourceBudgetExceeded
+            }
+        }
+        func validate(_ outputBackingBytes: Int) throws {
+            let rendering = try RTV2WorkingSetBudget.checkedSum([
+                retained, originalCGBytes, outputBackingBytes, rgbaStorageBytes,
+            ])
+            try validatePacking()
+            guard rendering <= RTV2WorkingSetBudget.maximumCandidatePeakBytes else {
+                throw RTV2ReferenceMathError.resourceBudgetExceeded
+            }
+        }
+        try validate(pixels * 4)
+        // Original/output CGImages and CI graphs are released before RGB packing.
+        let rgba: [UInt8] = try autoreleasepool {
+            let sourceImage = try source.makeCGImage()
+            let projection = try perspectiveImage(
+                sourceImage: sourceImage, quadrilateral: quadrilateral, size: .mini
+            )
+            guard let output = imageContext.createCGImage(
+                projection.image, from: projection.image.extent,
+                format: .RGBA8, colorSpace: outputColorSpace
+            ) else { throw ChekinanaOnDeviceScannerError.rectificationFailed }
+            try validate(RTV2WorkingSetBudget.checkedProduct([output.bytesPerRow, output.height]))
+            var bytes = Array(repeating: UInt8(0), count: pixels * 4)
+            rgbaStorageBytes = max(rgbaReservation, try RTV2WorkingSetBudget.actualFixedArrayStorage(
+                count: bytes.count, capacity: bytes.capacity, stride: 1
+            ))
+            try validate(RTV2WorkingSetBudget.checkedProduct([output.bytesPerRow, output.height]))
+            guard let context = CGContext(
+                data: &bytes, width: target.width, height: target.height,
+                bitsPerComponent: 8, bytesPerRow: target.width * 4,
+                space: outputColorSpace,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+            ) else { throw ChekinanaOnDeviceScannerError.rectificationFailed }
+            context.interpolationQuality = .none
+            context.draw(output, in: CGRect(x: 0, y: 0, width: target.width, height: target.height))
+            return bytes
+        }
+        try Task.checkCancellation()
+        var rgb = Array(repeating: UInt8(0), count: pixels * 3)
+        rgbStorageBytes = max(rgbReservation, try RTV2WorkingSetBudget.actualFixedArrayStorage(
+            count: rgb.count, capacity: rgb.capacity, stride: 1
+        ))
+        try validatePacking()
+        for index in 0..<pixels {
+            rgb[index * 3] = rgba[index * 4]
+            rgb[index * 3 + 1] = rgba[index * 4 + 1]
+            rgb[index * 3 + 2] = rgba[index * 4 + 2]
+        }
+        return ChekinanaUprightRGBRaster(width: target.width, height: target.height, rgb: rgb)
+    }
 
     static func rectify(
         sourceData: Data,
@@ -565,59 +795,12 @@ enum ChekinanaEdgeFitRectifier {
         let task = Task.detached(priority: .userInitiated) {
             try autoreleasepool {
                 try Task.checkCancellation()
-                let sourceImage = source.image
-                let points = try ChekinanaEdgeFitGeometry.validated(
-                    quadrilateral,
-                    sourcePixelWidth: sourceImage.width,
-                    sourcePixelHeight: sourceImage.height
+                let projection = try perspectiveImage(
+                    sourceImage: source.image, quadrilateral: quadrilateral, size: size
                 )
-                let orientation = try ChekinanaEdgeFitGeometry.orientation(of: points)
-                let target = ChekinanaImportedChekiCanvasPolicy.dimensions(
-                    inferredSize: size,
-                    isLandscape: orientation == .landscape
-                )
-                let sourceHeight = CGFloat(sourceImage.height)
-                func ciPoint(_ point: ChekinanaScannerQuadrilateralPoint) -> CIVector {
-                    CIVector(x: point.x, y: Double(sourceHeight) - point.y)
-                }
-                // The delivered schema permits corners outside the original
-                // pixel extent. Clamp repeats the nearest edge pixel so every
-                // out-of-bounds sample follows one deterministic policy rather
-                // than becoming transparent/black.
-                let input = CIImage(cgImage: sourceImage).clampedToExtent()
-                guard let filter = CIFilter(
-                    name: "CIPerspectiveCorrection",
-                    parameters: [
-                        "inputImage": input,
-                        "inputTopLeft": ciPoint(points[0]),
-                        "inputTopRight": ciPoint(points[1]),
-                        "inputBottomRight": ciPoint(points[2]),
-                        "inputBottomLeft": ciPoint(points[3]),
-                    ]
-                ), let corrected = filter.outputImage,
-                   corrected.extent.width.isFinite,
-                   corrected.extent.height.isFinite,
-                   corrected.extent.width > 0,
-                   corrected.extent.height > 0 else {
-                    throw ChekinanaOnDeviceScannerError.rectificationFailed
-                }
-                let normalized = corrected.transformed(
-                    by: CGAffineTransform(
-                        translationX: -corrected.extent.minX,
-                        y: -corrected.extent.minY
-                    )
-                )
-                let scaled = normalized.transformed(
-                    by: CGAffineTransform(
-                        scaleX: CGFloat(target.width) / normalized.extent.width,
-                        y: CGFloat(target.height) / normalized.extent.height
-                    )
-                ).cropped(to: CGRect(
-                    x: 0,
-                    y: 0,
-                    width: target.width,
-                    height: target.height
-                ))
+                let scaled = projection.image
+                let orientation = projection.orientation
+                let target = (width: projection.width, height: projection.height)
                 let gains = appliesWhiteBalance && postprocessing == .standard
                     ? ChekinanaFixedBorderWhiteBalanceEstimator.estimate(
                         from: scaled,
@@ -924,11 +1107,13 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
     /// Detection shares Scan's execution gate; no remote/OCR/Idol pipeline runs.
     func refit(
         _ image: ChekinanaPendingChekiImage,
-        size: ChekiSize
+        size: ChekiSize,
+        originalSource: ChekinanaReviewRectificationSource? = nil,
+        rotationQuarterTurns: Int = 0
     ) async throws -> RefitResult {
         try await ChekinanaOnDeviceScannerExecutionGate.shared.acquire()
         do {
-            let result = try await refitExclusively(image, size: size)
+            let result = try await refitExclusively(image, size: size, originalSource: originalSource, rotationQuarterTurns: rotationQuarterTurns)
             await ChekinanaOnDeviceScannerExecutionGate.shared.release()
             return result
         } catch {
@@ -939,7 +1124,9 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
 
     private func refitExclusively(
         _ image: ChekinanaPendingChekiImage,
-        size: ChekiSize
+        size: ChekiSize,
+        originalSource: ChekinanaReviewRectificationSource?,
+        rotationQuarterTurns: Int
     ) async throws -> RefitResult {
         let detector = try detectorProvider()
         for attempt in 0..<2 {
@@ -954,7 +1141,7 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
                 // the same encoded input. A count mismatch alone is retryable.
                 continue
             }
-            return try await rectifyRefit(image, detection: detection, size: size)
+            return try await rectifyRefit(image, detection: detection, size: size, originalSource: originalSource, rotationQuarterTurns: rotationQuarterTurns)
         }
         throw ChekinanaOnDeviceScannerError.modelOutputInvalid
     }
@@ -962,7 +1149,9 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
     private func rectifyRefit(
         _ image: ChekinanaPendingChekiImage,
         detection: ChekinanaEdgeDetectorOutput,
-        size: ChekiSize
+        size: ChekiSize,
+        originalSource: ChekinanaReviewRectificationSource?,
+        rotationQuarterTurns: Int
     ) async throws -> RefitResult {
         let raster = try detection.decodedSource
             ?? ChekinanaUprightRGBRaster.decode(image.data)
@@ -970,11 +1159,37 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
               detection.sourcePixelHeight == raster.height else {
             throw ChekinanaOnDeviceScannerError.sourceGeometryMismatch
         }
-        let quad = try ChekinanaEdgeFitGeometry.validated(
+        let quad = try ChekinanaRefitCornerPolicy.quadrilateral(
             detection.quadrilaterals[0],
             sourcePixelWidth: raster.width,
             sourcePixelHeight: raster.height
         )
+        if let originalSource {
+            let mapped = try ChekinanaReviewRefitProjection.map(
+                quad, displayedWidth: raster.width, displayedHeight: raster.height,
+                rotationQuarterTurns: rotationQuarterTurns, source: originalSource
+            )
+            let retained = ChekinanaReviewRectificationSource(
+                sourceImage: originalSource.sourceImage,
+                sourcePixelWidth: originalSource.sourcePixelWidth,
+                sourcePixelHeight: originalSource.sourcePixelHeight,
+                quadrilateral: mapped, appliesWhiteBalance: false,
+                postprocessing: .perspectiveOnly
+            )
+            let output = try await ChekinanaReviewChekiImagePreparer.standardizedForSave(
+                fallbackImage: image, reviewSource: retained,
+                rotationQuarterTurns: rotationQuarterTurns, size: size
+            )
+            try Task.checkCancellation()
+            return .image(ChekinanaScannerResultImage(
+                data: output.data, imagePixelWidth: output.width, imagePixelHeight: output.height,
+                filenameExtension: "jpg", dateAnnotationState: .unavailable,
+                sourceAnnotation: ChekinanaScannerSourceAnnotation(
+                    sourcePixelWidth: retained.sourcePixelWidth,
+                    sourcePixelHeight: retained.sourcePixelHeight, quadrilateral: mapped
+                ), reviewRectificationSource: retained, inferredChekiSize: size
+            ))
+        }
         let source = try ChekinanaPreparedUprightSource(raster: raster)
         let rectified = try await ChekinanaEdgeFitRectifier.rectify(
             source: source,
@@ -1060,7 +1275,7 @@ struct ChekinanaOnDeviceScannerClient: Sendable {
             expectedPolaroids: options.expectedPolaroids,
             extractionComplete: false
         ))
-        let detection = try await detector.detect(image)
+        let detection = try await detector.detect(image, refinementEnabled: options.tightBoundaries)
         try Task.checkCancellation()
         let raster = try detection.decodedSource
             ?? ChekinanaUprightRGBRaster.decode(image.data)

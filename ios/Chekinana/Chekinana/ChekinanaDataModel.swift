@@ -166,7 +166,7 @@ struct ChekinanaChekiSizeOption: Identifiable, Hashable {
 enum ChekinanaChekiSizeCatalog {
     static func options(customSizes: [CustomChekiSize]) -> [ChekinanaChekiSizeOption] {
         let builtIns = ChekiSize.builtInCases.map {
-            ChekinanaChekiSizeOption(size: $0, title: $0.rawValue)
+            ChekinanaChekiSizeOption(size: $0, title: title(for: $0, customSizes: []))
         }
         let custom = customSizes
             .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -179,7 +179,13 @@ enum ChekinanaChekiSizeCatalog {
     }
 
     static func title(for size: ChekiSize, customSizes: [CustomChekiSize]) -> String {
-        customSizes.first { $0.id == size.customID }?.name ?? size.rawValue
+        if size == .mini {
+            return ChekinanaL10n.text("cheki.size.mini", fallback: "mini")
+        }
+        if size == .wide {
+            return ChekinanaL10n.text("cheki.size.wide", fallback: "wide")
+        }
+        return customSizes.first { $0.id == size.customID }?.name ?? size.rawValue
     }
 }
 
@@ -742,13 +748,19 @@ struct ChekinanaTravelSegmentFields: Equatable, Sendable {
 enum ChekinanaTravelSegmentValidationError: LocalizedError, Equatable {
     case missingRequiredFields
     case arrivalBeforeDeparture
+    case arrivalBeforeToday
 
     var errorDescription: String? {
         switch self {
         case .missingRequiredFields:
             ChekinanaProductCopy.text(
                 "travel.error.required",
-                "Look up a schedule and select valid departure and arrival stops."
+                "Enter a flight or train number, departure location, and destination."
+            )
+        case .arrivalBeforeToday:
+            ChekinanaProductCopy.text(
+                "travel.error.arrival_before_today",
+                "A new trip must end today or later."
             )
         case .arrivalBeforeDeparture:
             ChekinanaProductCopy.text(
@@ -1365,18 +1377,40 @@ final class IdolPatternState {
     }
 }
 
+enum ChekinanaSingleOshiPreference {
+    static let enabledKey = "chekinana.singleOshi.enabled"
+    static let idolIDKey = "chekinana.singleOshi.idolID"
+
+    static var selectedID: UUID? {
+        guard UserDefaults.standard.bool(forKey: enabledKey),
+              let value = UserDefaults.standard.string(forKey: idolIDKey) else { return nil }
+        return UUID(uuidString: value)
+    }
+
+    static func prioritized<Value>(
+        _ values: [Value], preferredID: UUID? = selectedID,
+        contains: (Value, UUID) -> Bool
+    ) -> [Value] {
+        guard let preferredID else { return values }
+        return values.filter { contains($0, preferredID) }
+            + values.filter { !contains($0, preferredID) }
+    }
+}
+
 enum ChekinanaIdolOrdering {
     struct Context: Equatable, Sendable {
         let chekiCountsByIdolID: [UUID: Int]
+        let preferredID: UUID?
 
-        init(chekiCountsByIdolID: [UUID: Int] = [:]) {
+        init(chekiCountsByIdolID: [UUID: Int] = [:], preferredID: UUID? = ChekinanaSingleOshiPreference.selectedID) {
+            self.preferredID = preferredID
             self.chekiCountsByIdolID = chekiCountsByIdolID
         }
 
         func ordered(_ idols: [Idol]) -> [Idol] {
             ChekinanaIdolOrdering.orderedForList(
                 idols,
-                chekiCountsByIdolID: chekiCountsByIdolID
+                chekiCountsByIdolID: chekiCountsByIdolID, preferredID: preferredID
             )
         }
 
@@ -1418,8 +1452,9 @@ enum ChekinanaIdolOrdering {
         }
     }
 
-    static func ordered(_ idols: [Idol]) -> [Idol] {
+    static func ordered(_ idols: [Idol], preferredID: UUID? = ChekinanaSingleOshiPreference.selectedID) -> [Idol] {
         idols.sorted { lhs, rhs in
+            if (lhs.id == preferredID) != (rhs.id == preferredID) { return lhs.id == preferredID }
             if lhs.isFavorite != rhs.isFavorite { return lhs.isFavorite }
             switch (lhs.sortOrder, rhs.sortOrder) {
             case let (left?, right?) where left != right:
@@ -1437,13 +1472,17 @@ enum ChekinanaIdolOrdering {
 
     static func orderedForList(
         _ idols: [Idol],
-        chekiCountsByIdolID: [UUID: Int]
+        chekiCountsByIdolID: [UUID: Int],
+        preferredID: UUID? = ChekinanaSingleOshiPreference.selectedID
     ) -> [Idol] {
         idols.sorted { lhs, rhs in
+            if (lhs.id == preferredID) != (rhs.id == preferredID) { return lhs.id == preferredID }
             if lhs.isFavorite != rhs.isFavorite { return lhs.isFavorite }
             let leftCount = chekiCountsByIdolID[lhs.id] ?? 0
             let rightCount = chekiCountsByIdolID[rhs.id] ?? 0
             if leftCount != rightCount { return leftCount > rightCount }
+            let groupComparison = (lhs.group ?? "").localizedStandardCompare(rhs.group ?? "")
+            if groupComparison != .orderedSame { return groupComparison == .orderedAscending }
             let leftOrder = lhs.sortOrder.flatMap { $0.isFinite ? $0 : nil }
             let rightOrder = rhs.sortOrder.flatMap { $0.isFinite ? $0 : nil }
             switch (leftOrder, rightOrder) {
@@ -1841,8 +1880,9 @@ enum ChekinanaEventSchedulePersistence {
         startTime: String?,
         in modelContext: ModelContext
     ) throws {
-        let eventMatches = try modelContext.fetch(FetchDescriptor<Event>())
-            .filter { $0.id == eventID }
+        let eventMatches = try modelContext.fetch(FetchDescriptor<Event>(
+            predicate: #Predicate { $0.id == eventID }
+        ))
         guard eventMatches.count == 1 else {
             throw ChekinanaEventMutationError.changedOrMissingEvent
         }
@@ -1863,8 +1903,9 @@ enum ChekinanaEventSchedulePersistence {
     ) throws -> Date {
         let verificationContext = ModelContext(modelContext.container)
         verificationContext.autosaveEnabled = false
-        let matches = try verificationContext.fetch(FetchDescriptor<Event>())
-            .filter { $0.id == eventID }
+        let matches = try verificationContext.fetch(FetchDescriptor<Event>(
+            predicate: #Predicate { $0.id == eventID }
+        ))
         guard matches.count == 1 else {
             throw ChekinanaEventMutationError.changedOrMissingEvent
         }
@@ -1892,8 +1933,8 @@ enum ChekinanaEventSchedulePersistence {
         }
         let schedule = existing ?? EventSchedule(eventID: eventID)
         if existing == nil { modelContext.insert(schedule) }
-        schedule.openTime = normalizedOpen
-        schedule.startTime = normalizedStart
+        if schedule.openTime != normalizedOpen { schedule.openTime = normalizedOpen }
+        if schedule.startTime != normalizedStart { schedule.startTime = normalizedStart }
     }
 
     /// Internal delete primitive for Event deletion/clear-all while the shared
@@ -2219,8 +2260,9 @@ enum ChekinanaCalendarGroupOrderStore {
     ) throws {
         var seen = Set<String>()
         let uniqueKeys = orderedGroupKeys.filter { seen.insert($0).inserted }
-        let matches = try modelContext.fetch(FetchDescriptor<CalendarGroupOrder>())
-            .filter { $0.dateKey == dateKey }
+        let matches = try modelContext.fetch(FetchDescriptor<CalendarGroupOrder>(
+            predicate: #Predicate { $0.dateKey == dateKey }
+        ))
         let existingByGroupKey = Dictionary(
             matches.map { ($0.groupKey, $0) },
             uniquingKeysWith: { lhs, _ in lhs }
@@ -2235,9 +2277,9 @@ enum ChekinanaCalendarGroupOrderStore {
                 if existingByGroupKey[groupKey] == nil {
                     modelContext.insert(order)
                 }
-                order.dateKey = dateKey
-                order.groupKey = groupKey
-                order.sortOrder = index
+                if order.sortOrder != index {
+                    order.sortOrder = index
+                }
             }
             try saveContext(modelContext)
         } catch {
@@ -3562,15 +3604,33 @@ enum ChekinanaChekiRecordStore {
     nonisolated static func mergeDuplicates(
         in modelContext: ModelContext
     ) throws {
+        try mergeDuplicates(in: modelContext, fetchedRecords: nil)
+    }
+
+    fileprivate nonisolated static func mergeDuplicates(
+        in modelContext: ModelContext,
+        fetchedRecords: [ChekiRecord]?
+    ) throws {
         try withMutationLock {
             do {
-                let records = try modelContext.fetch(FetchDescriptor<ChekiRecord>())
-                    .sorted { $0.id.uuidString < $1.id.uuidString }
-                var retainedByIdentity: [ChekinanaChekiRecordIdentity: ChekiRecord] = [:]
-                for record in records {
-                    record.count = max(1, record.count)
+                let records = try (fetchedRecords
+                    ?? modelContext.fetch(FetchDescriptor<ChekiRecord>()))
+                var identities = Set<ChekinanaChekiRecordIdentity>()
+                var hasDuplicates = false
+                var prepared = records.map { record in
                     let identity = ChekinanaChekiRecordIdentity(record)
-                    record.date = identity.canonicalDate
+                    if !hasDuplicates && !identities.insert(identity).inserted { hasDuplicates = true }
+                    return (record: record, identity: identity)
+                }
+                // Only duplicate groups need UUID ordering to choose the survivor.
+                if hasDuplicates {
+                    prepared.sort { $0.record.id.uuidString < $1.record.id.uuidString }
+                }
+                var retainedByIdentity: [ChekinanaChekiRecordIdentity: ChekiRecord] = [:]
+                for (record, identity) in prepared {
+                    let normalizedCount = max(1, record.count)
+                    if record.count != normalizedCount { record.count = normalizedCount }
+                    if record.date != identity.canonicalDate { record.date = identity.canonicalDate }
                     if let retained = retainedByIdentity[identity] {
                         retained.count = try checkedCountSum(
                             retained.count,
@@ -5199,6 +5259,7 @@ enum ChekinanaModelContextResolver {
 
     static func idols(
         idolIDs: Set<UUID>,
+        preservingExistingIDs: Set<UUID> = [],
         in modelContext: ModelContext
     ) throws -> [Idol] {
         guard !idolIDs.isEmpty else { return [] }
@@ -5210,11 +5271,15 @@ enum ChekinanaModelContextResolver {
         let resolved = ChekinanaIdolOrdering.ordered(
             try modelContext.fetch(descriptor)
         )
+        let hiddenIDs = ChekinanaHiddenIdolPersistence.load()
+        let preservedHiddenIDs = preservingExistingIDs.intersection(hiddenIDs)
         guard resolved.count == idolIDs.count,
-              ChekinanaVisibilityPolicy.includesRecord(
-                idolIDs: resolved.map(\.id),
-                hiddenIDs: ChekinanaHiddenIdolPersistence.load()
-              ) else {
+              preservedHiddenIDs.isEmpty
+                || ChekinanaFourPageVisibilityPolicy.includesRecord(
+                    idolIDs: preservingExistingIDs, hiddenIDs: hiddenIDs
+                ),
+              Set(resolved.map(\.id)).intersection(hiddenIDs)
+                .isSubset(of: preservedHiddenIDs) else {
             throw ResolutionError.hiddenIdol
         }
         return resolved
@@ -5223,9 +5288,13 @@ enum ChekinanaModelContextResolver {
     static func relationships(
         idolIDs: Set<UUID>,
         eventID: UUID?,
+        preservingExistingIDs: Set<UUID> = [],
         in modelContext: ModelContext
     ) throws -> ChekinanaResolvedMediaRelationships {
-        let selectedIdols = try idols(idolIDs: idolIDs, in: modelContext)
+        let selectedIdols = try idols(
+            idolIDs: idolIDs, preservingExistingIDs: preservingExistingIDs,
+            in: modelContext
+        )
         let selectedEvent: Event?
         if let eventID {
             var descriptor = FetchDescriptor<Event>(
@@ -5592,14 +5661,20 @@ enum ChekinanaDataStore {
         try context.transaction {
             for event in try context.fetch(FetchDescriptor<Event>())
             where event.source == nil {
-                event.source = ChekinanaEventSource.infer(from: event.weiboURL)
+                let source = ChekinanaEventSource.infer(from: event.weiboURL)
+                if event.sourceRawValue != source?.rawValue {
+                    event.source = source
+                }
             }
-            for record in try context.fetch(FetchDescriptor<ChekiRecord>())
+            let records = try context.fetch(FetchDescriptor<ChekiRecord>())
+            for record in records
             where record.sizeRawValue.flatMap(ChekiSize.init(rawValue:)) == nil {
                 record.sizeRawValue = ChekiSize.mini.rawValue
             }
-            try ChekinanaChekiRecordStore.mergeDuplicates(in: context)
-            try context.save()
+            try ChekinanaChekiRecordStore.mergeDuplicates(
+                in: context, fetchedRecords: records
+            )
+            if context.hasChanges { try context.save() }
         }
     }
 

@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import os
 import SwiftUI
+import SwiftData
 
 enum ChekinanaMediaPlaybackAudioSession {
     private static let logger = Logger(
@@ -10,10 +11,10 @@ enum ChekinanaMediaPlaybackAudioSession {
     )
 
     @discardableResult
-    static func activate(mode: AVAudioSession.Mode) -> Bool {
+    static func activate(mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions = []) -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: mode)
+            try session.setCategory(.playback, mode: mode, options: options)
             try session.setActive(true)
             return true
         } catch {
@@ -52,6 +53,34 @@ enum ChekinanaVisibilityPolicy {
 
     static func includesRecord(idols: [Idol], hiddenIDs: Set<UUID>) -> Bool {
         includesRecord(idolIDs: idols.map(\.id), hiddenIDs: hiddenIDs)
+    }
+}
+
+/// Display-only rules for Scan, Idols, Gallery and Calendar. Storage and
+/// shared Event/command eligibility continue to use their original policies.
+private struct ChekinanaDisplayHiddenIdolIDsKey: EnvironmentKey {
+    static let defaultValue: Set<UUID> = []
+}
+
+extension EnvironmentValues {
+    var chekinanaDisplayHiddenIdolIDs: Set<UUID> {
+        get { self[ChekinanaDisplayHiddenIdolIDsKey.self] }
+        set { self[ChekinanaDisplayHiddenIdolIDsKey.self] = newValue }
+    }
+}
+
+enum ChekinanaFourPageVisibilityPolicy {
+    static func includesRecord(idolIDs: some Sequence<UUID>, hiddenIDs: Set<UUID>) -> Bool {
+        let ids = Set(idolIDs)
+        return ids.isEmpty || !ids.isSubset(of: hiddenIDs)
+    }
+
+    static func includesRecord(idols: [Idol], hiddenIDs: Set<UUID>) -> Bool {
+        includesRecord(idolIDs: idols.map(\.id), hiddenIDs: hiddenIDs)
+    }
+
+    static func visibleIdols(_ idols: [Idol], hiddenIDs: Set<UUID>) -> [Idol] {
+        ChekinanaVisibilityPolicy.visibleIdols(idols, hiddenIDs: hiddenIDs)
     }
 }
 
@@ -734,6 +763,20 @@ enum ChekinanaIdolColorInputPolicy {
     }
 }
 
+enum ChekinanaIdolEditorColorPolicy {
+    static func storageValue(_ rawValue: String) -> String? {
+        do { return try ChekinanaIdolColorInputPolicy.normalizedStorageValue(rawValue) }
+        catch {
+            let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    static func recognizedValue(_ rawValue: String?) -> String? {
+        try? ChekinanaIdolColorInputPolicy.normalizedStorageValue(rawValue ?? "")
+    }
+}
+
 enum ChekinanaDesignSystem {
     static var accent: Color { ChekinanaThemeStore.currentTheme.accent }
     static var softAccent: Color { ChekinanaThemeStore.currentTheme.softAccent }
@@ -784,4 +827,53 @@ enum ChekinanaProductCopy {
             Int64(count)
         )
     }
+}
+
+struct ChekinanaMediaEditHooks: Sendable {
+    var save: @MainActor @Sendable (ModelContext) throws -> Void = { try $0.save() }
+    var didSave: @MainActor @Sendable (UUID) -> Void = { _ in }
+}
+
+private struct ChekinanaMediaEditHooksKey: EnvironmentKey {
+    static let defaultValue = ChekinanaMediaEditHooks()
+}
+
+extension EnvironmentValues {
+    var chekinanaMediaEditHooks: ChekinanaMediaEditHooks {
+        get { self[ChekinanaMediaEditHooksKey.self] }
+        set { self[ChekinanaMediaEditHooksKey.self] = newValue }
+    }
+}
+
+/// Suppression exists only around this editor's actual synchronous save call.
+/// A save from another context or outside that call keeps the normal refresh.
+@MainActor
+final class ChekinanaGalleryLocalEditRefreshGate {
+    private var savingContext: ObjectIdentifier?
+    private(set) var preservesCurrentResults = false
+    private var editedIDs = Set<UUID>()
+
+    func save(_ context: ModelContext) throws {
+        let previous = savingContext
+        savingContext = ObjectIdentifier(context)
+        defer { savingContext = previous }
+        try context.save()
+    }
+
+    func receiveSave(from context: ModelContext?) -> Bool {
+        if let context, savingContext == ObjectIdentifier(context) {
+            preservesCurrentResults = true
+            return false
+        }
+        resumeNormalRefresh()
+        return true
+    }
+
+    var pendingEditedIDs: Set<UUID> { editedIDs }
+    func recordSuccessfulEdit(_ id: UUID) { editedIDs.insert(id) }
+    func takeEditedIDs() -> Set<UUID> {
+        defer { editedIDs.removeAll() }
+        return editedIDs
+    }
+    func resumeNormalRefresh() { preservesCurrentResults = false }
 }

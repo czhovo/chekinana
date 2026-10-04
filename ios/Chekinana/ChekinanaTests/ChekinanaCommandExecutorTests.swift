@@ -1341,7 +1341,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         ))
     }
 
-    func testHiddenLateTemporaryPolicyFiltersAnyHiddenMember() {
+    func testHiddenLateTemporaryPolicyRetainsMixedMembers() {
         let visibleID = UUID()
         let hiddenID = UUID()
         let visibleCard = ChekinanaChekiCard(
@@ -1358,16 +1358,21 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             confirmationCode: nil,
             thumbnailImageData: nil
         )
+        let hiddenCard = ChekinanaChekiCard(
+            id: UUID(), imageRef: nil, createdAt: Date(),
+            confirmationCode: nil, thumbnailImageData: nil
+        )
         let idsByCard = [
             visibleCard.id: [visibleID],
             mixedCard.id: [visibleID, hiddenID],
+            hiddenCard.id: [hiddenID],
         ]
 
         XCTAssertEqual(ChekinanaHiddenTemporaryReviewPolicy.hiddenCardIDs(
-            [visibleCard, mixedCard],
+            [visibleCard, mixedCard, hiddenCard],
             hiddenIdolIDs: [hiddenID],
             idolIDs: { idsByCard[$0] }
-        ), [mixedCard.id])
+        ), [hiddenCard.id])
     }
 
     func testCalendarDayNumberIsNumericAcrossSupportedLocales() {
@@ -16929,6 +16934,8 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertFalse(metrics.hasEvent(on: otherDay))
         XCTAssertEqual(metrics.chekiCount(on: day), 4)
         XCTAssertEqual(metrics.chekiCount(on: otherDay), 1)
+        XCTAssertEqual(metrics.chekiCount(inMonth: day), 5)
+        XCTAssertEqual(metrics.chekiCount(inMonth: utcDate(2026, 9, 1)), 0)
     }
 
     @MainActor
@@ -16950,6 +16957,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
 
         XCTAssertEqual(metrics.chekiCount(on: saturatedDay), Int.max)
         XCTAssertEqual(metrics.chekiCount(on: invalidDay), 0)
+        XCTAssertEqual(metrics.chekiCount(inMonth: saturatedDay), Int.max)
     }
 
     func testIdolCardChekiCountAddsRecordQuantityInsteadOfRecordRows() {
@@ -28035,7 +28043,59 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertNoThrow(try ChekinanaEdgeDetectorAssetRegistry.productionDetector())
         XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.modelResourceNames.count, 3)
         XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.detectorThreshold, 0.9267578125)
-        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.semanticVersion, "2.0.0")
+        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.semanticVersion, "2.1.0")
+        XCTAssertEqual(ChekinanaEdgeFitRTV2Contract.assetSemanticVersion, "2.0.0")
+    }
+
+    func testEdgeFitRTV21UsesStrictInstanceIoUAndOriginalBounds() throws {
+        typealias Point = ChekinanaScannerQuadrilateralPoint
+        typealias Refinement = ChekinanaEdgeFitRTV21Refinement
+        func rectangle(_ x: Double, _ width: Double) -> [Point] {
+            [Point(x: x, y: 0), Point(x: x + width, y: 0),
+             Point(x: x + width, y: 100), Point(x: x, y: 100)]
+        }
+        let first = rectangle(0, 100)
+        func select(_ points: [Point], original: [Point]) throws -> [Point] {
+            try Refinement.selectedQuadrilateral(
+                original: original,
+                candidate: .init(quadrilateral: points, width: 100, height: 100),
+                sourceWidth: 100, sourceHeight: 100
+            )
+        }
+        XCTAssertEqual(try select(rectangle(0, 98), original: first), first)
+        XCTAssertNotEqual(try select(rectangle(0, 98.01), original: first), first)
+        XCTAssertEqual(
+            Refinement.intersectionOverUnion(rectangle(-1, 100), width: 100, height: 100),
+            99.0 / 101, accuracy: 1e-12
+        )
+        XCTAssertEqual(try select(rectangle(-0.5, 100.5), original: first), first)
+        let initiallyOutside = rectangle(-10, 100)
+        XCTAssertLessThan(
+            try select(rectangle(-0.5, 100.5), original: initiallyOutside)[0].x,
+            initiallyOutside[0].x
+        )
+    }
+
+    func testEdgeFitRTV21RefinementFailuresDoNotRemoveOtherInstances() throws {
+        typealias Point = ChekinanaScannerQuadrilateralPoint
+        let first = [Point(x: 0, y: 0), Point(x: 100, y: 0),
+                     Point(x: 100, y: 100), Point(x: 0, y: 100)]
+        var calls = 0
+        let output = try ChekinanaEdgeFitRTV21Refinement.refine(
+            [first, first, first], sourceWidth: 100, sourceHeight: 100
+        ) { _ in
+            calls += 1
+            if calls == 1 { throw ChekinanaOnDeviceScannerError.modelOutputInvalid }
+            if calls == 2 { return nil }
+            return .init(quadrilateral: first, width: 100, height: 100)
+        }
+        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(output, [first, first, first])
+        XCTAssertThrowsError(try ChekinanaEdgeFitRTV21Refinement.refine(
+            [first], sourceWidth: 100, sourceHeight: 100
+        ) { _ in throw CancellationError() }) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
     }
 
     func testEdgeFitClippedFloatResizeMatchesTheFullOpenCVResizeSlice() {
@@ -37079,7 +37139,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             settings.range(of: "settings.library")?.lowerBound
         )
         let algorithmStart = try XCTUnwrap(settings.range(
-            of: "isScannerAlgorithmNoticePresented = true",
+            of: "settings.algorithm.cheki_scan",
             range: libraryStart..<settings.endIndex
         )?.lowerBound)
         let library = String(settings[libraryStart..<algorithmStart])
@@ -37115,10 +37175,11 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
         XCTAssertTrue(settings.contains("settings.algorithms"))
         XCTAssertTrue(settings.contains("settings.algorithm.cheki_scan"))
         XCTAssertTrue(settings.contains("settings.algorithm.idol_recognition"))
-        XCTAssertTrue(settings.contains(
+        XCTAssertFalse(settings.contains("isScannerAlgorithmNoticePresented"))
+        XCTAssertFalse(settings.contains(
             "settings.algorithm.cheki_scan.notice.message"
         ))
-        XCTAssertTrue(settings.contains("Text(verbatim: \"ChekiEdgeFit-RT v2\")"))
+        XCTAssertTrue(settings.contains("Text(verbatim: ChekinanaEdgeFitRTV2Contract.displayName)"))
         XCTAssertTrue(settings.contains("value: \"DINOv2 ViT-S/14\""))
         XCTAssertTrue(settings.contains(
             "chekinana.settings.algorithm.cheki-scan"
@@ -37127,7 +37188,7 @@ final class ChekinanaCommandExecutorTests: XCTestCase {
             "chekinana.settings.algorithm.idol-recognition"
         ))
         XCTAssertTrue(settings.contains("chekinana.settings.algorithms"))
-        XCTAssertTrue(settings.contains(
+        XCTAssertFalse(settings.contains(
             "chekinana.settings.algorithm.cheki-scan.notice.dismiss"
         ))
 

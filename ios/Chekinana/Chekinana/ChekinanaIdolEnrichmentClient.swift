@@ -73,7 +73,10 @@ struct ChekinanaEnrichedIdol: Decodable, Equatable, Sendable {
             )
         }
         sourceId = normalizedSourceId
-        idolName = try container.decode(String.self, forKey: .idolName)
+        let rawIdolName = try container.decode(String.self, forKey: .idolName)
+        idolName = String(String.UnicodeScalarView(
+            rawIdolName.unicodeScalars.filter { !$0.properties.isWhitespace }
+        ))
         groupName = try container.decodeIfPresent(String.self, forKey: .groupName)
         color = try container.decodeIfPresent(String.self, forKey: .color)
         let birthdayState = Self.normalizedBirthday(
@@ -259,6 +262,81 @@ struct ChekinanaIdolEnrichmentClient {
         }
 
         return searchResponse.items
+    }
+
+    struct CreationSearchResult: Sendable {
+        let items: [ChekinanaEnrichedIdol]
+        let usedGroupSearch: Bool
+    }
+
+    static func searchForCreation(
+        query: String,
+        searchName: @Sendable (String) async throws -> [ChekinanaEnrichedIdol],
+        searchGroup: @Sendable (String) async throws -> [ChekinanaEnrichedIdol]
+    ) async throws -> CreationSearchResult {
+        try Task.checkCancellation()
+        let names: [ChekinanaEnrichedIdol]
+        do {
+            names = try await searchName(query)
+        } catch ChekinanaIdolEnrichmentError.notFound {
+            names = []
+        }
+        try Task.checkCancellation()
+        if !names.isEmpty { return CreationSearchResult(items: names, usedGroupSearch: false) }
+        let members = try await searchGroup(query)
+        try Task.checkCancellation()
+        return CreationSearchResult(items: members, usedGroupSearch: true)
+    }
+
+    func searchForCreation(query: String) async throws -> CreationSearchResult {
+        try await Self.searchForCreation(
+            query: query,
+            searchName: { try await search(for: $0) },
+            searchGroup: { try await searchGroup(for: $0) }
+        )
+    }
+
+    static func groupRequest(for query: String) throws -> URLRequest {
+        var components = URLComponents(string: "https://idol.chekinana.top/api/search/group")
+        components?.queryItems = [
+            URLQueryItem(name: "groupName", value: query.trimmingCharacters(in: .whitespacesAndNewlines)),
+            URLQueryItem(name: "limit", value: "200"),
+        ]
+        guard let url = components?.url else { throw ChekinanaIdolEnrichmentError.invalidEndpoint }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = requestTimeout
+        return request
+    }
+
+    func searchGroup(for query: String) async throws -> [ChekinanaEnrichedIdol] {
+        let request = try Self.groupRequest(for: query)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await Self.session.data(for: request)
+        } catch {
+            try Task.checkCancellation()
+            throw ChekinanaIdolEnrichmentError.network(error.localizedDescription)
+        }
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse else { throw ChekinanaIdolEnrichmentError.invalidResponse }
+        guard (200...299).contains(http.statusCode) else { throw ChekinanaIdolEnrichmentError.httpStatus(http.statusCode) }
+        return try Self.decodeGroupMembers(data)
+    }
+
+    static func decodeGroupMembers(_ data: Data) throws -> [ChekinanaEnrichedIdol] {
+        struct GroupResponse: Decodable {
+            struct Group: Decodable { let count: Int; let idols: [ChekinanaEnrichedIdol] }
+            let count: Int
+            let groups: [Group]
+        }
+        guard let response = try? JSONDecoder().decode(GroupResponse.self, from: data),
+              response.count == response.groups.count,
+              response.groups.allSatisfy({ $0.count == $0.idols.count }) else {
+            throw ChekinanaIdolEnrichmentError.invalidResponse
+        }
+        // The server limits the number of groups, not members within a group.
+        return response.groups.flatMap(\.idols)
     }
 
     private struct SearchResponse: Decodable {

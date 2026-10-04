@@ -570,7 +570,7 @@ private struct SafeZIP {
         for _ in 0..<n { guard p+46<=data.count,u32(p)==0x02014b50 else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_entry", fallback: "Invalid ZIP entry.")) }; let flags=u16(p+8), method=u16(p+10), cs=u32(p+20), us=u32(p+24), nl=u16(p+28), xl=u16(p+30), cl=u16(p+32), ext=u32(p+38), off=u32(p+42); guard flags & 1 == 0, flags & 8 == 0, (method==0 || method==8), cs != 0xffff_ffff, us != 0xffff_ffff, off != 0xffff_ffff, p+46+nl+xl+cl<=data.count else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_unsafe", fallback: "Unsafe ZIP entry.")) }; let name=String(data:data.subdata(in:p+46..<p+46+nl),encoding:.utf8) ?? ""; let unixFileType=(ext >> 16) & 0xF000; guard !name.isEmpty,!name.hasPrefix("/"),!name.contains("\\"),!name.contains("\0"),!name.split(separator:"/").contains(".."),(unixFileType == 0 || unixFileType == 0x8000) else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_path", fallback: "Unsafe ZIP path.")) }; guard out[name] == nil else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_duplicate", fallback: "Duplicate ZIP entry.")) }; total += us; guard total<=64*1_024*1_024, us<=16*1_024*1_024, cs==0 || us/cs<=100 else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_expansion", fallback: "ZIP expansion limit exceeded.")) }; out[name]=Entry(name:name,method:method,compressed:cs,uncompressed:us,crc:UInt32(truncatingIfNeeded:u32(p+16)),offset:off); p += 46+nl+xl+cl }
         guard p==p0+size, out["my.db"] != nil, out["version.json"] != nil else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.entries", fallback: "Required backup entries are missing.")) }; entries=out
     }
-    func data(named name:String) throws -> Data { guard let e=entries[name] else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.entry", fallback: "Required backup entry missing.")) }; func u16(_ i:Int)->Int { Int(data[i])|Int(data[i+1])<<8 }; func u32(_ i:Int)->Int { u16(i)|u16(i+2)<<16 }; guard e.offset+30<=data.count,u32(e.offset)==0x04034b50,u16(e.offset+8)==e.method else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_header", fallback: "Invalid ZIP local header.")) }; let nl=u16(e.offset+26),xl=u16(e.offset+28), s=e.offset+30+nl+xl; guard s<=data.count-e.compressed, String(data:data.subdata(in:e.offset+30..<e.offset+30+nl),encoding:.utf8)==name else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_mismatch", fallback: "ZIP entry mismatch.")) }; let input=data.subdata(in:s..<s+e.compressed); let output:Data; if e.method==0 { output=input } else { output=try inflate(input, expected:e.uncompressed) }; guard output.count==e.uncompressed, crc32(0, [UInt8](output), uInt(output.count))==e.crc else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_integrity", fallback: "ZIP integrity check failed.")) }; return output }
+    func data(named name:String) throws -> Data { guard let e=entries[name] else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.entry", fallback: "Required backup entry missing.")) }; func u16(_ i:Int)->Int { Int(data[i])|Int(data[i+1])<<8 }; func u32(_ i:Int)->Int { u16(i)|u16(i+2)<<16 }; guard e.offset+30<=data.count,u32(e.offset)==0x04034b50,u16(e.offset+8)==e.method else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_header", fallback: "Invalid ZIP local header.")) }; let nl=u16(e.offset+26),xl=u16(e.offset+28), s=e.offset+30+nl+xl; guard s<=data.count-e.compressed, String(data:data.subdata(in:e.offset+30..<e.offset+30+nl),encoding:.utf8)==name else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_mismatch", fallback: "ZIP entry mismatch.")) }; let input=data.subdata(in:s..<s+e.compressed); let output:Data; if e.method==0 { output=input } else { output=try inflate(input, expected:e.uncompressed) }; guard output.count==e.uncompressed, output.withUnsafeBytes({ bytes in crc32(0, bytes.bindMemory(to: Bytef.self).baseAddress, uInt(bytes.count)) })==e.crc else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_integrity", fallback: "ZIP integrity check failed.")) }; return output }
     private func inflate(_ input:Data, expected:Int) throws -> Data { var z=z_stream(); var result=Data(count:expected); let code=input.withUnsafeBytes { i in result.withUnsafeMutableBytes { o -> Int32 in z.next_in=UnsafeMutablePointer(mutating:i.bindMemory(to:Bytef.self).baseAddress); z.avail_in=uInt(input.count); z.next_out=o.bindMemory(to:Bytef.self).baseAddress; z.avail_out=uInt(expected); guard inflateInit2_(&z,-MAX_WBITS,ZLIB_VERSION,Int32(MemoryLayout<z_stream>.size))==Z_OK else{return Z_STREAM_ERROR}; defer{inflateEnd(&z)}; return zlib.inflate(&z,Z_FINISH) } }; guard code==Z_STREAM_END, z.avail_out==0 else { throw ChekinanaChekiRokuImport.Error.invalid(ChekinanaL10n.text("import.error.zip_compressed", fallback: "Invalid compressed ZIP data.")) }; return result }
 }
 
@@ -578,12 +578,32 @@ private struct SafeZIP {
 /// the user. Neither partial-name matches nor an unverified group can create a
 /// catalogue identity during ChekiRoku import.
 enum ChekiRokuCatalogueMatching {
+    /// Matching only: preserve source names and the API's spaced search term.
+    static func matchingKey(_ value: String?) -> String {
+        let compatible = (value ?? "").precomposedStringWithCompatibilityMapping
+        let compact = String(String.UnicodeScalarView(
+            compatible.unicodeScalars.filter { !$0.properties.isWhitespace }
+        ))
+        return compact.folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
     struct Query: Hashable, Sendable {
         let name: String
         let group: String
+        let searchName: String
         init(name: String, group: String) {
-            self.name = ChekinanaChekiRokuImport.normalized(name)
-            self.group = ChekinanaChekiRokuImport.normalized(group)
+            self.name = ChekiRokuCatalogueMatching.matchingKey(name)
+            self.group = ChekiRokuCatalogueMatching.matchingKey(group)
+            self.searchName = ChekinanaChekiRokuImport.normalized(name)
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.name == rhs.name && lhs.group == rhs.group
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(name)
+            hasher.combine(group)
         }
     }
 
@@ -603,15 +623,16 @@ enum ChekiRokuCatalogueMatching {
 
     static func match(_ query: Query, candidates: [ChekinanaEnrichedIdol]) -> Outcome {
         guard !query.group.isEmpty else { return .fallback(.missingGroup) }
+        guard !query.name.isEmpty else { return .fallback(.notFound) }
         // The existing search contract returns at most 200 candidates. Its
         // count is not a documented total, so never infer uniqueness at the cap.
         guard candidates.count < 200 else { return .fallback(.incomplete) }
         let sameName = candidates.filter {
-            ChekinanaChekiRokuImport.normalized($0.idolName) == query.name
+            matchingKey($0.idolName) == query.name
         }
         guard !sameName.isEmpty else { return .fallback(.notFound) }
         let exact = sameName.filter {
-            ChekinanaChekiRokuImport.normalized($0.groupName) == query.group
+            matchingKey($0.groupName) == query.group
         }
         guard !exact.isEmpty else { return .fallback(.groupMismatch) }
         guard let candidate = exact.first,
@@ -642,13 +663,17 @@ enum ChekiRokuCatalogueMatching {
             ))
         }
         let byName = Dictionary(grouping: searchable, by: \.name)
+        let searchNames = Dictionary(
+            queries.map { ($0.name, $0.searchName) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let names = byName.keys.sorted()
         try await withThrowingTaskGroup(of: Response.self) { group in
             var next = 0
             func enqueue(_ name: String) {
                 group.addTask {
                     do {
-                        let candidates = try await search(name)
+                        let candidates = try await search(searchNames[name] ?? name)
                         try Task.checkCancellation()
                         return Response(name: name, candidates: candidates, failure: nil)
                     } catch {
